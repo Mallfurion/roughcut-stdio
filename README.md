@@ -9,6 +9,8 @@ Timeline Cutter is structured around one simple flow:
 
 That is the intended interaction model for this repository.
 
+If you are using LM Studio, run `npm run check:ai` before `process`.
+
 If you want Resolve import paths to match a specific footage location, set `TIMELINE_MEDIA_DIR` to that exact folder path before running `process`.
 
 ## Core Idea
@@ -17,6 +19,13 @@ If you want Resolve import paths to match a specific footage location, set `TIME
 - `process` scans `TIMELINE_MEDIA_DIR` when set, otherwise the repository `media/` path, matches proxies when available, analyzes footage, and writes a generated timeline
 - `view` starts the timeline selector web app against the latest generated timeline
 - `export` writes a DaVinci Resolve `FCPXML` file from that generated timeline
+
+The current analyzer has two layers:
+
+- deterministic timeline selection
+- optional Phase 1 AI segment understanding
+
+That means AI can already describe and label segments, but it does not yet replace final best-take selection.
 
 ## Repository Paths
 
@@ -86,6 +95,7 @@ Optional but recommended for real footage analysis:
 - `ffprobe`
 - `PySceneDetect`
 - `faster-whisper`
+- `LM Studio` for local multimodal analysis
 
 Optional for the analyzer API:
 
@@ -98,6 +108,7 @@ Notes:
 - when they are missing, the analyzer uses deterministic fallbacks
 - silent b-roll workflows remain testable even without speech tooling
 - clips without proxies are supported and processed as source-only media
+- LM Studio is optional; if it is not configured or unavailable, Phase 1 AI analysis falls back to deterministic structured output
 
 ## The Main Flow
 
@@ -122,6 +133,19 @@ After setup, the next command is:
 npm run process
 ```
 
+If you configured LM Studio, you can validate it first with:
+
+```bash
+npm run check:ai
+```
+
+That command:
+
+- loads `.env` and `.env.local`
+- inspects the configured AI provider
+- checks whether LM Studio is reachable
+- exits with a non-zero status if LM Studio was requested but is unavailable
+
 ### 2. Process
 
 Run:
@@ -138,6 +162,9 @@ What it does:
 - matches proxies to sources
 - keeps source-only clips when no matching proxy exists
 - generates candidate segments
+- builds evidence bundles for each segment
+- runs Phase 1 AI understanding when configured
+- falls back to deterministic structured analysis when no AI provider is available
 - scores silent and spoken footage
 - builds a timeline
 - writes the result to `generated/project.json`
@@ -147,6 +174,17 @@ Output files:
 - `generated/project.json`
 - `generated/process.log`
 - `generated/process-summary.txt`
+- `generated/analysis/` for extracted keyframes when `ffmpeg` is available and the AI provider requires them
+
+During processing, the CLI now reports:
+
+- media root being scanned
+- AI provider configuration
+- whether LM Studio is reachable
+- whether the run is using LM Studio or falling back to deterministic analysis
+- discovered video file count
+- matched source asset count
+- a per-asset progress bar with elapsed time and estimated time remaining
 
 You can customize the processing prompt with environment variables:
 
@@ -155,6 +193,48 @@ TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage \
 TIMELINE_PROJECT_NAME="Weekend Edit" \
 TIMELINE_STORY_PROMPT="Build a cinematic sequence with a strong opener and a calm outro." \
 npm run process
+```
+
+### Optional AI Configuration
+
+The analyzer can call a local model through LM Studio during `process`.
+
+Add this to `.env.local`:
+
+```bash
+TIMELINE_AI_PROVIDER=lmstudio
+TIMELINE_AI_MODEL=qwen3.5-9b
+TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
+TIMELINE_AI_TIMEOUT_SEC=45
+```
+
+Recommended local model:
+
+- `qwen3.5-9b`
+
+Expected LM Studio setup:
+
+1. download and load the model in LM Studio
+2. enable the local OpenAI-compatible server
+3. keep it available at `http://127.0.0.1:1234/v1`
+
+If LM Studio is not reachable, `process` still succeeds and falls back to deterministic structured analysis.
+
+You can check connectivity without running a full analysis:
+
+```bash
+npm run check:ai
+```
+
+Example successful output:
+
+```text
+configured_provider: lmstudio
+effective_provider: lmstudio
+model: qwen3.5-9b
+base_url: http://127.0.0.1:1234/v1
+available: yes
+detail: LM Studio is reachable at http://127.0.0.1:1234/v1; model 'qwen3.5-9b' will be used.
 ```
 
 After processing, the next command is:
@@ -176,6 +256,7 @@ What it does:
 - starts the Next.js timeline selector app
 - loads `generated/project.json` if it exists
 - falls back to `fixtures/sample-project.json` if nothing has been processed yet
+- shows Phase 1 AI fields such as provider, keep label, confidence, roles, rationale, and evidence coverage when present
 
 Open:
 
@@ -226,6 +307,32 @@ npm run export
 ```
 
 This works immediately because `setup` points `media/` at the synthetic demo footage unless you already provided your own `media` path.
+
+To test the AI layer with fixture media:
+
+```bash
+TIMELINE_MEDIA_DIR=fixtures/sample-media \
+TIMELINE_AI_PROVIDER=lmstudio \
+TIMELINE_AI_MODEL=qwen3.5-9b \
+TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1 \
+npm run process
+
+npm run view
+```
+
+Then inspect:
+
+- [http://localhost:3000](http://localhost:3000)
+- [generated/project.json](/Users/florin/Projects/personal/timeline-cutter/generated/project.json)
+
+In `generated/project.json`, each `candidate_segment` should contain:
+
+- `evidence_bundle`
+- `ai_understanding`
+
+If LM Studio is active, `ai_understanding.provider` should be `lmstudio`.
+
+If not, it will usually be `deterministic`.
 
 ## Using Your Own Footage
 
@@ -301,6 +408,8 @@ If installed locally:
 - `ffprobe` for media metadata
 - `PySceneDetect` for scene boundaries
 - `faster-whisper` for transcript excerpts
+- `ffmpeg` for keyframe extraction
+- `LM Studio` for local multimodal segment understanding
 
 If not installed:
 
@@ -313,6 +422,25 @@ That means:
 - spoken clips work better with the optional tools installed
 - silent b-roll still works without them
 - source-only clips still participate in the timeline when no proxy is available
+- AI segment descriptions and labels are available now
+- final take selection is still deterministic until the next phase
+
+## Phase 1 AI Output
+
+Phase 1 adds structured per-segment analysis but does not yet change the final take-selection logic.
+
+Each segment can now include:
+
+- evidence bundle
+- AI summary
+- provider name
+- keep / maybe / reject label
+- confidence
+- proposed story roles
+- rationale
+- risk flags
+
+This is meant to let you inspect and trust the AI layer before it starts deciding selections automatically.
 
 ## Optional Manual Commands
 

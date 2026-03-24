@@ -54,5 +54,6 @@ def scan_project_root(
         project_name=name,
         media_roots=[str(root_path.resolve())],
         story_prompt=story_prompt,
+        artifacts_root=ROOT / "generated" / "analysis",
     )
     return JSONResponse(project.to_dict())

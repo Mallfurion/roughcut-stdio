@@ -3,10 +3,12 @@ from __future__ import annotations
 from hashlib import md5
 import importlib
 import importlib.util
+from pathlib import Path
 import re
 import shutil
-from typing import Protocol
+from typing import Callable, Protocol
 
+from .ai import VisionLanguageAnalyzer, build_segment_evidence, default_vision_language_analyzer
 from .domain import Asset, CandidateSegment, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .scoring import score_segment
@@ -20,6 +22,10 @@ class SceneDetector(Protocol):
 class TranscriptProvider(Protocol):
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         ...
+
+
+StatusCallback = Callable[[str], None]
+ProgressCallback = Callable[[int, int, Asset], None]
 
 
 class NoOpTranscriptProvider:
@@ -98,10 +104,18 @@ def build_project_from_media_roots(
     probe_runner: FFprobeRunner | None = None,
     scene_detector: SceneDetector | None = None,
     transcript_provider: TranscriptProvider | None = None,
+    segment_analyzer: VisionLanguageAnalyzer | None = None,
+    artifacts_root: str | Path | None = None,
+    status_callback: StatusCallback | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
     discovered = discover_media_files(media_roots, probe_runner=probe_runner)
+    if status_callback is not None:
+        status_callback(f"Discovered {len(discovered)} video files.")
     matches = match_media_files(discovered)
     assets = build_assets_from_matches(matches)
+    if status_callback is not None:
+        status_callback(f"Matched {len(assets)} source assets to process.")
     project_id = slugify(project_name)
     return analyze_assets(
         project=ProjectMeta(
@@ -114,6 +128,9 @@ def build_project_from_media_roots(
         assets=assets,
         scene_detector=scene_detector,
         transcript_provider=transcript_provider,
+        segment_analyzer=segment_analyzer,
+        artifacts_root=artifacts_root,
+        progress_callback=progress_callback,
     )
 
 
@@ -123,21 +140,27 @@ def analyze_assets(
     assets: list[Asset],
     scene_detector: SceneDetector | None = None,
     transcript_provider: TranscriptProvider | None = None,
+    segment_analyzer: VisionLanguageAnalyzer | None = None,
+    artifacts_root: str | Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
     detector = scene_detector or PySceneDetectAdapter()
     transcriber = transcript_provider or NoOpTranscriptProvider()
+    analyzer = segment_analyzer or default_vision_language_analyzer()
     candidate_segments: list[CandidateSegment] = []
 
-    for asset in assets:
+    total_assets = len(assets)
+    for asset_index, asset in enumerate(assets, start=1):
         segment_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
         if not segment_ranges:
             segment_ranges = fallback_segments(asset.duration_sec)
 
+        asset_segments: list[CandidateSegment] = []
         for index, (start_sec, end_sec) in enumerate(segment_ranges, start=1):
             excerpt = transcriber.excerpt(asset, start_sec, end_sec).strip() if asset.has_speech else ""
             analysis_mode = "speech" if excerpt else "visual"
             metrics = synthesize_quality_metrics(asset, start_sec, end_sec, analysis_mode)
-            candidate_segments.append(
+            asset_segments.append(
                 CandidateSegment(
                     id=f"{asset.id}-segment-{index:02d}",
                     asset_id=asset.id,
@@ -149,6 +172,26 @@ def analyze_assets(
                     quality_metrics=metrics,
                 )
             )
+        for index, segment in enumerate(asset_segments):
+            evidence = build_segment_evidence(
+                asset=asset,
+                segment=segment,
+                asset_segments=asset_segments,
+                segment_index=index,
+                story_prompt=project.story_prompt,
+                artifacts_root=artifacts_root,
+                extract_keyframes=analyzer.requires_keyframes,
+            )
+            segment.evidence_bundle = evidence
+            segment.ai_understanding = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=project.story_prompt,
+            )
+        candidate_segments.extend(asset_segments)
+        if progress_callback is not None:
+            progress_callback(asset_index, total_assets, asset)
 
     take_recommendations = build_take_recommendations(assets, candidate_segments)
     timeline = build_timeline(take_recommendations, candidate_segments, assets)

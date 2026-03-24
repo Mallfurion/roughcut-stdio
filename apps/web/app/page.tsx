@@ -9,6 +9,10 @@ export default async function Page() {
   const loaded = await loadActiveProject();
   const project = loaded.project;
   const takeViews = resolveTakeViews(project);
+  const aiAnalyzedCount = project.candidate_segments.filter((segment) => segment.ai_understanding).length;
+  const keyframedCount = project.candidate_segments.filter(
+    (segment) => (segment.evidence_bundle?.keyframe_paths.length ?? 0) > 0
+  ).length;
   const silentCount = project.assets.filter((asset) => !asset.has_speech).length;
   const dialogueCount = project.assets.length - silentCount;
   const sourceOnlyCount = project.assets.filter((asset) => asset.has_proxy === false).length;
@@ -45,6 +49,8 @@ export default async function Page() {
         <div className="panel hero-metrics">
             <MetricCard label="Project" value={project.project.name} />
             <MetricCard label="Best takes" value={String(takeViews.length)} />
+            <MetricCard label="AI analyzed" value={String(aiAnalyzedCount)} />
+            <MetricCard label="Keyframed" value={String(keyframedCount)} />
             <MetricCard label="Silent clips" value={String(silentCount)} />
             <MetricCard label="Dialogue clips" value={String(dialogueCount)} />
             <MetricCard label="Proxy-backed" value={String(proxyBackedCount)} />
@@ -60,8 +66,9 @@ export default async function Page() {
             <h2>Recommended Takes</h2>
           </div>
           <p>
-            These cards come from the shared project fixture. Silent footage uses visual scoring and
-            image-derived descriptions, while dialogue footage can use transcript evidence.
+            These cards show the current recommendation layer and the new Phase 1 AI-understanding
+            output. Segment selection is still deterministic, but each segment can now carry
+            structured evidence and provider-backed editorial analysis.
           </p>
         </div>
         <div className="take-grid">
@@ -76,15 +83,48 @@ export default async function Page() {
                 <h3>{take.title}</h3>
                 <p>{segment.description}</p>
               </div>
+              {segment.ai_understanding ? (
+                <div className="ai-panel">
+                  <div className="take-meta">
+                    <span className="badge subtle">{segment.ai_understanding.keep_label}</span>
+                    <span className="score-chip">
+                      {segment.ai_understanding.provider} · {Math.round(segment.ai_understanding.confidence * 100)}%
+                    </span>
+                  </div>
+                  <p>{segment.ai_understanding.summary}</p>
+                  <div className="take-facts">
+                    <span>roles: {segment.ai_understanding.story_roles.join(", ")}</span>
+                    <span>shot: {segment.ai_understanding.shot_type}</span>
+                    <span>motion: {segment.ai_understanding.camera_motion}</span>
+                    <span>mood: {segment.ai_understanding.mood}</span>
+                  </div>
+                  <p>{segment.ai_understanding.rationale}</p>
+                </div>
+              ) : null}
               <div className="take-facts">
                 <span>{asset.name}</span>
                 <span>{formatDuration(segment.start_sec, segment.end_sec)}</span>
                 <span>{asset.interchange_reel_name}</span>
                 <span>{asset.has_proxy === false ? "source-only" : "proxy-backed"}</span>
               </div>
+              {segment.evidence_bundle ? (
+                <div className="take-facts">
+                  <span>
+                    keyframes {segment.evidence_bundle.keyframe_paths.length}/
+                    {segment.evidence_bundle.keyframe_timestamps_sec.length}
+                  </span>
+                  <span>
+                    context {segment.evidence_bundle.context_window_start_sec.toFixed(2)}s to{" "}
+                    {segment.evidence_bundle.context_window_end_sec.toFixed(2)}s
+                  </span>
+                </div>
+              ) : null}
               <p>{take.selection_reason}</p>
               {asset.proxy_match_reason ? <p>{asset.proxy_match_reason}</p> : null}
               {segment.transcript_excerpt ? <p>“{segment.transcript_excerpt}”</p> : null}
+              {segment.ai_understanding?.risk_flags.length ? (
+                <p>Risk flags: {segment.ai_understanding.risk_flags.join(", ")}</p>
+              ) : null}
             </article>
           ))}
         </div>
@@ -127,6 +167,9 @@ export default async function Page() {
                       Segment trim {item.trim_in_sec.toFixed(2)}s to {item.trim_out_sec.toFixed(2)}s
                     </span>
                     <span>{take.asset.source_path}</span>
+                    {take.segment.ai_understanding ? (
+                      <span>roles: {take.segment.ai_understanding.story_roles.join(", ")}</span>
+                    ) : null}
                   </div>
                   <div className="timeline-bar">
                     <span style={{ width: `${width}%` }} />

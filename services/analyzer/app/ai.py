@@ -1,0 +1,648 @@
+from __future__ import annotations
+
+from base64 import b64encode
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+from typing import Protocol
+from urllib import error, request
+
+from .domain import Asset, CandidateSegment, SegmentEvidence, SegmentUnderstanding
+
+
+SCHEMA_VERSION = "segment-understanding-v1"
+
+
+class ProviderClient(Protocol):
+    def create_json_completion(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_paths: list[str],
+        timeout_sec: float,
+    ) -> dict[str, object]:
+        ...
+
+
+class VisionLanguageAnalyzer(Protocol):
+    requires_keyframes: bool
+
+    def analyze(
+        self,
+        *,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        story_prompt: str,
+    ) -> SegmentUnderstanding:
+        ...
+
+
+class RankingPlanner(Protocol):
+    def plan(self, payload: dict[str, object]) -> dict[str, object]:
+        ...
+
+
+@dataclass(slots=True)
+class AIProviderConfig:
+    provider: str
+    model: str
+    base_url: str
+    timeout_sec: float
+
+
+@dataclass(slots=True)
+class AIProviderStatus:
+    configured_provider: str
+    effective_provider: str
+    model: str
+    base_url: str
+    available: bool
+    detail: str
+
+
+class OpenAICompatibleProviderClient:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url.rstrip("/")
+
+    def create_json_completion(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_paths: list[str],
+        timeout_sec: float,
+    ) -> dict[str, object]:
+        content: list[dict[str, str]] = [{"type": "text", "text": user_prompt}]
+        for image_path in image_paths:
+            data_url = encode_image_as_data_url(image_path)
+            if data_url is None:
+                continue
+            content.append({"type": "image_url", "image_url": data_url})
+
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+        }
+        req = request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=timeout_sec) as response:
+            raw = response.read().decode("utf-8")
+
+        completion = json.loads(raw)
+        choices = completion.get("choices", [])
+        if not choices:
+            raise ValueError("Provider returned no completion choices.")
+
+        message = choices[0].get("message", {})
+        content_value = message.get("content", "")
+        if isinstance(content_value, list):
+            text_parts = [part.get("text", "") for part in content_value if isinstance(part, dict)]
+            content_text = "\n".join(part for part in text_parts if part)
+        else:
+            content_text = str(content_value)
+
+        parsed = parse_json_object(content_text)
+        if parsed is None:
+            raise ValueError("Provider response did not contain valid JSON.")
+        return parsed
+
+
+class DeterministicVisionLanguageAnalyzer:
+    requires_keyframes = False
+
+    def analyze(
+        self,
+        *,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        story_prompt: str,
+    ) -> SegmentUnderstanding:
+        metrics = evidence.metrics_snapshot
+        distinctiveness = rounded_metric(metrics.get("visual_novelty", 0.0))
+        clarity = rounded_metric(metrics.get("subject_clarity", 0.0))
+        story_relevance = rounded_metric(metrics.get("story_alignment", 0.0))
+        confidence = rounded_metric((distinctiveness + clarity + story_relevance) / 3)
+
+        if confidence >= 0.75:
+            keep_label = "keep"
+        elif confidence >= 0.58:
+            keep_label = "maybe"
+        else:
+            keep_label = "reject"
+
+        return SegmentUnderstanding(
+            provider="deterministic",
+            provider_model="fallback-v1",
+            schema_version=SCHEMA_VERSION,
+            summary=segment.description,
+            subjects=subject_tokens(asset),
+            actions=action_tokens(segment, metrics),
+            shot_type=infer_shot_type(metrics),
+            camera_motion=infer_camera_motion(metrics),
+            mood=infer_mood(metrics, segment.analysis_mode),
+            story_roles=infer_story_roles(segment, metrics),
+            quality_findings=infer_quality_findings(metrics),
+            keep_label=keep_label,
+            confidence=confidence,
+            rationale=(
+                f"Fallback analysis favors {segment.analysis_mode} coverage with clarity {clarity:.2f}, "
+                f"distinctiveness {distinctiveness:.2f}, and story relevance {story_relevance:.2f}."
+            ),
+            risk_flags=infer_risk_flags(metrics),
+            visual_distinctiveness=distinctiveness,
+            clarity=clarity,
+            story_relevance=story_relevance,
+        )
+
+
+class LMStudioVisionLanguageAnalyzer:
+    requires_keyframes = True
+
+    def __init__(
+        self,
+        *,
+        config: AIProviderConfig,
+        client: ProviderClient,
+        fallback: VisionLanguageAnalyzer | None = None,
+    ) -> None:
+        self.config = config
+        self.client = client
+        self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
+
+    def analyze(
+        self,
+        *,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        story_prompt: str,
+    ) -> SegmentUnderstanding:
+        try:
+            payload = self.client.create_json_completion(
+                model=self.config.model,
+                system_prompt=segment_understanding_system_prompt(),
+                user_prompt=segment_understanding_user_prompt(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=story_prompt,
+                ),
+                image_paths=evidence.keyframe_paths,
+                timeout_sec=self.config.timeout_sec,
+            )
+            return normalize_model_output(
+                payload,
+                provider="lmstudio",
+                model=self.config.model,
+                fallback=self.fallback,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+        except (OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError):
+            fallback = self.fallback.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            fallback.provider = "deterministic"
+            fallback.provider_model = "fallback-v1"
+            fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_unavailable"]))
+            return fallback
+
+
+def default_vision_language_analyzer() -> VisionLanguageAnalyzer:
+    config = load_ai_provider_config()
+    status = inspect_ai_provider_status(config=config)
+    if status.effective_provider == "lmstudio" and config.model:
+        return LMStudioVisionLanguageAnalyzer(
+            config=config,
+            client=OpenAICompatibleProviderClient(config.base_url),
+        )
+    return DeterministicVisionLanguageAnalyzer()
+
+
+def load_ai_provider_config() -> AIProviderConfig:
+    timeout_raw = os.environ.get("TIMELINE_AI_TIMEOUT_SEC", "30")
+    try:
+        timeout_sec = max(5.0, float(timeout_raw))
+    except ValueError:
+        timeout_sec = 30.0
+
+    return AIProviderConfig(
+        provider=os.environ.get("TIMELINE_AI_PROVIDER", "deterministic").strip().lower(),
+        model=os.environ.get("TIMELINE_AI_MODEL", "").strip(),
+        base_url=os.environ.get("TIMELINE_AI_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
+        timeout_sec=timeout_sec,
+    )
+
+
+def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProviderStatus:
+    effective_config = config or load_ai_provider_config()
+
+    if effective_config.provider != "lmstudio":
+        return AIProviderStatus(
+            configured_provider=effective_config.provider,
+            effective_provider="deterministic",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            available=True,
+            detail="Deterministic structured analysis is active.",
+        )
+
+    if not effective_config.model:
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="deterministic",
+            model="",
+            base_url=effective_config.base_url,
+            available=False,
+            detail="LM Studio was requested but TIMELINE_AI_MODEL is empty. Falling back to deterministic analysis.",
+        )
+
+    models_url = f"{effective_config.base_url.rstrip('/')}/models"
+    try:
+        req = request.Request(models_url, method="GET")
+        with request.urlopen(req, timeout=min(effective_config.timeout_sec, 3.0)) as response:
+            raw = response.read().decode("utf-8")
+        payload = json.loads(raw)
+        advertised = []
+        for item in payload.get("data", []):
+            if isinstance(item, dict):
+                identifier = str(item.get("id", "")).strip()
+                if identifier:
+                    advertised.append(identifier)
+
+        if advertised and not any(model_matches(effective_config.model, identifier) for identifier in advertised):
+            return AIProviderStatus(
+                configured_provider="lmstudio",
+                effective_provider="deterministic",
+                model=effective_config.model,
+                base_url=effective_config.base_url,
+                available=False,
+                detail=(
+                    f"LM Studio is reachable at {effective_config.base_url}, but model "
+                    f"'{effective_config.model}' was not listed. Falling back to deterministic analysis."
+                ),
+            )
+
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="lmstudio",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            available=True,
+            detail=f"LM Studio is reachable at {effective_config.base_url}; model '{effective_config.model}' will be used.",
+        )
+    except (OSError, error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="deterministic",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            available=False,
+            detail=(
+                f"LM Studio is not reachable at {effective_config.base_url}. "
+                "Falling back to deterministic analysis."
+            ),
+        )
+
+
+def build_segment_evidence(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    asset_segments: list[CandidateSegment],
+    segment_index: int,
+    story_prompt: str,
+    artifacts_root: str | Path | None,
+    extract_keyframes: bool,
+) -> SegmentEvidence:
+    keyframe_timestamps = keyframe_timestamps_for_segment(segment.start_sec, segment.end_sec)
+    keyframe_paths: list[str] = []
+
+    if extract_keyframes and artifacts_root is not None:
+        keyframe_paths = extract_segment_keyframes(
+            asset=asset,
+            segment=segment,
+            timestamps=keyframe_timestamps,
+            artifacts_root=artifacts_root,
+        )
+
+    context_window_start_sec = segment.start_sec
+    context_window_end_sec = segment.end_sec
+    if segment_index > 0:
+        context_window_start_sec = asset_segments[segment_index - 1].start_sec
+    if segment_index < len(asset_segments) - 1:
+        context_window_end_sec = asset_segments[segment_index + 1].end_sec
+
+    return SegmentEvidence(
+        media_path=asset.proxy_path,
+        transcript_excerpt=segment.transcript_excerpt,
+        story_prompt=story_prompt,
+        analysis_mode=segment.analysis_mode,
+        keyframe_timestamps_sec=[round(timestamp, 3) for timestamp in keyframe_timestamps],
+        keyframe_paths=keyframe_paths,
+        context_window_start_sec=round(context_window_start_sec, 3),
+        context_window_end_sec=round(context_window_end_sec, 3),
+        metrics_snapshot=dict(segment.quality_metrics),
+    )
+
+
+def keyframe_timestamps_for_segment(start_sec: float, end_sec: float) -> list[float]:
+    duration = max(0.01, end_sec - start_sec)
+    count = 3 if duration <= 8.0 else 4
+    step = duration / (count + 1)
+    return [start_sec + (step * index) for index in range(1, count + 1)]
+
+
+def extract_segment_keyframes(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    timestamps: list[float],
+    artifacts_root: str | Path,
+) -> list[str]:
+    if shutil.which("ffmpeg") is None:
+        return []
+
+    segment_dir = Path(artifacts_root) / "keyframes" / asset.id
+    segment_dir.mkdir(parents=True, exist_ok=True)
+
+    extracted: list[str] = []
+    for index, timestamp in enumerate(timestamps, start=1):
+        target = segment_dir / f"{segment.id}-k{index:02d}.jpg"
+        process = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                asset.proxy_path,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "4",
+                str(target),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if process.returncode == 0 and target.exists():
+            extracted.append(str(target))
+
+    return extracted
+
+
+def segment_understanding_system_prompt() -> str:
+    return (
+        "You analyze short video segments for an editor. "
+        "Return JSON only. Do not add markdown. "
+        "Use concise editorial language. "
+        "Keys required: summary, subjects, actions, shot_type, camera_motion, mood, "
+        "story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
+        "visual_distinctiveness, clarity, story_relevance."
+    )
+
+
+def segment_understanding_user_prompt(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> str:
+    metrics = ", ".join(
+        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
+    )
+    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    keyframes = ", ".join(f"{timestamp:.2f}s" for timestamp in evidence.keyframe_timestamps_sec)
+
+    return (
+        "Project story prompt:\n"
+        f"{story_prompt}\n\n"
+        "Segment metadata:\n"
+        f"- Asset: {asset.name}\n"
+        f"- Reel: {asset.interchange_reel_name}\n"
+        f"- Analysis mode: {segment.analysis_mode}\n"
+        f"- Segment: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
+        f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
+        f"- Keyframe timestamps: {keyframes}\n"
+        f"- Metrics: {metrics}\n"
+        f"- Transcript: {transcript}\n\n"
+        "Decide what is happening in the segment, whether it is editorially useful, "
+        "what role it could play in a rough cut, and whether it should be kept."
+    )
+
+
+def normalize_model_output(
+    payload: dict[str, object],
+    *,
+    provider: str,
+    model: str,
+    fallback: VisionLanguageAnalyzer,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> SegmentUnderstanding:
+    fallback_understanding = fallback.analyze(
+        asset=asset,
+        segment=segment,
+        evidence=evidence,
+        story_prompt=story_prompt,
+    )
+
+    return SegmentUnderstanding(
+        provider=provider,
+        provider_model=model,
+        schema_version=str(payload.get("schema_version", SCHEMA_VERSION)),
+        summary=string_or_default(payload.get("summary"), fallback_understanding.summary),
+        subjects=list_or_default(payload.get("subjects"), fallback_understanding.subjects),
+        actions=list_or_default(payload.get("actions"), fallback_understanding.actions),
+        shot_type=string_or_default(payload.get("shot_type"), fallback_understanding.shot_type),
+        camera_motion=string_or_default(payload.get("camera_motion"), fallback_understanding.camera_motion),
+        mood=string_or_default(payload.get("mood"), fallback_understanding.mood),
+        story_roles=list_or_default(payload.get("story_roles"), fallback_understanding.story_roles),
+        quality_findings=list_or_default(
+            payload.get("quality_findings"),
+            fallback_understanding.quality_findings,
+        ),
+        keep_label=string_or_default(payload.get("keep_label"), fallback_understanding.keep_label),
+        confidence=rounded_metric(number_or_default(payload.get("confidence"), fallback_understanding.confidence)),
+        rationale=string_or_default(payload.get("rationale"), fallback_understanding.rationale),
+        risk_flags=list_or_default(payload.get("risk_flags"), fallback_understanding.risk_flags),
+        visual_distinctiveness=rounded_metric(
+            number_or_default(payload.get("visual_distinctiveness"), fallback_understanding.visual_distinctiveness)
+        ),
+        clarity=rounded_metric(number_or_default(payload.get("clarity"), fallback_understanding.clarity)),
+        story_relevance=rounded_metric(
+            number_or_default(payload.get("story_relevance"), fallback_understanding.story_relevance)
+        ),
+    )
+
+
+def infer_story_roles(segment: CandidateSegment, metrics: dict[str, float]) -> list[str]:
+    roles: list[str] = []
+    if segment.start_sec <= 0.5:
+        roles.append("opener")
+    if metrics.get("story_alignment", 0.0) >= 0.72:
+        roles.append("bridge")
+    if metrics.get("visual_novelty", 0.0) >= 0.78:
+        roles.append("payoff")
+    if not roles:
+        roles.append("detail" if metrics.get("subject_clarity", 0.0) >= 0.78 else "bridge")
+    return roles
+
+
+def infer_quality_findings(metrics: dict[str, float]) -> list[str]:
+    findings: list[str] = []
+    if metrics.get("subject_clarity", 0.0) >= 0.8:
+        findings.append("clear framing")
+    if metrics.get("motion_energy", 0.0) >= 0.72:
+        findings.append("usable motion")
+    if metrics.get("duration_fit", 0.0) >= 0.75:
+        findings.append("rough-cut friendly duration")
+    if not findings:
+        findings.append("usable coverage")
+    return findings
+
+
+def infer_risk_flags(metrics: dict[str, float]) -> list[str]:
+    risks: list[str] = []
+    if metrics.get("motion_energy", 0.0) < 0.38:
+        risks.append("low_motion")
+    if metrics.get("subject_clarity", 0.0) < 0.6:
+        risks.append("low_clarity")
+    if metrics.get("story_alignment", 0.0) < 0.58:
+        risks.append("weak_story_fit")
+    return risks
+
+
+def infer_shot_type(metrics: dict[str, float]) -> str:
+    if metrics.get("visual_novelty", 0.0) >= 0.8 and metrics.get("motion_energy", 0.0) >= 0.7:
+        return "wide"
+    if metrics.get("subject_clarity", 0.0) >= 0.8:
+        return "detail"
+    if metrics.get("motion_energy", 0.0) < 0.45:
+        return "static"
+    return "medium"
+
+
+def infer_camera_motion(metrics: dict[str, float]) -> str:
+    motion_energy = metrics.get("motion_energy", 0.0)
+    if motion_energy < 0.35:
+        return "static"
+    if motion_energy < 0.65:
+        return "gentle movement"
+    return "active movement"
+
+
+def infer_mood(metrics: dict[str, float], analysis_mode: str) -> str:
+    if analysis_mode == "speech":
+        return "informative" if metrics.get("story_alignment", 0.0) >= 0.7 else "conversational"
+    if metrics.get("motion_energy", 0.0) >= 0.72:
+        return "energetic"
+    if metrics.get("visual_novelty", 0.0) >= 0.76:
+        return "cinematic"
+    return "steady"
+
+
+def subject_tokens(asset: Asset) -> list[str]:
+    tokens = [token for token in re.split(r"[^A-Za-z0-9]+", asset.name.lower()) if token]
+    if not tokens:
+        return [asset.interchange_reel_name.lower()]
+    return tokens[:3]
+
+
+def action_tokens(segment: CandidateSegment, metrics: dict[str, float]) -> list[str]:
+    if segment.analysis_mode == "speech":
+        return ["speaking", "delivering a line"]
+    if metrics.get("motion_energy", 0.0) >= 0.7:
+        return ["camera move", "visual transition"]
+    return ["holding frame", "ambient coverage"]
+
+
+def encode_image_as_data_url(image_path: str) -> str | None:
+    path = Path(image_path)
+    if not path.exists():
+        return None
+
+    suffix = path.suffix.lower()
+    mime = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+    payload = b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{payload}"
+
+
+def parse_json_object(raw: str) -> dict[str, object] | None:
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else None
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return None
+        try:
+            loaded = json.loads(match.group(0))
+            return loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+
+def string_or_default(value: object, default: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return default
+
+
+def list_or_default(value: object, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        if items:
+            return items
+    return default
+
+
+def number_or_default(value: object, default: float) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def rounded_metric(value: float) -> float:
+    return round(max(0.0, min(1.0, float(value))), 4)
+
+
+def model_matches(requested_model: str, advertised_model: str) -> bool:
+    requested = requested_model.strip().lower()
+    advertised = advertised_model.strip().lower()
+    return requested == advertised or requested in advertised or advertised in requested

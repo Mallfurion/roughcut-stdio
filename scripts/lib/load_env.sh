@@ -1,15 +1,36 @@
 #!/usr/bin/env bash
 
-if [ -f "${ROOT_DIR}/.env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "${ROOT_DIR}/.env"
-  set +a
-fi
+load_env_file() {
+  local env_file="$1"
 
-if [ -f "${ROOT_DIR}/.env.local" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  . "${ROOT_DIR}/.env.local"
-  set +a
-fi
+  [ -f "$env_file" ] || return 0
+
+  while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    local line="$raw_line"
+    line="${line#"${line%%[![:space:]]*}"}"
+
+    if [ -z "$line" ] || [ "${line#\#}" != "$line" ]; then
+      continue
+    fi
+
+    if [[ "$line" != *=* ]]; then
+      continue
+    fi
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    if [ -n "${!key+x}" ]; then
+      continue
+    fi
+
+    export "${key}=${value}"
+  done < "$env_file"
+}
+
+load_env_file "${ROOT_DIR}/.env"
+load_env_file "${ROOT_DIR}/.env.local"

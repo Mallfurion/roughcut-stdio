@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
 from services.analyzer.app.analysis import analyze_assets, fallback_segments, inspect_runtime_capabilities
 from services.analyzer.app.domain import Asset, ProjectMeta
 
@@ -66,6 +67,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             assets=assets,
             scene_detector=StaticSceneDetector([(0.0, 5.0), (5.0, 10.0)]),
             transcript_provider=StaticTranscriptProvider(),
+            segment_analyzer=DeterministicVisionLanguageAnalyzer(),
         )
 
         silent_segments = [segment for segment in project.candidate_segments if segment.asset_id == "asset-1"]
@@ -74,6 +76,9 @@ class AnalysisPipelineTests(unittest.TestCase):
 
         self.assertTrue(all(segment.analysis_mode == "visual" for segment in silent_segments))
         self.assertTrue(any(segment.analysis_mode == "speech" for segment in speech_segments))
+        self.assertTrue(all(segment.evidence_bundle is not None for segment in project.candidate_segments))
+        self.assertTrue(all(segment.ai_understanding is not None for segment in project.candidate_segments))
+        self.assertTrue(all(segment.ai_understanding.provider for segment in project.candidate_segments if segment.ai_understanding))
         self.assertGreaterEqual(len(best_takes), 2)
         self.assertGreaterEqual(len(project.timeline.items), 2)
 
@@ -84,4 +89,3 @@ class AnalysisPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

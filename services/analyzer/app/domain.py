@@ -34,6 +34,41 @@ class Asset:
 
 
 @dataclass(slots=True)
+class SegmentEvidence:
+    media_path: str
+    transcript_excerpt: str
+    story_prompt: str
+    analysis_mode: str
+    keyframe_timestamps_sec: list[float]
+    keyframe_paths: list[str]
+    context_window_start_sec: float
+    context_window_end_sec: float
+    metrics_snapshot: dict[str, float]
+
+
+@dataclass(slots=True)
+class SegmentUnderstanding:
+    provider: str
+    provider_model: str
+    schema_version: str
+    summary: str
+    subjects: list[str]
+    actions: list[str]
+    shot_type: str
+    camera_motion: str
+    mood: str
+    story_roles: list[str]
+    quality_findings: list[str]
+    keep_label: str
+    confidence: float
+    rationale: str
+    risk_flags: list[str]
+    visual_distinctiveness: float
+    clarity: float
+    story_relevance: float
+
+
+@dataclass(slots=True)
 class CandidateSegment:
     id: str
     asset_id: str
@@ -43,6 +78,8 @@ class CandidateSegment:
     transcript_excerpt: str
     description: str
     quality_metrics: dict[str, float]
+    evidence_bundle: SegmentEvidence | None = None
+    ai_understanding: SegmentUnderstanding | None = None
 
 
 @dataclass(slots=True)
@@ -99,7 +136,29 @@ class ProjectData:
                 media_roots=project_payload.get("media_roots", []),
             ),
             assets=[Asset(**asset) for asset in payload["assets"]],
-            candidate_segments=[CandidateSegment(**segment) for segment in payload["candidate_segments"]],
+            candidate_segments=[
+                CandidateSegment(
+                    id=segment["id"],
+                    asset_id=segment["asset_id"],
+                    start_sec=segment["start_sec"],
+                    end_sec=segment["end_sec"],
+                    analysis_mode=segment["analysis_mode"],
+                    transcript_excerpt=segment.get("transcript_excerpt", ""),
+                    description=segment.get("description", ""),
+                    quality_metrics=segment.get("quality_metrics", {}),
+                    evidence_bundle=(
+                        SegmentEvidence(**segment["evidence_bundle"])
+                        if segment.get("evidence_bundle") is not None
+                        else None
+                    ),
+                    ai_understanding=(
+                        SegmentUnderstanding(**segment["ai_understanding"])
+                        if segment.get("ai_understanding") is not None
+                        else None
+                    ),
+                )
+                for segment in payload["candidate_segments"]
+            ],
             take_recommendations=[
                 TakeRecommendation(**take) for take in payload["take_recommendations"]
             ],

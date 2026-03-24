@@ -44,11 +44,25 @@ echo "Processing media from ${MEDIA_DIR}"
 
 mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 
+AI_STATUS_LINES="$("$PYTHON_BIN" - <<'PY'
+from services.analyzer.app.ai import inspect_ai_provider_status
+
+status = inspect_ai_provider_status()
+print(f"ai_provider_configured={status.configured_provider}")
+print(f"ai_provider_effective={status.effective_provider}")
+print(f"ai_model={status.model}")
+print(f"ai_base_url={status.base_url}")
+print(f"ai_available={str(status.available).lower()}")
+print(f"ai_detail={status.detail}")
+PY
+)"
+
 {
   echo "processed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "project_json=$OUTPUT_JSON"
   echo "media_dir=$MEDIA_DIR"
   echo "media_dir_input=$MEDIA_DIR_INPUT"
+  printf '%s\n' "$AI_STATUS_LINES"
 } > "$LOG_FILE"
 
 "$PYTHON_BIN" - <<'PY' > "$SUMMARY_FILE"

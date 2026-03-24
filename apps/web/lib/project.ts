@@ -14,6 +14,39 @@ export type QualityMetrics = {
   story_alignment: number;
 };
 
+export type SegmentEvidence = {
+  media_path: string;
+  transcript_excerpt: string;
+  story_prompt: string;
+  analysis_mode: "speech" | "visual";
+  keyframe_timestamps_sec: number[];
+  keyframe_paths: string[];
+  context_window_start_sec: number;
+  context_window_end_sec: number;
+  metrics_snapshot: QualityMetrics;
+};
+
+export type SegmentUnderstanding = {
+  provider: string;
+  provider_model: string;
+  schema_version: string;
+  summary: string;
+  subjects: string[];
+  actions: string[];
+  shot_type: string;
+  camera_motion: string;
+  mood: string;
+  story_roles: string[];
+  quality_findings: string[];
+  keep_label: string;
+  confidence: number;
+  rationale: string;
+  risk_flags: string[];
+  visual_distinctiveness: number;
+  clarity: number;
+  story_relevance: number;
+};
+
 export type Asset = {
   id: string;
   name: string;
@@ -40,6 +73,8 @@ export type CandidateSegment = {
   transcript_excerpt: string;
   description: string;
   quality_metrics: QualityMetrics;
+  evidence_bundle?: SegmentEvidence;
+  ai_understanding?: SegmentUnderstanding;
 };
 
 export type TakeRecommendation = {

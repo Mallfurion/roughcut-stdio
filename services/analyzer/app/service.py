@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
 from .analysis import build_project_from_media_roots, inspect_runtime_capabilities
-from .domain import ProjectData, TakeRecommendation
+from .domain import Asset, ProjectData, TakeRecommendation
 from .fcpxml import export_fcpxml
 from .scoring import score_segment
 
@@ -41,11 +42,17 @@ def scan_and_analyze_media_root(
     project_name: str,
     media_roots: list[str],
     story_prompt: str,
+    artifacts_root: str | Path | None = None,
+    status_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, Asset], None] | None = None,
 ) -> ProjectData:
     return build_project_from_media_roots(
         project_name=project_name,
         media_roots=media_roots,
         story_prompt=story_prompt,
+        artifacts_root=artifacts_root,
+        status_callback=status_callback,
+        progress_callback=progress_callback,
     )
 
 
