@@ -12,4 +12,5 @@ media
 generated/*.json
 generated/*.fcpxml
 generated/*.log
+generated/*.txt
 .uv-cache

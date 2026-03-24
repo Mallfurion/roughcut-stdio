@@ -32,6 +32,9 @@
 - Must all analysis stay local?
 - Is cloud AI acceptable for descriptions and story planning?
 - Do you need multilingual transcription from the start?
+- Is `LM Studio` acceptable as the default local inference runtime?
+- Which local model classes are realistic on the target hardware: text-only, multimodal, or both?
+- Do you want deterministic fallback ranking when the local model is unavailable, or should processing fail loudly?
 
 ## Recommended Product Decisions
 
@@ -57,3 +60,4 @@ If implementation starts now, the first prototype should only answer:
 1. Can we map source clips to proxies reliably?
 2. Can we generate useful candidate segments from proxies?
 3. Can we produce descriptions that make an editor open the right moments first?
+4. Are LM Studio-backed segment descriptions good enough to replace the current placeholder scoring?

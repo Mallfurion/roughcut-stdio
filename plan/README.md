@@ -76,5 +76,7 @@ That gets the biggest workflow win with the least engineering risk.
 - `research/tooling-options.md`: evaluated tools and final recommendations
 - `product/requirements.md`: scope, workflows, and acceptance criteria
 - `architecture/system-design.md`: pipeline, components, and data model
+- `architecture/ai-understanding-pipeline.md`: target design for multimodal segment understanding and AI-assisted ranking
 - `roadmap/phases.md`: phased implementation plan
+- `roadmap/ai-understanding-phases.md`: migration plan from rule-based ranking to AI-understanding-based selection
 - `decisions/open-questions.md`: assumptions that must be validated early

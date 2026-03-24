@@ -9,10 +9,12 @@ Timeline Cutter is structured around one simple flow:
 
 That is the intended interaction model for this repository.
 
+If you want Resolve import paths to match a specific footage location, set `TIMELINE_MEDIA_DIR` to that exact folder path before running `process`.
+
 ## Core Idea
 
 - `setup` installs everything the repository needs locally
-- `process` scans the repository `media/` path, matches proxies when available, analyzes footage, and writes a generated timeline
+- `process` scans `TIMELINE_MEDIA_DIR` when set, otherwise the repository `media/` path, matches proxies when available, analyzes footage, and writes a generated timeline
 - `view` starts the timeline selector web app against the latest generated timeline
 - `export` writes a DaVinci Resolve `FCPXML` file from that generated timeline
 
@@ -26,7 +28,12 @@ Important paths:
 - `fixtures/sample-media/`
 - `fixtures/sample-project.json`
 
-`media/` is the canonical footage location for this repository.
+Media root selection works like this:
+
+1. `TIMELINE_MEDIA_DIR`, if set
+2. `media/`, if the env var is not set
+
+`media/` remains the default canonical footage location for this repository.
 
 That path can be:
 
@@ -46,6 +53,24 @@ ln -s /absolute/path/to/your/footage media
 ```
 
 By default, `npm run setup` creates `media` as a symlink to `fixtures/sample-media` if `media` does not already exist. That gives you a working demo flow immediately.
+
+If you want to pin the media path through an environment variable, either run commands like this:
+
+```bash
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage npm run process
+```
+
+or create a local env file:
+
+```bash
+cp .env.example .env.local
+```
+
+Then edit `.env.local` and set:
+
+```bash
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage
+```
 
 ## Prerequisites
 
@@ -89,7 +114,7 @@ What it does:
 - runs `npm install`
 - creates `.venv`
 - creates `generated/`
-- creates `media -> fixtures/sample-media` if `media` does not already exist
+- creates `media -> fixtures/sample-media` if `media` does not already exist and `TIMELINE_MEDIA_DIR` is not set
 
 After setup, the next command is:
 
@@ -107,7 +132,7 @@ npm run process
 
 What it does:
 
-- reads footage from `media/`
+- reads footage from `TIMELINE_MEDIA_DIR` when set, otherwise from `media/`
 - discovers candidate video files
 - classifies source clips and proxy clips
 - matches proxies to sources
@@ -126,6 +151,7 @@ Output files:
 You can customize the processing prompt with environment variables:
 
 ```bash
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage \
 TIMELINE_PROJECT_NAME="Weekend Edit" \
 TIMELINE_STORY_PROMPT="Build a cinematic sequence with a strong opener and a calm outro." \
 npm run process
@@ -203,7 +229,27 @@ This works immediately because `setup` points `media/` at the synthetic demo foo
 
 ## Using Your Own Footage
 
-Replace the default `media` symlink with your own footage location:
+Preferred for real Resolve workflows: set `TIMELINE_MEDIA_DIR` to the exact folder path you want the generated timeline to reference.
+
+Inline:
+
+```bash
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage npm run process
+```
+
+Persistent local config:
+
+```bash
+cp .env.example .env.local
+```
+
+Then set:
+
+```bash
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage
+```
+
+Fallback option: replace the default `media` symlink with your own footage location:
 
 ```bash
 rm media

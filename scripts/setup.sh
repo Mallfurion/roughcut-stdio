@@ -5,6 +5,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Load optional local environment configuration.
+# `.env.local` overrides `.env`.
+. "${ROOT_DIR}/scripts/lib/load_env.sh"
+
 select_python() {
   if [ -n "${TIMELINE_PYTHON:-}" ] && [ -x "${TIMELINE_PYTHON}" ]; then
     echo "${TIMELINE_PYTHON}"
@@ -48,7 +52,9 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 echo "Preparing generated output folder..."
 mkdir -p "$ROOT_DIR/generated"
 
-if [ ! -e "$ROOT_DIR/media" ]; then
+if [ -n "${TIMELINE_MEDIA_DIR:-}" ]; then
+  echo "Configured external media root via TIMELINE_MEDIA_DIR=$TIMELINE_MEDIA_DIR"
+elif [ ! -e "$ROOT_DIR/media" ]; then
   echo "Creating default media symlink -> fixtures/sample-media"
   ln -s "$ROOT_DIR/fixtures/sample-media" "$ROOT_DIR/media"
 else
@@ -61,6 +67,10 @@ echo "Main flow:"
 echo "  npm run process"
 echo "  npm run view"
 echo "  npm run export"
+echo
+echo "Media root selection:"
+echo "  TIMELINE_MEDIA_DIR=/absolute/path/to/footage npm run process"
+echo "  cp .env.example .env.local"
 echo
 echo "Optional API setup:"
 echo "  source .venv/bin/activate"

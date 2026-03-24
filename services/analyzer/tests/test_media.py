@@ -13,6 +13,7 @@ from services.analyzer.app.media import (
     discover_media_files,
     match_media_files,
     normalized_clip_key,
+    select_exiftool_timecode,
 )
 
 
@@ -105,6 +106,21 @@ class MediaDiscoveryTests(unittest.TestCase):
     def test_datetime_metadata_can_be_used_as_timecode(self) -> None:
         self.assertEqual(datetime_to_timecode("2025-08-10T15:22:18+0300"), "15:22:18:00")
         self.assertEqual(datetime_to_timecode("2025:08:10 12:22:18"), "12:22:18:00")
+
+    def test_select_exiftool_timecode_ignores_generic_create_date(self) -> None:
+        payload = {
+            "CreateDate": "2025:08:11 06:57:32",
+            "TimeCode": 0,
+        }
+
+        self.assertIsNone(select_exiftool_timecode(payload))
+
+    def test_select_exiftool_timecode_uses_blackmagic_recorded_date(self) -> None:
+        payload = {
+            "Blackmagic-designCameraDateRecorded": "2025-08-10T15:22:18+0300",
+        }
+
+        self.assertEqual(select_exiftool_timecode(payload), "15:22:18:00")
 
 
 if __name__ == "__main__":

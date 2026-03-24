@@ -121,17 +121,7 @@ class ExifToolRunner:
         width = integer_or_none(payload.get("ImageWidth")) or integer_or_none(payload.get("SourceImageWidth"))
         height = integer_or_none(payload.get("ImageHeight")) or integer_or_none(payload.get("SourceImageHeight"))
         has_audio = bool(payload.get("AudioChannels") or payload.get("AudioFormat"))
-        timecode = first_timecode_string(
-            payload.get("StartTimecode"),
-            payload.get("SourceTimecode"),
-            payload.get("TimeCode"),
-        )
-        if timecode is None:
-            timecode = datetime_to_timecode(
-                payload.get("Blackmagic-design Camera Date Recorded")
-                or payload.get("CreationDate")
-                or payload.get("CreateDate")
-            )
+        timecode = select_exiftool_timecode(payload)
 
         return MediaProbe(
             duration_sec=duration_sec,
@@ -372,6 +362,24 @@ def first_timecode_string(*values: object) -> str | None:
         if isinstance(value, str) and re.fullmatch(r"\d{2}:\d{2}:\d{2}:\d{2}", value):
             return value
     return None
+
+
+def select_exiftool_timecode(payload: dict[str, object]) -> str | None:
+    timecode = first_timecode_string(
+        payload.get("StartTimecode"),
+        payload.get("SourceTimecode"),
+        payload.get("TimeCode"),
+    )
+    if timecode is not None:
+        return timecode
+
+    # Some Blackmagic-produced MOV files store a camera-recorded timestamp
+    # rather than a tmcd string, and Resolve aligns to that value.
+    blackmagic_recorded_at = payload.get("Blackmagic-designCameraDateRecorded")
+    if blackmagic_recorded_at is None:
+        blackmagic_recorded_at = payload.get("Blackmagic-design Camera Date Recorded")
+
+    return datetime_to_timecode(blackmagic_recorded_at)
 
 
 def datetime_to_timecode(value: object) -> str | None:

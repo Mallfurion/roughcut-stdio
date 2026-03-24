@@ -114,6 +114,7 @@ Recommended:
   - whether the segment is a likely "best take"
   - why it is good or weak
   - what story role it could play
+- support a local model path through `LM Studio` for privacy-sensitive and offline workflows
 
 Why:
 
@@ -129,6 +130,19 @@ Important design choice:
 - send selected frames plus transcript excerpts and numeric signals
 - for silent footage, send selected frames plus numeric motion/composition signals and neighboring shot context
 - this is cheaper, faster, and easier to make deterministic
+
+Recommended runtime boundary:
+
+- define a provider adapter that can target:
+  - `LM Studio` via its OpenAI-compatible local API
+  - a hosted multimodal API
+  - a hybrid path where local models do first-pass labeling and cloud models do final ranking only
+
+Why:
+
+- the project should not hardcode a single model vendor
+- local models are attractive for private footage and repeated experimentation
+- hosted models may still be useful for stronger narrative planning or evaluation baselines
 
 ### 6. Timeline Preview In The Browser
 
@@ -219,6 +233,7 @@ Backend:
 Optional AI adapters:
 
 - multimodal LLM for descriptions, ranking rationale, and story assembly
+- `LM Studio` as the preferred local model runtime for multimodal or text-only reasoning
 - `WhisperX` only for projects that benefit from alignment and speaker labels
 - `FCPXML` export builder for Resolve handoff
 

@@ -5,12 +5,21 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Load optional local environment configuration.
+# `.env.local` overrides `.env`.
+. "${ROOT_DIR}/scripts/lib/load_env.sh"
+
 PYTHON_BIN="${ROOT_DIR}/.venv/bin/python3"
 if [ ! -x "$PYTHON_BIN" ]; then
   PYTHON_BIN="python3"
 fi
 
-MEDIA_DIR="${ROOT_DIR}/media"
+MEDIA_DIR_INPUT="${TIMELINE_MEDIA_DIR:-${ROOT_DIR}/media}"
+if [[ "$MEDIA_DIR_INPUT" = /* ]]; then
+  MEDIA_DIR="$MEDIA_DIR_INPUT"
+else
+  MEDIA_DIR="${ROOT_DIR}/${MEDIA_DIR_INPUT#./}"
+fi
 OUTPUT_JSON="${ROOT_DIR}/generated/project.json"
 TMP_OUTPUT_JSON="${ROOT_DIR}/generated/project.json.tmp"
 LOG_FILE="${ROOT_DIR}/generated/process.log"
@@ -20,7 +29,7 @@ STORY_PROMPT="${TIMELINE_STORY_PROMPT:-Build a coherent rough cut from the stron
 
 if [ ! -e "$MEDIA_DIR" ]; then
   echo "Missing media path at $MEDIA_DIR"
-  echo "Run 'npm run setup' first, or create a symlink named 'media' that points to your footage folder."
+  echo "Set TIMELINE_MEDIA_DIR to your footage path, or create the default repo media folder."
   exit 1
 fi
 
@@ -39,6 +48,7 @@ mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
   echo "processed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "project_json=$OUTPUT_JSON"
   echo "media_dir=$MEDIA_DIR"
+  echo "media_dir_input=$MEDIA_DIR_INPUT"
 } > "$LOG_FILE"
 
 "$PYTHON_BIN" - <<'PY' > "$SUMMARY_FILE"
