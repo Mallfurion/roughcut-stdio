@@ -32,6 +32,12 @@ def main() -> int:
         f"AI provider configured: {provider_status.configured_provider or 'deterministic'}"
         + (f" ({provider_status.model})" if provider_status.model else "")
     )
+    if provider_status.revision:
+        log_to_stderr(f"AI model revision: {provider_status.revision}")
+    if provider_status.cache_dir:
+        log_to_stderr(f"AI model cache: {provider_status.cache_dir}")
+    if provider_status.device:
+        log_to_stderr(f"AI requested device: {provider_status.device}")
     log_to_stderr(provider_status.detail)
     log_to_stderr(
         "AI runtime mode: "

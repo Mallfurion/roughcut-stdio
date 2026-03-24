@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from services.analyzer.app.ai import (
     AIProviderConfig,
     DeterministicVisionLanguageAnalyzer,
     LMStudioVisionLanguageAnalyzer,
+    MoondreamLocalVisionLanguageAnalyzer,
     build_segment_evidence,
     encode_image_as_data_url,
     inspect_ai_provider_status,
@@ -149,6 +151,24 @@ class AIPhaseOneTests(unittest.TestCase):
 
         self.assertEqual(status.effective_provider, "deterministic")
         self.assertTrue(status.available)
+
+    def test_provider_status_reports_missing_moondream_dependencies(self) -> None:
+        with patch("services.analyzer.app.ai.missing_moondream_dependencies", return_value=["torch", "transformers"]):
+            status = inspect_ai_provider_status(
+                AIProviderConfig(
+                    provider="moondream-local",
+                    model="vikhyatk/moondream2",
+                    base_url="",
+                    timeout_sec=30.0,
+                    cache_dir="/tmp/moondream",
+                    device="auto",
+                )
+            )
+
+        self.assertEqual(status.configured_provider, "moondream-local")
+        self.assertEqual(status.effective_provider, "deterministic")
+        self.assertFalse(status.available)
+        self.assertIn("missing", status.detail.lower())
 
     def test_model_matches_handles_aliases(self) -> None:
         self.assertTrue(model_matches("qwen3.5-9b", "lmstudio-community/qwen3.5-9b"))
@@ -383,6 +403,109 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(results["segment-2"].provider, "lmstudio")
         self.assertEqual(stats.live_segment_count, 2)
         self.assertEqual(stats.cached_segment_count, 0)
+        self.assertEqual(stats.fallback_segment_count, 0)
+        self.assertEqual(stats.live_request_count, 1)
+
+    def test_moondream_local_analyzer_uses_runtime_and_cache(self) -> None:
+        class FakeRuntime:
+            def __init__(self) -> None:
+                self.model_id = "vikhyatk/moondream2"
+                self.revision = "2025-04-14"
+                self.device = "cpu"
+                self.cache_dir = "/tmp/moondream"
+                self.calls = 0
+
+            def query_image(self, *, image_path: str, prompt: str) -> str:
+                self.calls += 1
+                return """
+                {
+                  "summary": "A useful bridge shot.",
+                  "subjects": ["crowd"],
+                  "actions": ["moving"],
+                  "shot_type": "wide",
+                  "camera_motion": "gentle movement",
+                  "mood": "energetic",
+                  "story_roles": ["bridge"],
+                  "quality_findings": ["usable motion"],
+                  "keep_label": "keep",
+                  "confidence": 0.86,
+                  "rationale": "Good motion and readable subject.",
+                  "risk_flags": [],
+                  "visual_distinctiveness": 0.8,
+                  "clarity": 0.78,
+                  "story_relevance": 0.74
+                }
+                """
+
+        asset = Asset(
+            id="asset-4",
+            name="Bridge Shot",
+            source_path="/tmp/bridge.mov",
+            proxy_path="/tmp/bridge.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A004_C021",
+        )
+        segment = CandidateSegment(
+            id="segment-1",
+            asset_id="asset-4",
+            start_sec=0.0,
+            end_sec=4.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Bridge shot.",
+            quality_metrics={"visual_novelty": 0.8, "subject_clarity": 0.79, "story_alignment": 0.73, "motion_energy": 0.66, "duration_fit": 0.8},
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            image_path = Path(tempdir) / "segment.jpg"
+            image_path.write_bytes(b"fake")
+            evidence = build_segment_evidence(
+                asset=asset,
+                segment=segment,
+                asset_segments=[segment],
+                segment_index=0,
+                story_prompt="Build a rough cut.",
+                artifacts_root=None,
+                extract_keyframes=False,
+            )
+            evidence.contact_sheet_path = str(image_path)
+            runtime = FakeRuntime()
+            analyzer = MoondreamLocalVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="moondream-local",
+                    model="vikhyatk/moondream2",
+                    base_url="",
+                    timeout_sec=30.0,
+                    revision="2025-04-14",
+                    cache_dir=tempdir,
+                    device="cpu",
+                ),
+                runtime=runtime,
+                cache_root=Path(tempdir) / "cache",
+            )
+
+            first = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+            second = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+            stats = analyzer.runtime_stats()
+
+        self.assertEqual(runtime.calls, 1)
+        self.assertEqual(first.provider, "moondream-local")
+        self.assertEqual(second.provider, "moondream-local")
+        self.assertEqual(stats.live_segment_count, 1)
+        self.assertEqual(stats.cached_segment_count, 1)
         self.assertEqual(stats.fallback_segment_count, 0)
         self.assertEqual(stats.live_request_count, 1)
 

@@ -52,6 +52,21 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 echo "Preparing generated output folder..."
 mkdir -p "$ROOT_DIR/generated"
 
+echo "Installing analyzer package into the virtual environment..."
+"$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer"
+
+if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "moondream-local" ]; then
+  echo "Installing Moondream local runtime dependencies..."
+  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer[moondream]"
+
+  if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
+    echo "Bootstrapping Moondream local model..."
+    "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_moondream.py
+  else
+    echo "Skipping Moondream model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
+  fi
+fi
+
 if [ -n "${TIMELINE_MEDIA_DIR:-}" ]; then
   echo "Configured external media root via TIMELINE_MEDIA_DIR=$TIMELINE_MEDIA_DIR"
 elif [ ! -e "$ROOT_DIR/media" ]; then
@@ -67,6 +82,7 @@ echo "Main flow:"
 echo "  npm run process"
 echo "  npm run view"
 echo "  npm run export"
+echo "  npm run check:ai"
 echo
 echo "Media root selection:"
 echo "  TIMELINE_MEDIA_DIR=/absolute/path/to/footage npm run process"

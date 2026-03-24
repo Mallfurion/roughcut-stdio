@@ -4,13 +4,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import b64encode
 from dataclasses import asdict, dataclass
 from hashlib import sha1
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Protocol
+from typing import Any, Protocol
 from urllib import error, request
 
 from .domain import Asset, CandidateSegment, SegmentEvidence, SegmentUnderstanding
@@ -54,6 +56,21 @@ class VisionLanguageAnalyzer(Protocol):
         ...
 
 
+class LocalVisionRuntime(Protocol):
+    model_id: str
+    revision: str
+    device: str
+    cache_dir: str
+
+    def query_image(
+        self,
+        *,
+        image_path: str,
+        prompt: str,
+    ) -> str:
+        ...
+
+
 class RankingPlanner(Protocol):
     def plan(self, payload: dict[str, object]) -> dict[str, object]:
         ...
@@ -65,6 +82,9 @@ class AIProviderConfig:
     model: str
     base_url: str
     timeout_sec: float
+    revision: str = ""
+    cache_dir: str = ""
+    device: str = "auto"
 
 
 @dataclass(slots=True)
@@ -83,6 +103,9 @@ class AIProviderStatus:
     effective_provider: str
     model: str
     base_url: str
+    revision: str
+    cache_dir: str
+    device: str
     available: bool
     detail: str
 
@@ -180,6 +203,111 @@ class OpenAICompatibleProviderClient:
             ) from exc
         except error.URLError as exc:
             raise AIProviderRequestError(f"Provider request failed: {exc}") from exc
+
+
+class MoondreamRuntime:
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        revision: str,
+        cache_dir: str,
+        device: str,
+        local_files_only: bool = False,
+    ) -> None:
+        self.model_id = model_id
+        self.revision = revision
+        self.cache_dir = cache_dir
+        self.device = device
+        self.local_files_only = local_files_only
+        self._model: Any | None = None
+        self._tokenizer: Any | None = None
+
+    def ensure_loaded(self) -> None:
+        if self._model is not None:
+            return
+
+        transformers = importlib.import_module("transformers")
+        torch = importlib.import_module("torch")
+        model_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+            "cache_dir": self.cache_dir,
+            "local_files_only": self.local_files_only,
+        }
+        if self.revision:
+            model_kwargs["revision"] = self.revision
+
+        model = transformers.AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
+        tokenizer = None
+        if hasattr(transformers, "AutoTokenizer"):
+            try:
+                tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_id, **model_kwargs)
+            except Exception:
+                tokenizer = None
+
+        resolved_device = resolve_torch_device(torch=torch, requested=self.device)
+        self.device = resolved_device
+
+        dtype = getattr(torch, "float16", None) if resolved_device != "cpu" else getattr(torch, "float32", None)
+        if hasattr(model, "to"):
+            try:
+                if dtype is not None:
+                    model = model.to(device=resolved_device, dtype=dtype)
+                else:
+                    model = model.to(device=resolved_device)
+            except TypeError:
+                model = model.to(resolved_device)
+            except Exception:
+                try:
+                    model = model.to(resolved_device)
+                except Exception:
+                    pass
+        if hasattr(model, "eval"):
+            model.eval()
+
+        self._model = model
+        self._tokenizer = tokenizer
+
+    def query_image(
+        self,
+        *,
+        image_path: str,
+        prompt: str,
+    ) -> str:
+        if not image_path:
+            raise AIProviderRequestError("Moondream local backend received no image path.")
+        path = Path(image_path)
+        if not path.exists() or not path.is_file():
+            raise AIProviderRequestError(f"Moondream local backend image path is invalid: {image_path}")
+
+        self.ensure_loaded()
+        pil_image = importlib.import_module("PIL.Image")
+        image = pil_image.open(path).convert("RGB")
+        model = self._model
+        tokenizer = self._tokenizer
+        if model is None:
+            raise AIProviderRequestError("Moondream model did not initialize.")
+
+        result: Any
+        if hasattr(model, "query"):
+            result = model.query(image, prompt)
+        elif hasattr(model, "encode_image") and hasattr(model, "answer_question"):
+            encoded = model.encode_image(image)
+            if tokenizer is not None:
+                result = model.answer_question(encoded, prompt, tokenizer)
+            else:
+                result = model.answer_question(encoded, prompt)
+        else:
+            raise AIProviderRequestError("Moondream model does not expose a supported query interface.")
+
+        if isinstance(result, dict):
+            answer = result.get("answer") or result.get("text") or result.get("response")
+            if isinstance(answer, str) and answer.strip():
+                return answer.strip()
+            return json.dumps(result)
+        if isinstance(result, str):
+            return result.strip()
+        return str(result)
 
 
 class DeterministicVisionLanguageAnalyzer:
@@ -430,6 +558,149 @@ class LMStudioVisionLanguageAnalyzer:
         )
 
 
+class MoondreamLocalVisionLanguageAnalyzer:
+    requires_keyframes = True
+
+    def __init__(
+        self,
+        *,
+        config: AIProviderConfig,
+        runtime: LocalVisionRuntime,
+        fallback: VisionLanguageAnalyzer | None = None,
+        cache_root: str | Path | None = None,
+    ) -> None:
+        self.config = config
+        self.runtime = runtime
+        self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
+        self.last_error_detail = ""
+        self.cache_root = Path(cache_root) if cache_root is not None else None
+        self._runtime_stats = AIRuntimeStats()
+
+    def analyze(
+        self,
+        *,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        story_prompt: str,
+    ) -> SegmentUnderstanding:
+        cache_key = build_segment_cache_key(
+            model=self.config.model,
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=story_prompt,
+        )
+        cached = load_cached_understanding(self.cache_root, cache_key)
+        if cached is not None:
+            self._runtime_stats.cached_segment_count += 1
+            return cached
+
+        image_path = batch_image_path_for_evidence(evidence)
+        if not image_path:
+            understanding = self._fallback_understanding(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+                detail="No image evidence was available for moondream-local.",
+                risk_flag="moondream_no_image_evidence",
+            )
+            self._runtime_stats.fallback_segment_count += 1
+            return understanding
+
+        try:
+            self._runtime_stats.live_request_count += 1
+            raw = self.runtime.query_image(
+                image_path=image_path,
+                prompt=moondream_segment_understanding_prompt(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=story_prompt,
+                ),
+            )
+            payload = parse_json_object(raw)
+            if payload is None:
+                raise AIProviderRequestError("Moondream local response did not contain valid JSON.")
+            understanding = normalize_model_output(
+                payload,
+                provider="moondream-local",
+                model=self.config.model,
+                fallback=self.fallback,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            if understanding.provider == "moondream-local":
+                self._runtime_stats.live_segment_count += 1
+            else:
+                self._runtime_stats.fallback_segment_count += 1
+            store_cached_understanding(self.cache_root, cache_key, understanding)
+            return understanding
+        except (AIProviderRequestError, OSError, ValueError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
+            self.last_error_detail = str(exc)
+            understanding = self._fallback_understanding(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+                detail=self.last_error_detail,
+                risk_flag="moondream_local_failed",
+            )
+            self._runtime_stats.fallback_segment_count += 1
+            return understanding
+
+    def analyze_asset_segments(
+        self,
+        *,
+        asset: Asset,
+        tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    ) -> dict[str, SegmentUnderstanding]:
+        return {
+            segment.id: self.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            for segment, evidence, story_prompt in tasks
+        }
+
+    def runtime_stats(self) -> AIRuntimeStats:
+        return AIRuntimeStats(
+            live_segment_count=self._runtime_stats.live_segment_count,
+            cached_segment_count=self._runtime_stats.cached_segment_count,
+            fallback_segment_count=self._runtime_stats.fallback_segment_count,
+            live_request_count=self._runtime_stats.live_request_count,
+        )
+
+    def _fallback_understanding(
+        self,
+        *,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        story_prompt: str,
+        detail: str,
+        risk_flag: str,
+    ) -> SegmentUnderstanding:
+        fallback = self.fallback.analyze(
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=story_prompt,
+        )
+        fallback.provider = "deterministic"
+        fallback.provider_model = "fallback-v1"
+        fallback.risk_flags = sorted(set([*fallback.risk_flags, risk_flag]))
+        fallback.rationale = (
+            f"{fallback.rationale} Moondream local analysis failed, so deterministic fallback was used: {detail}"
+        )
+        return fallback
+
+
 def default_vision_language_analyzer(
     *,
     artifacts_root: str | Path | None = None,
@@ -444,6 +715,17 @@ def default_vision_language_analyzer(
             client=OpenAICompatibleProviderClient(config.base_url),
             cache_root=(Path(artifacts_root) / "ai-cache") if artifacts_root is not None and runtime_config.cache_enabled else None,
         )
+    if status.effective_provider == "moondream-local" and config.model:
+        return MoondreamLocalVisionLanguageAnalyzer(
+            config=config,
+            runtime=MoondreamRuntime(
+                model_id=config.model,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=config.device,
+            ),
+            cache_root=(Path(artifacts_root) / "ai-cache") if artifacts_root is not None and runtime_config.cache_enabled else None,
+        )
     return DeterministicVisionLanguageAnalyzer()
 
 
@@ -454,11 +736,27 @@ def load_ai_provider_config() -> AIProviderConfig:
     except ValueError:
         timeout_sec = 30.0
 
+    provider = os.environ.get("TIMELINE_AI_PROVIDER", "deterministic").strip().lower()
+    requested_model = os.environ.get("TIMELINE_AI_MODEL", "").strip()
+    model_id = os.environ.get("TIMELINE_AI_MODEL_ID", "").strip()
+    revision = os.environ.get("TIMELINE_AI_MODEL_REVISION", "").strip()
+    cache_dir = os.environ.get("TIMELINE_AI_MODEL_CACHE_DIR", "").strip()
+    device = os.environ.get("TIMELINE_AI_DEVICE", "auto").strip() or "auto"
+
+    if provider == "moondream-local":
+        model_id, revision = resolve_moondream_model(model=requested_model, model_id=model_id, revision=revision)
+        requested_model = model_id
+        if not cache_dir:
+            cache_dir = str((Path.cwd() / "models" / "moondream").resolve())
+
     return AIProviderConfig(
-        provider=os.environ.get("TIMELINE_AI_PROVIDER", "deterministic").strip().lower(),
-        model=os.environ.get("TIMELINE_AI_MODEL", "").strip(),
+        provider=provider,
+        model=requested_model,
         base_url=os.environ.get("TIMELINE_AI_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
         timeout_sec=timeout_sec,
+        revision=revision,
+        cache_dir=cache_dir,
+        device=device,
     )
 
 
@@ -481,8 +779,15 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     )
 
 
-def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProviderStatus:
+def inspect_ai_provider_status(
+    config: AIProviderConfig | None = None,
+    *,
+    runtime_probe: bool = False,
+) -> AIProviderStatus:
     effective_config = config or load_ai_provider_config()
+
+    if effective_config.provider == "moondream-local":
+        return inspect_moondream_provider_status(effective_config, runtime_probe=runtime_probe)
 
     if effective_config.provider != "lmstudio":
         return AIProviderStatus(
@@ -490,6 +795,9 @@ def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProv
             effective_provider="deterministic",
             model=effective_config.model,
             base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
             available=True,
             detail="Deterministic structured analysis is active.",
         )
@@ -500,6 +808,9 @@ def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProv
             effective_provider="deterministic",
             model="",
             base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
             available=False,
             detail="LM Studio was requested but TIMELINE_AI_MODEL is empty. Falling back to deterministic analysis.",
         )
@@ -523,6 +834,9 @@ def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProv
                 effective_provider="deterministic",
                 model=effective_config.model,
                 base_url=effective_config.base_url,
+                revision=effective_config.revision,
+                cache_dir=effective_config.cache_dir,
+                device=effective_config.device,
                 available=False,
                 detail=(
                     f"LM Studio is reachable at {effective_config.base_url}, but model "
@@ -535,6 +849,9 @@ def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProv
             effective_provider="lmstudio",
             model=effective_config.model,
             base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
             available=True,
             detail=f"LM Studio is reachable at {effective_config.base_url}; model '{effective_config.model}' will be used.",
         )
@@ -544,12 +861,100 @@ def inspect_ai_provider_status(config: AIProviderConfig | None = None) -> AIProv
             effective_provider="deterministic",
             model=effective_config.model,
             base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
             available=False,
             detail=(
                 f"LM Studio is not reachable at {effective_config.base_url}. "
                 "Falling back to deterministic analysis."
             ),
         )
+
+
+def inspect_moondream_provider_status(
+    config: AIProviderConfig,
+    *,
+    runtime_probe: bool = False,
+) -> AIProviderStatus:
+    missing = missing_moondream_dependencies()
+    cache_path = Path(config.cache_dir).expanduser() if config.cache_dir else None
+    cache_exists = bool(cache_path and cache_path.exists())
+
+    if missing:
+        return AIProviderStatus(
+            configured_provider="moondream-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "Moondream local backend is not ready because required Python modules are missing: "
+                + ", ".join(missing)
+                + ". Falling back to deterministic analysis."
+            ),
+        )
+
+    if runtime_probe:
+        try:
+            runtime = MoondreamRuntime(
+                model_id=config.model,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=config.device,
+            )
+            runtime.ensure_loaded()
+            return AIProviderStatus(
+                configured_provider="moondream-local",
+                effective_provider="moondream-local",
+                model=config.model,
+                base_url=config.base_url,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=runtime.device,
+                available=True,
+                detail=(
+                    f"Moondream local backend is ready; model '{config.model}'"
+                    + (f" revision '{config.revision}'" if config.revision else "")
+                    + f" loaded on device '{runtime.device}'."
+                ),
+            )
+        except Exception as exc:
+            return AIProviderStatus(
+                configured_provider="moondream-local",
+                effective_provider="deterministic",
+                model=config.model,
+                base_url=config.base_url,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=config.device,
+                available=False,
+                detail=(
+                    "Moondream local backend could not load the configured model. "
+                    f"Falling back to deterministic analysis. Error: {exc}"
+                ),
+            )
+
+    detail = (
+        f"Moondream local backend is configured for model '{config.model}'"
+        + (f" revision '{config.revision}'" if config.revision else "")
+        + (f"; cache {'found' if cache_exists else 'not found yet'} at {config.cache_dir}" if config.cache_dir else "")
+        + f"; requested device '{config.device}'."
+    )
+    return AIProviderStatus(
+        configured_provider="moondream-local",
+        effective_provider="moondream-local",
+        model=config.model,
+        base_url=config.base_url,
+        revision=config.revision,
+        cache_dir=config.cache_dir,
+        device=config.device,
+        available=True,
+        detail=detail,
+    )
 
 
 def build_segment_evidence(
@@ -795,6 +1200,34 @@ def segment_batch_understanding_user_prompt(
     return "\n".join(lines)
 
 
+def moondream_segment_understanding_prompt(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> str:
+    metrics = ", ".join(
+        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
+    )
+    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    return (
+        "Analyze this stitched contact sheet from a shortlisted video segment and respond with JSON only. "
+        "Use concise editorial language. Keys required: summary, subjects, actions, shot_type, camera_motion, "
+        "mood, story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
+        "visual_distinctiveness, clarity, story_relevance.\n\n"
+        f"Project story prompt: {story_prompt}\n"
+        f"Asset: {asset.name}\n"
+        f"Reel: {asset.interchange_reel_name}\n"
+        f"Analysis mode: {segment.analysis_mode}\n"
+        f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
+        f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
+        f"Transcript: {transcript}\n"
+        f"Metrics: {metrics}\n"
+        "Focus on whether the segment has a clear subject, usable motion, readable composition, and editorial usefulness."
+    )
+
+
 def normalize_model_output(
     payload: dict[str, object],
     *,
@@ -1003,6 +1436,63 @@ def parse_json_object(raw: str) -> dict[str, object] | None:
             return loaded if isinstance(loaded, dict) else None
         except json.JSONDecodeError:
             return None
+
+
+def missing_moondream_dependencies() -> list[str]:
+    required = {
+        "torch": "torch",
+        "transformers": "transformers",
+        "PIL": "pillow",
+    }
+    missing: list[str] = []
+    for module_name, label in required.items():
+        if importlib.util.find_spec(module_name) is None:
+            missing.append(label)
+    return missing
+
+
+def resolve_moondream_model(
+    *,
+    model: str,
+    model_id: str,
+    revision: str,
+) -> tuple[str, str]:
+    requested = (model_id or model).strip()
+    resolved_model_id = requested if "/" in requested else "vikhyatk/moondream2"
+    resolved_revision = revision.strip()
+    if not resolved_revision:
+        match = re.search(r"(\d{4}-\d{2}-\d{2})", model)
+        if match:
+            resolved_revision = match.group(1)
+    return resolved_model_id, resolved_revision
+
+
+def resolve_torch_device(*, torch: Any, requested: str) -> str:
+    requested_value = (requested or "auto").strip().lower()
+    if requested_value not in {"auto", "cpu", "mps", "cuda"}:
+        requested_value = "auto"
+    if requested_value != "auto":
+        return requested_value
+    if hasattr(torch, "backends") and hasattr(torch.backends, "mps"):
+        try:
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+    if hasattr(torch, "cuda"):
+        try:
+            if torch.cuda.is_available():
+                return "cuda"
+        except Exception:
+            pass
+    return "cpu"
+
+
+def bootstrap_moondream_model(config: AIProviderConfig | None = None) -> AIProviderStatus:
+    effective_config = config or load_ai_provider_config()
+    if effective_config.provider != "moondream-local":
+        return inspect_ai_provider_status(effective_config, runtime_probe=False)
+    return inspect_ai_provider_status(effective_config, runtime_probe=True)
 
 
 def string_or_default(value: object, default: str) -> str:

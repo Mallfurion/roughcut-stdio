@@ -12,3 +12,5 @@ media
 generated/*
 .uv-cache
 .env
+models/*
+services/analyzer/timeline_cutter_analyzer.egg-info
