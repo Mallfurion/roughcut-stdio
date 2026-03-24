@@ -1,0 +1,184 @@
+{
+  "project": {
+    "id": "project-bucharest-weekend",
+    "name": "Bucharest Weekend Story",
+    "story_prompt": "Build a short cinematic progression from waking city energy into a personal market moment and a calm evening release.",
+    "status": "draft"
+  },
+  "assets": [
+    {
+      "id": "asset-city-opening",
+      "name": "City Opening Wide",
+      "source_path": "/Volumes/Shoot/Bucharest/Originals/A001_C001_0324AB.mov",
+      "proxy_path": "/Volumes/Shoot/Bucharest/Proxy/A001_C001_0324AB.mov",
+      "duration_sec": 18.0,
+      "fps": 24.0,
+      "width": 1920,
+      "height": 1080,
+      "has_speech": false,
+      "interchange_reel_name": "A001_C001_0324AB"
+    },
+    {
+      "id": "asset-market-dialogue",
+      "name": "Market Dialogue",
+      "source_path": "/Volumes/Shoot/Bucharest/Originals/A002_C014_0324CD.mov",
+      "proxy_path": "/Volumes/Shoot/Bucharest/Proxy/A002_C014_0324CD.mov",
+      "duration_sec": 43.0,
+      "fps": 24.0,
+      "width": 1920,
+      "height": 1080,
+      "has_speech": true,
+      "interchange_reel_name": "A002_C014_0324CD"
+    },
+    {
+      "id": "asset-evening-walk",
+      "name": "Evening Walk Detail",
+      "source_path": "/Volumes/Shoot/Bucharest/Originals/A003_C007_0324EF.mov",
+      "proxy_path": "/Volumes/Shoot/Bucharest/Proxy/A003_C007_0324EF.mov",
+      "duration_sec": 21.0,
+      "fps": 24.0,
+      "width": 1920,
+      "height": 1080,
+      "has_speech": false,
+      "interchange_reel_name": "A003_C007_0324EF"
+    }
+  ],
+  "candidate_segments": [
+    {
+      "id": "segment-city-rush",
+      "asset_id": "asset-city-opening",
+      "start_sec": 1.5,
+      "end_sec": 7.75,
+      "analysis_mode": "visual",
+      "transcript_excerpt": "",
+      "description": "A tram crosses the frame while pedestrians spill into the boulevard, giving the sequence an immediate sense of movement and location.",
+      "quality_metrics": {
+        "sharpness": 0.83,
+        "stability": 0.74,
+        "visual_novelty": 0.9,
+        "subject_clarity": 0.77,
+        "motion_energy": 0.86,
+        "duration_fit": 0.82,
+        "speech_presence": 0.0,
+        "hook_strength": 0.79,
+        "story_alignment": 0.84
+      }
+    },
+    {
+      "id": "segment-market-line",
+      "asset_id": "asset-market-dialogue",
+      "start_sec": 10.0,
+      "end_sec": 18.5,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "This is where the day actually starts. Once the market opens, everything speeds up.",
+      "description": "The vendor lands a clean line about the market setting the pace of the day, which gives the timeline a usable narrative turn.",
+      "quality_metrics": {
+        "sharpness": 0.79,
+        "stability": 0.71,
+        "visual_novelty": 0.58,
+        "subject_clarity": 0.81,
+        "motion_energy": 0.42,
+        "duration_fit": 0.87,
+        "speech_presence": 0.94,
+        "hook_strength": 0.86,
+        "story_alignment": 0.9
+      }
+    },
+    {
+      "id": "segment-evening-release",
+      "asset_id": "asset-evening-walk",
+      "start_sec": 5.0,
+      "end_sec": 11.25,
+      "analysis_mode": "visual",
+      "transcript_excerpt": "",
+      "description": "A handheld close detail of shoes and reflected streetlight slows the pace and works as a visual release after the market beat.",
+      "quality_metrics": {
+        "sharpness": 0.76,
+        "stability": 0.68,
+        "visual_novelty": 0.8,
+        "subject_clarity": 0.73,
+        "motion_energy": 0.54,
+        "duration_fit": 0.8,
+        "speech_presence": 0.0,
+        "hook_strength": 0.7,
+        "story_alignment": 0.88
+      }
+    }
+  ],
+  "take_recommendations": [
+    {
+      "id": "take-open",
+      "candidate_segment_id": "segment-city-rush",
+      "title": "Open On City Motion",
+      "is_best_take": true,
+      "selection_reason": "High visual novelty and motion give the story an immediate opener without relying on dialogue.",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-market-turn",
+      "candidate_segment_id": "segment-market-line",
+      "title": "Market Pace Line",
+      "is_best_take": true,
+      "selection_reason": "The spoken line provides a clear transition from atmosphere into narrative intent.",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-outro",
+      "candidate_segment_id": "segment-evening-release",
+      "title": "Evening Release",
+      "is_best_take": true,
+      "selection_reason": "The calmer pacing and texture give the sequence a visual outro that does not need dialogue.",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    }
+  ],
+  "timeline": {
+    "id": "timeline-main",
+    "version": 1,
+    "story_summary": "Start with city scale, move into the market line, then land on a quieter evening detail.",
+    "items": [
+      {
+        "id": "item-1",
+        "take_recommendation_id": "take-open",
+        "order_index": 0,
+        "trim_in_sec": 0.0,
+        "trim_out_sec": 5.0,
+        "label": "City opener",
+        "notes": "Keep the tram entrance.",
+        "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A001_C001_0324AB.mov",
+        "source_reel": "A001_C001_0324AB"
+      },
+      {
+        "id": "item-2",
+        "take_recommendation_id": "take-market-turn",
+        "order_index": 1,
+        "trim_in_sec": 0.75,
+        "trim_out_sec": 6.25,
+        "label": "Narrative turn",
+        "notes": "Start just before the spoken line settles.",
+        "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A002_C014_0324CD.mov",
+        "source_reel": "A002_C014_0324CD"
+      },
+      {
+        "id": "item-3",
+        "take_recommendation_id": "take-outro",
+        "order_index": 2,
+        "trim_in_sec": 0.5,
+        "trim_out_sec": 4.5,
+        "label": "Evening outro",
+        "notes": "Hold long enough for the pace shift.",
+        "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A003_C007_0324EF.mov",
+        "source_reel": "A003_C007_0324EF"
+      }
+    ]
+  }
+}
+

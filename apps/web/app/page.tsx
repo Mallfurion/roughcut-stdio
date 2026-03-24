@@ -1,0 +1,151 @@
+import {
+  computeScoreLabel,
+  formatDuration,
+  loadActiveProject,
+  resolveTakeViews
+} from "../lib/project";
+
+export default async function Page() {
+  const loaded = await loadActiveProject();
+  const project = loaded.project;
+  const takeViews = resolveTakeViews(project);
+  const silentCount = project.assets.filter((asset) => !asset.has_speech).length;
+  const dialogueCount = project.assets.length - silentCount;
+  const totalTimelineDuration = project.timeline.items.reduce(
+    (sum, item) => sum + Math.max(0, item.trim_out_sec - item.trim_in_sec),
+    0
+  );
+
+  return (
+    <main className="page-shell">
+      <section className="hero">
+        <div className="panel hero-copy">
+          <div className="eyebrow">Local-first rough cut</div>
+          <h1>Review footage before the edit starts.</h1>
+          <p>
+            This scaffold treats silent b-roll and dialogue-led footage as equal citizens. The system
+            proposes best takes, explains why they matter, and keeps the timeline exportable into
+            DaVinci Resolve as a real interchange file.
+          </p>
+          <p>{project.project.story_prompt}</p>
+          <p>
+            Active source: {loaded.source === "generated" ? "generated timeline" : "sample fixture"}.
+          </p>
+          <div className="hero-actions">
+            <a className="button" href="/api/export/fcpxml">
+              Export FCPXML
+            </a>
+            <a className="button secondary" href="/api/project">
+              Inspect Project JSON
+            </a>
+          </div>
+        </div>
+        <div className="panel hero-metrics">
+            <MetricCard label="Project" value={project.project.name} />
+            <MetricCard label="Best takes" value={String(takeViews.length)} />
+            <MetricCard label="Silent clips" value={String(silentCount)} />
+            <MetricCard label="Dialogue clips" value={String(dialogueCount)} />
+            <MetricCard label="Timeline" value={`${totalTimelineDuration.toFixed(2)}s`} />
+            <MetricCard label="Timeline version" value={`v${project.timeline.version}`} />
+        </div>
+      </section>
+
+      <section className="panel section">
+        <div className="section-header">
+          <div>
+            <h2>Recommended Takes</h2>
+          </div>
+          <p>
+            These cards come from the shared project fixture. Silent footage uses visual scoring and
+            image-derived descriptions, while dialogue footage can use transcript evidence.
+          </p>
+        </div>
+        <div className="take-grid">
+          {takeViews.map(({ take, segment, asset }) => (
+            <article className="take-card" key={take.id}>
+              <div className="take-art" />
+              <div className="take-meta">
+                <span className="badge">{segment.analysis_mode}</span>
+                <span className="score-chip">Score {computeScoreLabel(take, segment)}</span>
+              </div>
+              <div>
+                <h3>{take.title}</h3>
+                <p>{segment.description}</p>
+              </div>
+              <div className="take-facts">
+                <span>{asset.name}</span>
+                <span>{formatDuration(segment.start_sec, segment.end_sec)}</span>
+                <span>{asset.interchange_reel_name}</span>
+              </div>
+              <p>{take.selection_reason}</p>
+              {segment.transcript_excerpt ? <p>“{segment.transcript_excerpt}”</p> : null}
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="panel section">
+        <div className="section-header">
+          <div>
+            <h2>Rough Timeline</h2>
+          </div>
+          <p>
+            The timeline keeps order, trims, and source references stable so the same state can drive
+            browser review and Resolve export.
+          </p>
+        </div>
+        <div className="timeline-list">
+          {project.timeline.items.map((item, index) => {
+            const take = takeViews.find((view) => view.take.id === item.take_recommendation_id);
+
+            if (!take) {
+              return null;
+            }
+
+            const duration = Math.max(0, item.trim_out_sec - item.trim_in_sec);
+            const width = Math.max(16, Math.round((duration / totalTimelineDuration) * 100));
+
+            return (
+              <article className="timeline-item" key={item.id}>
+                <div className="timeline-index">{index + 1}</div>
+                <div>
+                  <div className="take-meta">
+                    <span className="badge">{item.label}</span>
+                    <span className="score-chip">{duration.toFixed(2)}s used</span>
+                  </div>
+                  <h3>{take.take.title}</h3>
+                  <p>{item.notes}</p>
+                  <div className="take-facts">
+                    <span>{item.source_reel}</span>
+                    <span>
+                      Segment trim {item.trim_in_sec.toFixed(2)}s to {item.trim_out_sec.toFixed(2)}s
+                    </span>
+                    <span>{take.asset.source_path}</span>
+                  </div>
+                  <div className="timeline-bar">
+                    <span style={{ width: `${width}%` }} />
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+        <p className="footnote">{project.timeline.story_summary}</p>
+      </section>
+    </main>
+  );
+}
+
+type MetricCardProps = {
+  label: string;
+  value: string;
+};
+
+function MetricCard({ label, value }: MetricCardProps) {
+  return (
+    <article className="metric-card">
+      <div className="metric-label">{label}</div>
+      <div className="metric-value">{value}</div>
+    </article>
+  );
+}

@@ -1,0 +1,16 @@
+[project]
+name = "timeline-cutter-analyzer"
+version = "0.1.0"
+description = "Analysis and export core for Timeline Cutter."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn>=0.34.0,<1.0.0"
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

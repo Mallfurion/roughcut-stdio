@@ -1,0 +1,17 @@
+{
+  "name": "timeline-cutter",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "setup": "bash ./scripts/setup.sh",
+    "process": "bash ./scripts/process.sh",
+    "view": "bash ./scripts/view.sh",
+    "export": "bash ./scripts/export.sh",
+    "dev:web": "npm run dev --workspace @timeline-cutter/web",
+    "build:web": "npm run build --workspace @timeline-cutter/web",
+    "lint:web": "npm run lint --workspace @timeline-cutter/web",
+    "test:python": "python3 -m unittest discover services/analyzer/tests -v"
+  }
+}
