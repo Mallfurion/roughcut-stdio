@@ -182,6 +182,7 @@ During processing, the CLI now reports:
 - AI provider configuration
 - whether LM Studio is reachable
 - whether the run is using LM Studio or falling back to deterministic analysis
+- AI runtime mode, shortlist size, keyframe count, width, concurrency, and cache status
 - discovered video file count
 - matched source asset count
 - a per-asset progress bar with elapsed time and estimated time remaining
@@ -206,6 +207,12 @@ TIMELINE_AI_PROVIDER=lmstudio
 TIMELINE_AI_MODEL=qwen3.5-9b
 TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
 TIMELINE_AI_TIMEOUT_SEC=45
+TIMELINE_AI_MODE=fast
+TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=2
+TIMELINE_AI_MAX_KEYFRAMES=2
+TIMELINE_AI_KEYFRAME_MAX_WIDTH=640
+TIMELINE_AI_CONCURRENCY=2
+TIMELINE_AI_CACHE=true
 ```
 
 Recommended local model:
@@ -219,6 +226,38 @@ Expected LM Studio setup:
 3. keep it available at `http://127.0.0.1:1234/v1`
 
 If LM Studio is not reachable, `process` still succeeds and falls back to deterministic structured analysis.
+
+### Fast AI Mode
+
+The default AI mode is `fast`.
+
+That mode is designed to keep local-model processing practical:
+
+- only the top shortlisted segments per asset go through LM Studio
+- non-shortlisted segments still receive deterministic structured analysis
+- only a small number of downscaled keyframes are sent
+- LM Studio results are cached on disk
+- a small bounded concurrency is used instead of fully serial processing
+
+Relevant settings:
+
+- `TIMELINE_AI_MODE=fast|full`
+- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET`
+- `TIMELINE_AI_MAX_KEYFRAMES`
+- `TIMELINE_AI_KEYFRAME_MAX_WIDTH`
+- `TIMELINE_AI_CONCURRENCY`
+- `TIMELINE_AI_CACHE=true|false`
+
+Recommended local defaults:
+
+- `TIMELINE_AI_MODE=fast`
+- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=2`
+- `TIMELINE_AI_MAX_KEYFRAMES=2`
+- `TIMELINE_AI_KEYFRAME_MAX_WIDTH=640`
+- `TIMELINE_AI_CONCURRENCY=2`
+- `TIMELINE_AI_CACHE=true`
+
+Use `TIMELINE_AI_MODE=full` only when you explicitly want full per-segment analysis and are willing to wait longer.
 
 You can check connectivity without running a full analysis:
 

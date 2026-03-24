@@ -9,8 +9,5 @@ __pycache__
 .DS_Store
 *.log
 media
-generated/*.json
-generated/*.fcpxml
-generated/*.log
-generated/*.txt
+generated/*
 .uv-cache

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.analyzer.app.ai import inspect_ai_provider_status  # noqa: E402
+from services.analyzer.app.ai import inspect_ai_provider_status, load_ai_analysis_config  # noqa: E402
 from services.analyzer.app.domain import Asset  # noqa: E402
 from services.analyzer.app.service import scan_and_analyze_media_root  # noqa: E402
 
@@ -26,12 +26,22 @@ def main() -> int:
     start_time = time.monotonic()
 
     provider_status = inspect_ai_provider_status()
+    analysis_config = load_ai_analysis_config()
     log_to_stderr(f"Media root: {media_root}")
     log_to_stderr(
         f"AI provider configured: {provider_status.configured_provider or 'deterministic'}"
         + (f" ({provider_status.model})" if provider_status.model else "")
     )
     log_to_stderr(provider_status.detail)
+    log_to_stderr(
+        "AI runtime mode: "
+        f"{analysis_config.mode}, "
+        f"shortlist={analysis_config.max_segments_per_asset}/asset, "
+        f"keyframes={analysis_config.max_keyframes_per_segment}, "
+        f"width={analysis_config.keyframe_max_width}px, "
+        f"concurrency={analysis_config.concurrency}, "
+        f"cache={'on' if analysis_config.cache_enabled else 'off'}"
+    )
 
     def status_callback(message: str) -> None:
         log_to_stderr(message)

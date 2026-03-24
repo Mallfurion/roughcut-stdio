@@ -3,8 +3,13 @@ from __future__ import annotations
 import unittest
 
 from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
-from services.analyzer.app.analysis import analyze_assets, fallback_segments, inspect_runtime_capabilities
-from services.analyzer.app.domain import Asset, ProjectMeta
+from services.analyzer.app.analysis import (
+    analyze_assets,
+    fallback_segments,
+    inspect_runtime_capabilities,
+    select_ai_target_segment_ids,
+)
+from services.analyzer.app.domain import Asset, CandidateSegment, ProjectMeta
 
 
 class StaticSceneDetector:
@@ -20,6 +25,18 @@ class StaticTranscriptProvider:
         if asset.has_speech and start_sec < 6:
             return "This is the line that turns the sequence."
         return ""
+
+
+class ExpensiveAnalyzerStub:
+    requires_keyframes = True
+
+    def analyze(self, *, asset: Asset, segment: CandidateSegment, evidence, story_prompt: str):
+        return DeterministicVisionLanguageAnalyzer().analyze(
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=story_prompt,
+        )
 
 
 class AnalysisPipelineTests(unittest.TestCase):
@@ -85,6 +102,64 @@ class AnalysisPipelineTests(unittest.TestCase):
     def test_capabilities_are_reported_as_bools(self) -> None:
         capabilities = inspect_runtime_capabilities()
         self.assertTrue(all(isinstance(value, bool) for value in capabilities.values()))
+
+    def test_fast_mode_shortlists_top_segments_for_expensive_analyzer(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Street Wide",
+            source_path="/tmp/street.mov",
+            proxy_path="/tmp/street.mov",
+            duration_sec=18.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C001",
+        )
+        segments = [
+            CandidateSegment(
+                id="segment-1",
+                asset_id="asset-1",
+                start_sec=0.0,
+                end_sec=5.0,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="One",
+                quality_metrics={"visual_novelty": 0.6, "subject_clarity": 0.7, "story_alignment": 0.62, "motion_energy": 0.5, "duration_fit": 0.8, "hook_strength": 0.6},
+            ),
+            CandidateSegment(
+                id="segment-2",
+                asset_id="asset-1",
+                start_sec=5.0,
+                end_sec=10.0,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Two",
+                quality_metrics={"visual_novelty": 0.85, "subject_clarity": 0.84, "story_alignment": 0.78, "motion_energy": 0.74, "duration_fit": 0.82, "hook_strength": 0.8},
+            ),
+            CandidateSegment(
+                id="segment-3",
+                asset_id="asset-1",
+                start_sec=10.0,
+                end_sec=15.0,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Three",
+                quality_metrics={"visual_novelty": 0.82, "subject_clarity": 0.79, "story_alignment": 0.76, "motion_energy": 0.68, "duration_fit": 0.8, "hook_strength": 0.77},
+            ),
+        ]
+
+        target_ids = select_ai_target_segment_ids(
+            asset=asset,
+            segments=segments,
+            analyzer=ExpensiveAnalyzerStub(),
+            max_segments_per_asset=2,
+            mode="fast",
+        )
+
+        self.assertEqual(len(target_ids), 2)
+        self.assertIn("segment-2", target_ids)
+        self.assertIn("segment-3", target_ids)
 
 
 if __name__ == "__main__":

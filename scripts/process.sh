@@ -45,15 +45,22 @@ echo "Processing media from ${MEDIA_DIR}"
 mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 
 AI_STATUS_LINES="$("$PYTHON_BIN" - <<'PY'
-from services.analyzer.app.ai import inspect_ai_provider_status
+from services.analyzer.app.ai import inspect_ai_provider_status, load_ai_analysis_config
 
 status = inspect_ai_provider_status()
+analysis = load_ai_analysis_config()
 print(f"ai_provider_configured={status.configured_provider}")
 print(f"ai_provider_effective={status.effective_provider}")
 print(f"ai_model={status.model}")
 print(f"ai_base_url={status.base_url}")
 print(f"ai_available={str(status.available).lower()}")
 print(f"ai_detail={status.detail}")
+print(f"ai_mode={analysis.mode}")
+print(f"ai_max_segments_per_asset={analysis.max_segments_per_asset}")
+print(f"ai_max_keyframes={analysis.max_keyframes_per_segment}")
+print(f"ai_keyframe_max_width={analysis.keyframe_max_width}")
+print(f"ai_concurrency={analysis.concurrency}")
+print(f"ai_cache_enabled={str(analysis.cache_enabled).lower()}")
 PY
 )"
 

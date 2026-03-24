@@ -8,7 +8,14 @@ import re
 import shutil
 from typing import Callable, Protocol
 
-from .ai import VisionLanguageAnalyzer, build_segment_evidence, default_vision_language_analyzer
+from .ai import (
+    DeterministicVisionLanguageAnalyzer,
+    VisionLanguageAnalyzer,
+    analyze_segments_bounded,
+    build_segment_evidence,
+    default_vision_language_analyzer,
+    load_ai_analysis_config,
+)
 from .domain import Asset, CandidateSegment, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .scoring import score_segment
@@ -146,7 +153,12 @@ def analyze_assets(
 ) -> ProjectData:
     detector = scene_detector or PySceneDetectAdapter()
     transcriber = transcript_provider or NoOpTranscriptProvider()
-    analyzer = segment_analyzer or default_vision_language_analyzer()
+    ai_config = load_ai_analysis_config()
+    analyzer = segment_analyzer or default_vision_language_analyzer(
+        artifacts_root=artifacts_root,
+        analysis_config=ai_config,
+    )
+    deterministic_analyzer = DeterministicVisionLanguageAnalyzer()
     candidate_segments: list[CandidateSegment] = []
 
     total_assets = len(assets)
@@ -172,6 +184,16 @@ def analyze_assets(
                     quality_metrics=metrics,
                 )
             )
+
+        ai_target_ids = select_ai_target_segment_ids(
+            asset=asset,
+            segments=asset_segments,
+            analyzer=analyzer,
+            max_segments_per_asset=ai_config.max_segments_per_asset,
+            mode=ai_config.mode,
+        )
+        ai_tasks: list[tuple[Asset, CandidateSegment, object, str]] = []
+
         for index, segment in enumerate(asset_segments):
             evidence = build_segment_evidence(
                 asset=asset,
@@ -180,15 +202,36 @@ def analyze_assets(
                 segment_index=index,
                 story_prompt=project.story_prompt,
                 artifacts_root=artifacts_root,
-                extract_keyframes=analyzer.requires_keyframes,
+                extract_keyframes=analyzer.requires_keyframes and segment.id in ai_target_ids,
+                max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
+                keyframe_max_width=ai_config.keyframe_max_width,
             )
             segment.evidence_bundle = evidence
-            segment.ai_understanding = analyzer.analyze(
-                asset=asset,
-                segment=segment,
-                evidence=evidence,
-                story_prompt=project.story_prompt,
-            )
+            if segment.id in ai_target_ids:
+                ai_tasks.append((asset, segment, evidence, project.story_prompt))
+            else:
+                understanding = deterministic_analyzer.analyze(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=project.story_prompt,
+                )
+                if analyzer.requires_keyframes and ai_config.mode == "fast":
+                    understanding.risk_flags = sorted(set([*understanding.risk_flags, "ai_skipped_fast_mode"]))
+                    understanding.rationale = (
+                        f"{understanding.rationale} AI was skipped for this segment in fast mode because "
+                        "it was not in the per-asset shortlist."
+                    )
+                segment.ai_understanding = understanding
+
+        ai_results = analyze_segments_bounded(
+            analyzer=analyzer,
+            tasks=ai_tasks,
+            concurrency=ai_config.concurrency,
+        )
+        for segment in asset_segments:
+            if segment.id in ai_results:
+                segment.ai_understanding = ai_results[segment.id]
         candidate_segments.extend(asset_segments)
         if progress_callback is not None:
             progress_callback(asset_index, total_assets, asset)
@@ -417,6 +460,30 @@ def select_segments_for_asset(asset: Asset, segments: list[CandidateSegment]) ->
             break
 
     return selected or segments[:1]
+
+
+def select_ai_target_segment_ids(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    analyzer: VisionLanguageAnalyzer,
+    max_segments_per_asset: int,
+    mode: str,
+) -> set[str]:
+    if not segments:
+        return set()
+    if not analyzer.requires_keyframes:
+        return {segment.id for segment in segments}
+    if mode != "fast":
+        return {segment.id for segment in segments}
+
+    ranked = sorted(
+        segments,
+        key=lambda segment: score_segment(asset, segment).total,
+        reverse=True,
+    )
+    limit = max(1, min(max_segments_per_asset, len(ranked)))
+    return {segment.id for segment in ranked[:limit]}
 
 
 def suggested_timeline_duration(segment: CandidateSegment) -> float:

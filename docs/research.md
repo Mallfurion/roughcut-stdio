@@ -1,6 +1,8 @@
-# Tooling Research
+# Research
 
-## Summary
+## Tooling Research
+
+### Summary
 
 The stack should be built around proxy-first media analysis, Python-native video processing, and a React review UI.
 
@@ -15,9 +17,9 @@ The most practical tool mix is:
 - `wavesurfer.js` for waveform and region interactions
 - `FCPXML` export generation for Resolve import
 
-## Tool Decisions By Concern
+### Tool Decisions By Concern
 
-### 1. Media Inspection And Extraction
+#### 1. Media Inspection And Extraction
 
 Recommended:
 
@@ -30,7 +32,7 @@ Why:
 - `ffprobe` has machine-readable JSON/XML output
 - `ffmpeg` concat demuxing is enough to generate preview cuts without building a full editing engine
 
-### 2. Candidate Take Segmentation
+#### 2. Candidate Take Segmentation
 
 Recommended:
 
@@ -47,7 +49,7 @@ Why:
   - hard duration limits to avoid giant candidate ranges
 - when footage is pure b-roll, the shot-boundary path becomes the primary segmentation method
 
-### 3. Speech-To-Text
+#### 3. Speech-To-Text
 
 Recommended default:
 
@@ -70,7 +72,7 @@ Why:
 - `WhisperX` adds alignment, VAD-driven segmentation, and diarization support, but increases pipeline complexity
 - transcription should be optional per segment, not assumed globally
 
-### 3b. Footage Without Speech
+#### 3b. Footage Without Speech
 
 Recommended:
 
@@ -91,7 +93,7 @@ Implementation note:
 - use transcript features opportunistically
 - never make transcript presence a prerequisite for candidate selection or story assembly
 
-### 4. Speaker Diarization
+#### 4. Speaker Diarization
 
 Recommended:
 
@@ -103,7 +105,7 @@ Why:
 - diarization is useful for interviews, podcasts, and dialogue-heavy footage
 - it adds operational complexity and is not necessary for strong first-pass take selection
 
-### 5. Semantic Scene Understanding
+#### 5. Semantic Scene Understanding
 
 Recommended:
 
@@ -144,7 +146,7 @@ Why:
 - local models are attractive for private footage and repeated experimentation
 - hosted models may still be useful for stronger narrative planning or evaluation baselines
 
-### 6. Timeline Preview In The Browser
+#### 6. Timeline Preview In The Browser
 
 Recommended:
 
@@ -163,7 +165,7 @@ What to avoid initially:
 - building a full drag-heavy nonlinear editor from scratch
 - trying to replicate Resolve inside the browser
 
-### 7. Rough-Cut Rendering
+#### 7. Rough-Cut Rendering
 
 Recommended:
 
@@ -175,7 +177,20 @@ Why:
 - preview renders are easy to share and verify
 - JSON remains the system of record for downstream export logic
 
-### 9. Resolve Export
+#### 8. Storage And Jobs
+
+Recommended:
+
+- metadata DB: `Postgres`
+- object/filesystem storage: local disk first, S3-compatible later
+- async jobs: start simple with a single worker queue, add Redis-backed jobs once concurrency matters
+
+Why:
+
+- the app is analysis-heavy and asynchronous by nature
+- job visibility matters more than scale on day one
+
+#### 9. Resolve Export
 
 Recommended:
 
@@ -199,20 +214,7 @@ Reason:
 - `.drt` is a Resolve-native timeline format, but it is not the best first target for externally generated interchange
 - scripting is useful later, but it is a more brittle dependency than file-based interchange
 
-### 8. Storage And Jobs
-
-Recommended:
-
-- metadata DB: `Postgres`
-- object/filesystem storage: local disk first, S3-compatible later
-- async jobs: start simple with a single worker queue, add Redis-backed jobs once concurrency matters
-
-Why:
-
-- the app is analysis-heavy and asynchronous by nature
-- job visibility matters more than scale on day one
-
-## Recommended MVP Stack
+### Recommended MVP Stack
 
 Frontend:
 
@@ -237,12 +239,76 @@ Optional AI adapters:
 - `WhisperX` only for projects that benefit from alignment and speaker labels
 - `FCPXML` export builder for Resolve handoff
 
-## Notes On Licensing And Product Risk
+### Notes On Licensing And Product Risk
 
 - `Remotion` is free for individuals and teams up to 3 people; larger teams need a paid license
 - a cloud-only AI design increases both cost sensitivity and privacy friction
 - local-first analysis is the safer default for editors working with private footage
 - interchange export must be validated against real Resolve imports early because XML conform details can be version-sensitive
+
+## Open Questions And Assumptions
+
+### Current Assumptions
+
+- the app runs locally as a web app against local media folders
+- DaVinci Resolve proxy media is available and preferred for analysis
+- the user wants AI assistance, not autonomous final editing
+- the first target workflow is footage review, rough-cut creation, and Resolve handoff
+
+### Questions To Resolve Early
+
+#### Media Structure
+
+- Are proxy filenames always traceable to source filenames?
+- Do projects contain multicam, synced audio, or mostly single-file clips?
+- Do clips usually contain dialogue, ambient footage, silent b-roll, or a mix?
+
+#### Editorial Intent
+
+- Is the main goal social montage, documentary structure, vlog narrative, interview edit, or something else?
+- Should the system preserve chronology by default?
+- How aggressive should the system be about rejecting weak clips entirely?
+
+#### Output Requirements
+
+- Is Resolve import required on day one via FCPXML, or is a fallback EDL acceptable in edge cases?
+- Do you want one best timeline, or multiple timeline variants?
+- Should the system export only selected takes, or also rejected-but-interesting alternates?
+
+#### AI Operating Model
+
+- Must all analysis stay local?
+- Is cloud AI acceptable for descriptions and story planning?
+- Do you need multilingual transcription from the start?
+- Is `LM Studio` acceptable as the default local inference runtime?
+- Which local model classes are realistic on the target hardware: text-only, multimodal, or both?
+- Do you want deterministic fallback ranking when the local model is unavailable, or should processing fail loudly?
+
+### Recommended Product Decisions
+
+- Make cloud semantics optional, not mandatory.
+- Keep diarization off by default.
+- Preserve chronology by default, especially for silent montage workflows, with an optional "cinematic reorder" mode later.
+- Support multiple suggested timelines after the first ranking model is stable.
+- Prioritize FCPXML as the first Resolve handoff format and validate it against real projects early.
+
+### Risks Worth Prototyping First
+
+- proxy/source mismatch edge cases
+- poor transcripts on noisy footage
+- silent b-roll over-selection with weak descriptions
+- over-selection of repetitive b-roll
+- story plans that sound coherent in text but feel weak in sequence
+- Resolve import failures caused by path, reel-name, frame-rate, or timecode mismatch
+
+### Immediate Next Prototype
+
+If implementation starts now, the first prototype should only answer:
+
+1. Can we map source clips to proxies reliably?
+2. Can we generate useful candidate segments from proxies?
+3. Can we produce descriptions that make an editor open the right moments first?
+4. Are LM Studio-backed segment descriptions good enough to replace the current placeholder scoring?
 
 ## Sources
 
@@ -258,7 +324,3 @@ Optional AI adapters:
 - [Remotion homepage and product overview](https://www.remotion.dev/)
 - [wavesurfer.js docs](https://wavesurfer.xyz/docs/)
 - [wavesurfer.js regions plugin docs](https://wavesurfer.xyz/docs/modules/plugins_regions)
-- [ffprobe documentation](https://ffmpeg.org/ffprobe.html)
-- [FFmpeg formats documentation, including concat demuxer](https://ffmpeg.org/ffmpeg-formats.html)
-- [DaVinci Resolve Editor's Guide excerpt on importing/exporting DRT and timeline interchange](https://documents.blackmagicdesign.com/UserManuals/DaVinci-Resolve-17-Editors-Guide.pdf?_v=1624410090000)
-- [DaVinci Resolve manual excerpt on XML/AAF conform settings](https://documents.blackmagicdesign.com/UserManuals/DaVinci_Resolve_15_Reference_Manual.pdf)

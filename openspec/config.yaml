@@ -1,0 +1,63 @@
+schema: spec-driven
+
+context: |
+  Project: Timeline Cutter
+
+  Product:
+  - Local-first AI-assisted footage screening and rough-cut tool.
+  - Primary job: help an editor avoid watching all footage manually.
+  - First promise: surface strong, usable, visually interesting segments from many videos.
+  - Secondary promise: assemble shortlisted segments into a rough timeline that can continue in DaVinci Resolve.
+
+  Current repository shape:
+  - Frontend: Next.js app under apps/web
+  - Backend/core: Python analyzer under services/analyzer
+  - Primary interaction model: npm run setup -> npm run process -> npm run view -> npm run export
+  - Optional AI health check: npm run check:ai
+
+  Current implemented baseline:
+  - Media discovery from TIMELINE_MEDIA_DIR or media/
+  - Source/proxy matching with source-only fallback
+  - Candidate segment generation
+  - Deterministic take selection and rough timeline generation
+  - FCPXML export for Resolve
+  - Phase 1 AI segment understanding with LM Studio or deterministic fallback
+  - Phase 1.5 fast/full local AI runtime controls, cache, and runtime reporting
+
+  Product constraints:
+  - Local-first by default
+  - Resolve handoff must stay reliable
+  - Deterministic fallback must remain available when AI is unavailable
+  - Silent footage and transcript-free workflows are first-class
+  - The editor stays in control; the tool proposes, the editor decides
+
+  Documentation model:
+  - OpenSpec is the canonical place for implemented baseline behavior and planned changes.
+  - docs/manifesto.md contains the product manifesto and direction.
+  - docs/research.md contains tooling research, assumptions, and open questions that are not yet represented as OpenSpec artifacts.
+
+rules:
+  proposal:
+    - Anchor the proposal to the product manifesto: reduce viewing burden, surface good segments, preserve editor control.
+    - State clearly whether the change is documenting shipped behavior or proposing new behavior.
+    - Name capabilities by workflow boundary, not by implementation detail.
+    - Prefer concise impact lists that mention the affected systems, generated artifacts, and user-visible workflow changes.
+
+  design:
+    - Preserve the npm-first workflow unless the change explicitly redefines it.
+    - Call out local-first, Resolve compatibility, deterministic fallback, and silent-footage support when they are relevant.
+    - Distinguish editorial intelligence from deterministic guardrails; do not move path integrity, timecode safety, or export correctness into model-only behavior.
+    - Explain runtime-cost tradeoffs whenever a design adds AI inference, batching, caching, or concurrency changes.
+
+  specs:
+    - Write normative behavior that matches either the shipped system or the exact requested change, not aspirational roadmap language.
+    - Prefer workflow-facing requirements such as processing, recommendation, review, timeline state, and export behavior.
+    - For AI-related specs, make fallback behavior explicit.
+    - For export-related specs, preserve stable source references, trim bounds, and Resolve-oriented interchange requirements.
+    - For review-related specs, keep the editor override path explicit when the change touches recommendations or timeline decisions.
+
+  tasks:
+    - Group tasks by vertical slice: analyzer, web app, export, docs, validation.
+    - Include verification tasks for the relevant repository commands such as npm run process, npm run view, npm run export, npm run build:web, and python3 -m unittest discover services/analyzer/tests -v.
+    - Include documentation updates when a change alters the user workflow, environment variables, generated artifacts, or AI/runtime behavior.
+    - Keep tasks concrete and implementation-ready; each checkbox should describe something that can be completed and verified in one session.

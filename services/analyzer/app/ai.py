@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import b64encode
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from hashlib import sha1
 import json
 import os
 from pathlib import Path
@@ -58,6 +60,16 @@ class AIProviderConfig:
 
 
 @dataclass(slots=True)
+class AIAnalysisConfig:
+    mode: str
+    max_segments_per_asset: int
+    max_keyframes_per_segment: int
+    keyframe_max_width: int
+    concurrency: int
+    cache_enabled: bool
+
+
+@dataclass(slots=True)
 class AIProviderStatus:
     configured_provider: str
     effective_provider: str
@@ -65,6 +77,10 @@ class AIProviderStatus:
     base_url: str
     available: bool
     detail: str
+
+
+class AIProviderRequestError(RuntimeError):
+    pass
 
 
 class OpenAICompatibleProviderClient:
@@ -80,35 +96,43 @@ class OpenAICompatibleProviderClient:
         image_paths: list[str],
         timeout_sec: float,
     ) -> dict[str, object]:
-        content: list[dict[str, str]] = [{"type": "text", "text": user_prompt}]
+        content: list[dict[str, object]] = [{"type": "text", "text": user_prompt}]
         for image_path in image_paths:
             data_url = encode_image_as_data_url(image_path)
             if data_url is None:
                 continue
-            content.append({"type": "image_url", "image_url": data_url})
+            content.append({"type": "image_url", "image_url": {"url": data_url}})
 
-        payload = {
+        base_payload = {
             "model": model,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content},
             ],
         }
-        req = request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with request.urlopen(req, timeout=timeout_sec) as response:
-            raw = response.read().decode("utf-8")
 
-        completion = json.loads(raw)
+        completion: dict[str, object] | None = None
+        last_error: str | None = None
+        payload_variants = [
+            {**base_payload, "response_format": {"type": "json_object"}},
+            base_payload,
+        ]
+        for payload in payload_variants:
+            try:
+                raw = self._post_chat_completion(payload=payload, timeout_sec=timeout_sec)
+                completion = json.loads(raw)
+                break
+            except AIProviderRequestError as exc:
+                last_error = str(exc)
+                continue
+
+        if completion is None:
+            raise AIProviderRequestError(last_error or "Chat completion request failed.")
+
         choices = completion.get("choices", [])
         if not choices:
-            raise ValueError("Provider returned no completion choices.")
+            raise AIProviderRequestError("Provider returned no completion choices.")
 
         message = choices[0].get("message", {})
         content_value = message.get("content", "")
@@ -120,8 +144,26 @@ class OpenAICompatibleProviderClient:
 
         parsed = parse_json_object(content_text)
         if parsed is None:
-            raise ValueError("Provider response did not contain valid JSON.")
+            raise AIProviderRequestError("Provider response did not contain valid JSON.")
         return parsed
+
+    def _post_chat_completion(self, *, payload: dict[str, object], timeout_sec: float) -> str:
+        req = request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=timeout_sec) as response:
+                return response.read().decode("utf-8")
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise AIProviderRequestError(
+                f"HTTP {exc.code} from provider: {body or exc.reason}"
+            ) from exc
+        except error.URLError as exc:
+            raise AIProviderRequestError(f"Provider request failed: {exc}") from exc
 
 
 class DeterministicVisionLanguageAnalyzer:
@@ -182,10 +224,13 @@ class LMStudioVisionLanguageAnalyzer:
         config: AIProviderConfig,
         client: ProviderClient,
         fallback: VisionLanguageAnalyzer | None = None,
+        cache_root: str | Path | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
+        self.last_error_detail = ""
+        self.cache_root = Path(cache_root) if cache_root is not None else None
 
     def analyze(
         self,
@@ -195,6 +240,17 @@ class LMStudioVisionLanguageAnalyzer:
         evidence: SegmentEvidence,
         story_prompt: str,
     ) -> SegmentUnderstanding:
+        cache_key = build_segment_cache_key(
+            model=self.config.model,
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=story_prompt,
+        )
+        cached = load_cached_understanding(self.cache_root, cache_key)
+        if cached is not None:
+            return cached
+
         try:
             payload = self.client.create_json_completion(
                 model=self.config.model,
@@ -218,7 +274,10 @@ class LMStudioVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
             )
-        except (OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError):
+            store_cached_understanding(self.cache_root, cache_key, understanding)
+            return understanding
+        except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            self.last_error_detail = str(exc)
             fallback = self.fallback.analyze(
                 asset=asset,
                 segment=segment,
@@ -227,17 +286,26 @@ class LMStudioVisionLanguageAnalyzer:
             )
             fallback.provider = "deterministic"
             fallback.provider_model = "fallback-v1"
-            fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_unavailable"]))
+            fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_request_failed"]))
+            fallback.rationale = (
+                f"{fallback.rationale} LM Studio request failed, so deterministic fallback was used: {self.last_error_detail}"
+            )
             return fallback
 
 
-def default_vision_language_analyzer() -> VisionLanguageAnalyzer:
+def default_vision_language_analyzer(
+    *,
+    artifacts_root: str | Path | None = None,
+    analysis_config: AIAnalysisConfig | None = None,
+) -> VisionLanguageAnalyzer:
     config = load_ai_provider_config()
     status = inspect_ai_provider_status(config=config)
+    runtime_config = analysis_config or load_ai_analysis_config()
     if status.effective_provider == "lmstudio" and config.model:
         return LMStudioVisionLanguageAnalyzer(
             config=config,
             client=OpenAICompatibleProviderClient(config.base_url),
+            cache_root=(Path(artifacts_root) / "ai-cache") if artifacts_root is not None and runtime_config.cache_enabled else None,
         )
     return DeterministicVisionLanguageAnalyzer()
 
@@ -254,6 +322,25 @@ def load_ai_provider_config() -> AIProviderConfig:
         model=os.environ.get("TIMELINE_AI_MODEL", "").strip(),
         base_url=os.environ.get("TIMELINE_AI_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
         timeout_sec=timeout_sec,
+    )
+
+
+def load_ai_analysis_config() -> AIAnalysisConfig:
+    mode = os.environ.get("TIMELINE_AI_MODE", "fast").strip().lower() or "fast"
+    if mode not in {"fast", "full"}:
+        mode = "fast"
+
+    max_segments_default = 2 if mode == "fast" else 99
+    max_keyframes_default = 2 if mode == "fast" else 4
+    max_width_default = 640 if mode == "fast" else 960
+
+    return AIAnalysisConfig(
+        mode=mode,
+        max_segments_per_asset=max(1, parse_int_env("TIMELINE_AI_MAX_SEGMENTS_PER_ASSET", max_segments_default)),
+        max_keyframes_per_segment=max(1, parse_int_env("TIMELINE_AI_MAX_KEYFRAMES", max_keyframes_default)),
+        keyframe_max_width=max(160, parse_int_env("TIMELINE_AI_KEYFRAME_MAX_WIDTH", max_width_default)),
+        concurrency=max(1, parse_int_env("TIMELINE_AI_CONCURRENCY", 2)),
+        cache_enabled=parse_bool_env("TIMELINE_AI_CACHE", True),
     )
 
 
@@ -337,8 +424,14 @@ def build_segment_evidence(
     story_prompt: str,
     artifacts_root: str | Path | None,
     extract_keyframes: bool,
+    max_keyframes_per_segment: int = 3,
+    keyframe_max_width: int = 640,
 ) -> SegmentEvidence:
-    keyframe_timestamps = keyframe_timestamps_for_segment(segment.start_sec, segment.end_sec)
+    keyframe_timestamps = keyframe_timestamps_for_segment(
+        segment.start_sec,
+        segment.end_sec,
+        target_count=max_keyframes_per_segment,
+    )
     keyframe_paths: list[str] = []
 
     if extract_keyframes and artifacts_root is not None:
@@ -347,6 +440,7 @@ def build_segment_evidence(
             segment=segment,
             timestamps=keyframe_timestamps,
             artifacts_root=artifacts_root,
+            max_width=keyframe_max_width,
         )
 
     context_window_start_sec = segment.start_sec
@@ -369,9 +463,14 @@ def build_segment_evidence(
     )
 
 
-def keyframe_timestamps_for_segment(start_sec: float, end_sec: float) -> list[float]:
+def keyframe_timestamps_for_segment(
+    start_sec: float,
+    end_sec: float,
+    target_count: int | None = None,
+) -> list[float]:
     duration = max(0.01, end_sec - start_sec)
-    count = 3 if duration <= 8.0 else 4
+    count = target_count or (3 if duration <= 8.0 else 4)
+    count = max(1, count)
     step = duration / (count + 1)
     return [start_sec + (step * index) for index in range(1, count + 1)]
 
@@ -382,6 +481,7 @@ def extract_segment_keyframes(
     segment: CandidateSegment,
     timestamps: list[float],
     artifacts_root: str | Path,
+    max_width: int,
 ) -> list[str]:
     if shutil.which("ffmpeg") is None:
         return []
@@ -402,6 +502,8 @@ def extract_segment_keyframes(
                 f"{timestamp:.3f}",
                 "-i",
                 asset.proxy_path,
+                "-vf",
+                f"scale=min({max_width}\\,iw):-2",
                 "-frames:v",
                 "1",
                 "-q:v",
@@ -646,3 +748,104 @@ def model_matches(requested_model: str, advertised_model: str) -> bool:
     requested = requested_model.strip().lower()
     advertised = advertised_model.strip().lower()
     return requested == advertised or requested in advertised or advertised in requested
+
+
+def analyze_segments_bounded(
+    *,
+    analyzer: VisionLanguageAnalyzer,
+    tasks: list[tuple[Asset, CandidateSegment, SegmentEvidence, str]],
+    concurrency: int,
+) -> dict[str, SegmentUnderstanding]:
+    if not tasks:
+        return {}
+    if concurrency <= 1 or len(tasks) == 1:
+        return {
+            segment.id: analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            for asset, segment, evidence, story_prompt in tasks
+        }
+
+    results: dict[str, SegmentUnderstanding] = {}
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(tasks))) as executor:
+        future_map = {
+            executor.submit(
+                analyzer.analyze,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            ): segment.id
+            for asset, segment, evidence, story_prompt in tasks
+        }
+        for future in as_completed(future_map):
+            segment_id = future_map[future]
+            results[segment_id] = future.result()
+    return results
+
+
+def load_cached_understanding(cache_root: Path | None, cache_key: str) -> SegmentUnderstanding | None:
+    if cache_root is None:
+        return None
+    target = cache_root / f"{cache_key}.json"
+    if not target.exists():
+        return None
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        return SegmentUnderstanding(**payload)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def store_cached_understanding(cache_root: Path | None, cache_key: str, understanding: SegmentUnderstanding) -> None:
+    if cache_root is None:
+        return
+    cache_root.mkdir(parents=True, exist_ok=True)
+    target = cache_root / f"{cache_key}.json"
+    try:
+        target.write_text(json.dumps(asdict(understanding), indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def build_segment_cache_key(
+    *,
+    model: str,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> str:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "model": model,
+        "asset_id": asset.id,
+        "asset_path": asset.proxy_path,
+        "segment_id": segment.id,
+        "segment_range": [segment.start_sec, segment.end_sec],
+        "analysis_mode": segment.analysis_mode,
+        "transcript_excerpt": evidence.transcript_excerpt,
+        "story_prompt": story_prompt,
+        "keyframe_timestamps_sec": evidence.keyframe_timestamps_sec,
+    }
+    return sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def parse_bool_env(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def parse_int_env(key: str, default: int) -> int:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
