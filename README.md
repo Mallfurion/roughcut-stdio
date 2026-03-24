@@ -190,6 +190,10 @@ During processing, the CLI now reports:
 - how many frames were sampled by the prefilter stage
 - how many segments were shortlisted before the VLM stage
 - how many segments actually reached the VLM stage
+- how many segments were analyzed live by LM Studio
+- how many segments were served from AI cache
+- how many segments fell back after an LM Studio failure
+- how many segments were skipped before VLM in fast mode
 - a per-asset progress bar with elapsed time and estimated time remaining
 
 You can customize the processing prompt with environment variables:

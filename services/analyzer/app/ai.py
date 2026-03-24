@@ -87,6 +87,14 @@ class AIProviderStatus:
     detail: str
 
 
+@dataclass(slots=True)
+class AIRuntimeStats:
+    live_segment_count: int = 0
+    cached_segment_count: int = 0
+    fallback_segment_count: int = 0
+    live_request_count: int = 0
+
+
 class AIProviderRequestError(RuntimeError):
     pass
 
@@ -238,6 +246,9 @@ class DeterministicVisionLanguageAnalyzer:
             for segment, evidence, story_prompt in tasks
         }
 
+    def runtime_stats(self) -> AIRuntimeStats:
+        return AIRuntimeStats()
+
 
 class LMStudioVisionLanguageAnalyzer:
     requires_keyframes = True
@@ -255,6 +266,7 @@ class LMStudioVisionLanguageAnalyzer:
         self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
         self.last_error_detail = ""
         self.cache_root = Path(cache_root) if cache_root is not None else None
+        self._runtime_stats = AIRuntimeStats()
 
     def analyze(
         self,
@@ -273,9 +285,11 @@ class LMStudioVisionLanguageAnalyzer:
         )
         cached = load_cached_understanding(self.cache_root, cache_key)
         if cached is not None:
+            self._runtime_stats.cached_segment_count += 1
             return cached
 
         try:
+            self._runtime_stats.live_request_count += 1
             payload = self.client.create_json_completion(
                 model=self.config.model,
                 system_prompt=segment_understanding_system_prompt(),
@@ -298,6 +312,10 @@ class LMStudioVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
             )
+            if understanding.provider == "lmstudio":
+                self._runtime_stats.live_segment_count += 1
+            else:
+                self._runtime_stats.fallback_segment_count += 1
             store_cached_understanding(self.cache_root, cache_key, understanding)
             return understanding
         except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -314,6 +332,7 @@ class LMStudioVisionLanguageAnalyzer:
             fallback.rationale = (
                 f"{fallback.rationale} LM Studio request failed, so deterministic fallback was used: {self.last_error_detail}"
             )
+            self._runtime_stats.fallback_segment_count += 1
             return fallback
 
     def analyze_asset_segments(
@@ -338,6 +357,7 @@ class LMStudioVisionLanguageAnalyzer:
             )
             cached = load_cached_understanding(self.cache_root, cache_key)
             if cached is not None:
+                self._runtime_stats.cached_segment_count += 1
                 results[segment.id] = cached
             else:
                 pending.append((segment, evidence, story_prompt, cache_key))
@@ -351,6 +371,7 @@ class LMStudioVisionLanguageAnalyzer:
         ]
 
         try:
+            self._runtime_stats.live_request_count += 1
             payload = self.client.create_json_completion(
                 model=self.config.model,
                 system_prompt=segment_batch_understanding_system_prompt(),
@@ -373,6 +394,10 @@ class LMStudioVisionLanguageAnalyzer:
                 understanding = normalized.get(segment.id)
                 if understanding is None:
                     continue
+                if understanding.provider == "lmstudio":
+                    self._runtime_stats.live_segment_count += 1
+                else:
+                    self._runtime_stats.fallback_segment_count += 1
                 store_cached_understanding(self.cache_root, cache_key, understanding)
                 results[segment.id] = understanding
         except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
@@ -391,9 +416,18 @@ class LMStudioVisionLanguageAnalyzer:
                     f"{fallback.rationale} LM Studio batch request failed, so deterministic fallback was used: "
                     f"{self.last_error_detail}"
                 )
+                self._runtime_stats.fallback_segment_count += 1
                 results[segment.id] = fallback
 
         return results
+
+    def runtime_stats(self) -> AIRuntimeStats:
+        return AIRuntimeStats(
+            live_segment_count=self._runtime_stats.live_segment_count,
+            cached_segment_count=self._runtime_stats.cached_segment_count,
+            fallback_segment_count=self._runtime_stats.fallback_segment_count,
+            live_request_count=self._runtime_stats.live_request_count,
+        )
 
 
 def default_vision_language_analyzer(
@@ -944,8 +978,10 @@ def action_tokens(segment: CandidateSegment, metrics: dict[str, float]) -> list[
 
 
 def encode_image_as_data_url(image_path: str) -> str | None:
+    if not image_path:
+        return None
     path = Path(image_path)
-    if not path.exists():
+    if not path.exists() or not path.is_file():
         return None
 
     suffix = path.suffix.lower()
@@ -1059,6 +1095,15 @@ def analyze_asset_segments(
         tasks=expanded,
         concurrency=concurrency,
     )
+
+
+def get_ai_runtime_stats(analyzer: VisionLanguageAnalyzer) -> AIRuntimeStats:
+    runtime_method = getattr(analyzer, "runtime_stats", None)
+    if callable(runtime_method):
+        stats = runtime_method()
+        if isinstance(stats, AIRuntimeStats):
+            return stats
+    return AIRuntimeStats()
 
 
 def load_cached_understanding(cache_root: Path | None, cache_key: str) -> SegmentUnderstanding | None:

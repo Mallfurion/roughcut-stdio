@@ -101,6 +101,9 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(best_takes), 2)
         self.assertGreaterEqual(len(project.timeline.items), 2)
         self.assertGreater(project.project.analysis_summary.get("prefilter_sample_count", 0), 0)
+        self.assertEqual(project.project.analysis_summary.get("ai_live_segment_count", 0), 0)
+        self.assertEqual(project.project.analysis_summary.get("ai_cached_segment_count", 0), 0)
+        self.assertEqual(project.project.analysis_summary.get("ai_fallback_segment_count", 0), 0)
 
     def test_capabilities_are_reported_as_bools(self) -> None:
         capabilities = inspect_runtime_capabilities()

@@ -92,6 +92,10 @@ if analysis_summary:
     print(f"Prefilter shortlisted: {analysis_summary.get('prefilter_shortlisted_count', 0)}")
     print(f"VLM target segments: {analysis_summary.get('vlm_target_count', 0)}")
     print(f"Filtered before VLM: {analysis_summary.get('filtered_before_vlm_count', 0)}")
+    print(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
+    print(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
+    print(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")
+    print(f"AI live requests: {analysis_summary.get('ai_live_request_count', 0)}")
 
 if source_only:
     print("")

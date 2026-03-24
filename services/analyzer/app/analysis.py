@@ -14,6 +14,7 @@ from .ai import (
     analyze_asset_segments,
     build_segment_evidence,
     default_vision_language_analyzer,
+    get_ai_runtime_stats,
     load_ai_analysis_config,
 )
 from .domain import (
@@ -309,6 +310,15 @@ def analyze_assets(
         "vlm_target_count": total_vlm_targets,
         "filtered_before_vlm_count": total_filtered_before_vlm,
     }
+    ai_runtime_stats = get_ai_runtime_stats(analyzer)
+    project.analysis_summary.update(
+        {
+            "ai_live_segment_count": ai_runtime_stats.live_segment_count,
+            "ai_cached_segment_count": ai_runtime_stats.cached_segment_count,
+            "ai_fallback_segment_count": ai_runtime_stats.fallback_segment_count,
+            "ai_live_request_count": ai_runtime_stats.live_request_count,
+        }
+    )
     if status_callback is not None:
         status_callback(
             "Prefilter sampled "
@@ -316,6 +326,13 @@ def analyze_assets(
             f"{len(candidate_segments)} segments before VLM analysis."
         )
         status_callback(f"VLM target segments: {total_vlm_targets}.")
+        status_callback(
+            "AI outcomes: "
+            f"live={ai_runtime_stats.live_segment_count}, "
+            f"cache={ai_runtime_stats.cached_segment_count}, "
+            f"fallback={ai_runtime_stats.fallback_segment_count}, "
+            f"skipped={total_filtered_before_vlm}."
+        )
 
     take_recommendations = build_take_recommendations(assets, candidate_segments)
     timeline = build_timeline(take_recommendations, candidate_segments, assets)

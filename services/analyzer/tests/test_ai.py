@@ -9,6 +9,7 @@ from services.analyzer.app.ai import (
     DeterministicVisionLanguageAnalyzer,
     LMStudioVisionLanguageAnalyzer,
     build_segment_evidence,
+    encode_image_as_data_url,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
     model_matches,
@@ -154,6 +155,10 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertTrue(model_matches("lmstudio-community/qwen3.5-9b", "qwen3.5-9b"))
         self.assertFalse(model_matches("qwen3.5-9b", "gemma-3-12b"))
 
+    def test_encode_image_as_data_url_ignores_empty_or_directory_paths(self) -> None:
+        self.assertIsNone(encode_image_as_data_url(""))
+        self.assertIsNone(encode_image_as_data_url("."))
+
     def test_lmstudio_analyzer_stores_and_reuses_cache(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
@@ -242,9 +247,14 @@ class AIPhaseOneTests(unittest.TestCase):
                 evidence=evidence,
                 story_prompt=evidence.story_prompt,
             )
+            stats = analyzer.runtime_stats()
 
         self.assertEqual(client.calls, 1)
         self.assertEqual(first.summary, second.summary)
+        self.assertEqual(stats.live_segment_count, 1)
+        self.assertEqual(stats.cached_segment_count, 1)
+        self.assertEqual(stats.fallback_segment_count, 0)
+        self.assertEqual(stats.live_request_count, 1)
 
     def test_lmstudio_analyzer_batches_asset_segments(self) -> None:
         class FakeBatchClient:
@@ -365,11 +375,16 @@ class AIPhaseOneTests(unittest.TestCase):
                     (segment_two, evidence_two, evidence_two.story_prompt),
                 ],
             )
+            stats = analyzer.runtime_stats()
 
         self.assertEqual(client.calls, 1)
         self.assertEqual(set(results.keys()), {"segment-1", "segment-2"})
         self.assertEqual(results["segment-1"].provider, "lmstudio")
         self.assertEqual(results["segment-2"].provider, "lmstudio")
+        self.assertEqual(stats.live_segment_count, 2)
+        self.assertEqual(stats.cached_segment_count, 0)
+        self.assertEqual(stats.fallback_segment_count, 0)
+        self.assertEqual(stats.live_request_count, 1)
 
 
 if __name__ == "__main__":
