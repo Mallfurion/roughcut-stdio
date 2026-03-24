@@ -13,6 +13,7 @@ class ProjectMeta:
     story_prompt: str
     status: str
     media_roots: list[str] = field(default_factory=list)
+    analysis_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -43,6 +44,19 @@ class SegmentEvidence:
     keyframe_paths: list[str]
     context_window_start_sec: float
     context_window_end_sec: float
+    metrics_snapshot: dict[str, float]
+    contact_sheet_path: str = ""
+
+
+@dataclass(slots=True)
+class PrefilterDecision:
+    score: float
+    shortlisted: bool
+    filtered_before_vlm: bool
+    selection_reason: str
+    sampled_frame_count: int
+    sampled_frame_timestamps_sec: list[float]
+    top_frame_timestamps_sec: list[float]
     metrics_snapshot: dict[str, float]
 
 
@@ -78,6 +92,7 @@ class CandidateSegment:
     transcript_excerpt: str
     description: str
     quality_metrics: dict[str, float]
+    prefilter: PrefilterDecision | None = None
     evidence_bundle: SegmentEvidence | None = None
     ai_understanding: SegmentUnderstanding | None = None
 
@@ -134,6 +149,7 @@ class ProjectData:
                 story_prompt=project_payload.get("story_prompt", ""),
                 status=project_payload.get("status", "draft"),
                 media_roots=project_payload.get("media_roots", []),
+                analysis_summary=project_payload.get("analysis_summary", {}),
             ),
             assets=[Asset(**asset) for asset in payload["assets"]],
             candidate_segments=[
@@ -146,6 +162,11 @@ class ProjectData:
                     transcript_excerpt=segment.get("transcript_excerpt", ""),
                     description=segment.get("description", ""),
                     quality_metrics=segment.get("quality_metrics", {}),
+                    prefilter=(
+                        PrefilterDecision(**segment["prefilter"])
+                        if segment.get("prefilter") is not None
+                        else None
+                    ),
                     evidence_bundle=(
                         SegmentEvidence(**segment["evidence_bundle"])
                         if segment.get("evidence_bundle") is not None

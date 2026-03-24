@@ -45,6 +45,14 @@ class VisionLanguageAnalyzer(Protocol):
     ) -> SegmentUnderstanding:
         ...
 
+    def analyze_asset_segments(
+        self,
+        *,
+        asset: Asset,
+        tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    ) -> dict[str, SegmentUnderstanding]:
+        ...
+
 
 class RankingPlanner(Protocol):
     def plan(self, payload: dict[str, object]) -> dict[str, object]:
@@ -214,6 +222,22 @@ class DeterministicVisionLanguageAnalyzer:
             story_relevance=story_relevance,
         )
 
+    def analyze_asset_segments(
+        self,
+        *,
+        asset: Asset,
+        tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    ) -> dict[str, SegmentUnderstanding]:
+        return {
+            segment.id: self.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            for segment, evidence, story_prompt in tasks
+        }
+
 
 class LMStudioVisionLanguageAnalyzer:
     requires_keyframes = True
@@ -264,7 +288,7 @@ class LMStudioVisionLanguageAnalyzer:
                 image_paths=evidence.keyframe_paths,
                 timeout_sec=self.config.timeout_sec,
             )
-            return normalize_model_output(
+            understanding = normalize_model_output(
                 payload,
                 provider="lmstudio",
                 model=self.config.model,
@@ -291,6 +315,85 @@ class LMStudioVisionLanguageAnalyzer:
                 f"{fallback.rationale} LM Studio request failed, so deterministic fallback was used: {self.last_error_detail}"
             )
             return fallback
+
+    def analyze_asset_segments(
+        self,
+        *,
+        asset: Asset,
+        tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    ) -> dict[str, SegmentUnderstanding]:
+        if not tasks:
+            return {}
+
+        results: dict[str, SegmentUnderstanding] = {}
+        pending: list[tuple[CandidateSegment, SegmentEvidence, str, str]] = []
+
+        for segment, evidence, story_prompt in tasks:
+            cache_key = build_segment_cache_key(
+                model=self.config.model,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            cached = load_cached_understanding(self.cache_root, cache_key)
+            if cached is not None:
+                results[segment.id] = cached
+            else:
+                pending.append((segment, evidence, story_prompt, cache_key))
+
+        if not pending:
+            return results
+
+        image_paths = [
+            batch_image_path_for_evidence(evidence)
+            for _segment, evidence, _story_prompt, _cache_key in pending
+        ]
+
+        try:
+            payload = self.client.create_json_completion(
+                model=self.config.model,
+                system_prompt=segment_batch_understanding_system_prompt(),
+                user_prompt=segment_batch_understanding_user_prompt(
+                    asset=asset,
+                    tasks=[(segment, evidence, story_prompt) for segment, evidence, story_prompt, _cache_key in pending],
+                ),
+                image_paths=image_paths,
+                timeout_sec=self.config.timeout_sec,
+            )
+            normalized = normalize_batch_model_output(
+                payload=payload,
+                provider="lmstudio",
+                model=self.config.model,
+                fallback=self.fallback,
+                asset=asset,
+                tasks=[(segment, evidence, story_prompt) for segment, evidence, story_prompt, _cache_key in pending],
+            )
+            for segment, _evidence, _story_prompt, cache_key in pending:
+                understanding = normalized.get(segment.id)
+                if understanding is None:
+                    continue
+                store_cached_understanding(self.cache_root, cache_key, understanding)
+                results[segment.id] = understanding
+        except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            self.last_error_detail = str(exc)
+            for segment, evidence, story_prompt, _cache_key in pending:
+                fallback = self.fallback.analyze(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=story_prompt,
+                )
+                fallback.provider = "deterministic"
+                fallback.provider_model = "fallback-v1"
+                fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_request_failed"]))
+                fallback.rationale = (
+                    f"{fallback.rationale} LM Studio batch request failed, so deterministic fallback was used: "
+                    f"{self.last_error_detail}"
+                )
+                results[segment.id] = fallback
+
+        return results
 
 
 def default_vision_language_analyzer(
@@ -330,9 +433,9 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     if mode not in {"fast", "full"}:
         mode = "fast"
 
-    max_segments_default = 2 if mode == "fast" else 99
-    max_keyframes_default = 2 if mode == "fast" else 4
-    max_width_default = 640 if mode == "fast" else 960
+    max_segments_default = 1 if mode == "fast" else 99
+    max_keyframes_default = 1 if mode == "fast" else 4
+    max_width_default = 448 if mode == "fast" else 960
 
     return AIAnalysisConfig(
         mode=mode,
@@ -433,6 +536,7 @@ def build_segment_evidence(
         target_count=max_keyframes_per_segment,
     )
     keyframe_paths: list[str] = []
+    contact_sheet_path = ""
 
     if extract_keyframes and artifacts_root is not None:
         keyframe_paths = extract_segment_keyframes(
@@ -441,6 +545,12 @@ def build_segment_evidence(
             timestamps=keyframe_timestamps,
             artifacts_root=artifacts_root,
             max_width=keyframe_max_width,
+        )
+        contact_sheet_path = create_segment_contact_sheet(
+            asset=asset,
+            segment=segment,
+            keyframe_paths=keyframe_paths,
+            artifacts_root=artifacts_root,
         )
 
     context_window_start_sec = segment.start_sec
@@ -457,6 +567,7 @@ def build_segment_evidence(
         analysis_mode=segment.analysis_mode,
         keyframe_timestamps_sec=[round(timestamp, 3) for timestamp in keyframe_timestamps],
         keyframe_paths=keyframe_paths,
+        contact_sheet_path=contact_sheet_path,
         context_window_start_sec=round(context_window_start_sec, 3),
         context_window_end_sec=round(context_window_end_sec, 3),
         metrics_snapshot=dict(segment.quality_metrics),
@@ -520,6 +631,46 @@ def extract_segment_keyframes(
     return extracted
 
 
+def create_segment_contact_sheet(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    keyframe_paths: list[str],
+    artifacts_root: str | Path,
+) -> str:
+    if not keyframe_paths:
+        return ""
+    if len(keyframe_paths) == 1:
+        return keyframe_paths[0]
+    if shutil.which("ffmpeg") is None:
+        return keyframe_paths[0]
+
+    contact_dir = Path(artifacts_root) / "contact-sheets" / asset.id
+    contact_dir.mkdir(parents=True, exist_ok=True)
+    target = contact_dir / f"{segment.id}.jpg"
+    command = ["ffmpeg", "-y", "-v", "error"]
+    for path in keyframe_paths:
+        command.extend(["-i", path])
+    command.extend(
+        [
+            "-filter_complex",
+            f"hstack=inputs={len(keyframe_paths)}",
+            "-q:v",
+            "4",
+            str(target),
+        ]
+    )
+    process = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode == 0 and target.exists():
+        return str(target)
+    return keyframe_paths[0]
+
+
 def segment_understanding_system_prompt() -> str:
     return (
         "You analyze short video segments for an editor. "
@@ -527,6 +678,17 @@ def segment_understanding_system_prompt() -> str:
         "Use concise editorial language. "
         "Keys required: summary, subjects, actions, shot_type, camera_motion, mood, "
         "story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
+        "visual_distinctiveness, clarity, story_relevance."
+    )
+
+
+def segment_batch_understanding_system_prompt() -> str:
+    return (
+        "You analyze shortlisted video segments from the same source clip for an editor. "
+        "Return JSON only. Do not add markdown. "
+        "Respond with an object containing a `segments` array. "
+        "Each array item must include: segment_id, summary, subjects, actions, shot_type, camera_motion, "
+        "mood, story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
         "visual_distinctiveness, clarity, story_relevance."
     )
 
@@ -559,6 +721,44 @@ def segment_understanding_user_prompt(
         "Decide what is happening in the segment, whether it is editorially useful, "
         "what role it could play in a rough cut, and whether it should be kept."
     )
+
+
+def segment_batch_understanding_user_prompt(
+    *,
+    asset: Asset,
+    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+) -> str:
+    story_prompt = tasks[0][2] if tasks else ""
+    lines = [
+        "Project story prompt:",
+        story_prompt,
+        "",
+        "Asset metadata:",
+        f"- Asset: {asset.name}",
+        f"- Reel: {asset.interchange_reel_name}",
+        "",
+        "Images are provided in the same order as the segments below. Each image is a stitched contact sheet for one segment.",
+        "Evaluate each segment independently and return output for every listed segment.",
+        "",
+        "Segments:",
+    ]
+    for index, (segment, evidence, _story_prompt) in enumerate(tasks, start=1):
+        metrics = ", ".join(
+            f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
+        )
+        transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+        lines.extend(
+            [
+                f"{index}. segment_id={segment.id}",
+                f"   - analysis_mode: {segment.analysis_mode}",
+                f"   - range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s",
+                f"   - context: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s",
+                f"   - keyframes: {', '.join(f'{timestamp:.2f}s' for timestamp in evidence.keyframe_timestamps_sec)}",
+                f"   - transcript: {transcript}",
+                f"   - metrics: {metrics}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def normalize_model_output(
@@ -606,6 +806,60 @@ def normalize_model_output(
             number_or_default(payload.get("story_relevance"), fallback_understanding.story_relevance)
         ),
     )
+
+
+def normalize_batch_model_output(
+    *,
+    payload: dict[str, object],
+    provider: str,
+    model: str,
+    fallback: VisionLanguageAnalyzer,
+    asset: Asset,
+    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+) -> dict[str, SegmentUnderstanding]:
+    items = payload.get("segments", [])
+    by_segment_id = {
+        str(item.get("segment_id", "")).strip(): item
+        for item in items
+        if isinstance(item, dict)
+    } if isinstance(items, list) else {}
+
+    normalized: dict[str, SegmentUnderstanding] = {}
+    for segment, evidence, story_prompt in tasks:
+        item = by_segment_id.get(segment.id)
+        if item is None:
+            understanding = fallback.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            understanding.risk_flags = sorted(set([*understanding.risk_flags, "lmstudio_incomplete_batch_result"]))
+            understanding.rationale = (
+                f"{understanding.rationale} LM Studio batch response did not include this segment, "
+                "so deterministic fallback was used."
+            )
+        else:
+            understanding = normalize_model_output(
+                item,
+                provider=provider,
+                model=model,
+                fallback=fallback,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+        normalized[segment.id] = understanding
+    return normalized
+
+
+def batch_image_path_for_evidence(evidence: SegmentEvidence) -> str:
+    if evidence.contact_sheet_path:
+        return evidence.contact_sheet_path
+    if evidence.keyframe_paths:
+        return evidence.keyframe_paths[0]
+    return ""
 
 
 def infer_story_roles(segment: CandidateSegment, metrics: dict[str, float]) -> list[str]:
@@ -787,6 +1041,26 @@ def analyze_segments_bounded(
     return results
 
 
+def analyze_asset_segments(
+    *,
+    analyzer: VisionLanguageAnalyzer,
+    asset: Asset,
+    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    concurrency: int,
+) -> dict[str, SegmentUnderstanding]:
+    if not tasks:
+        return {}
+    batch_method = getattr(analyzer, "analyze_asset_segments", None)
+    if callable(batch_method):
+        return batch_method(asset=asset, tasks=tasks)
+    expanded = [(asset, segment, evidence, story_prompt) for segment, evidence, story_prompt in tasks]
+    return analyze_segments_bounded(
+        analyzer=analyzer,
+        tasks=expanded,
+        concurrency=concurrency,
+    )
+
+
 def load_cached_understanding(cache_root: Path | None, cache_key: str) -> SegmentUnderstanding | None:
     if cache_root is None:
         return None
@@ -806,7 +1080,8 @@ def store_cached_understanding(cache_root: Path | None, cache_key: str, understa
     cache_root.mkdir(parents=True, exist_ok=True)
     target = cache_root / f"{cache_key}.json"
     try:
-        target.write_text(json.dumps(asdict(understanding), indent=2), encoding="utf-8")
+        payload = asdict(understanding) if hasattr(understanding, "__dataclass_fields__") else dict(understanding)
+        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         return
 

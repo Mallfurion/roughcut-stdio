@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 
 from services.analyzer.app.ai import (
     AIProviderConfig,
     DeterministicVisionLanguageAnalyzer,
+    LMStudioVisionLanguageAnalyzer,
     build_segment_evidence,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
@@ -150,6 +153,223 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertTrue(model_matches("qwen3.5-9b", "lmstudio-community/qwen3.5-9b"))
         self.assertTrue(model_matches("lmstudio-community/qwen3.5-9b", "qwen3.5-9b"))
         self.assertFalse(model_matches("qwen3.5-9b", "gemma-3-12b"))
+
+    def test_lmstudio_analyzer_stores_and_reuses_cache(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create_json_completion(self, *, model: str, system_prompt: str, user_prompt: str, image_paths, timeout_sec: float):
+                self.calls += 1
+                return {
+                    "summary": "Strong visual moment.",
+                    "subjects": ["crowd"],
+                    "actions": ["moving"],
+                    "shot_type": "wide",
+                    "camera_motion": "gentle movement",
+                    "mood": "energetic",
+                    "story_roles": ["bridge"],
+                    "quality_findings": ["usable motion"],
+                    "keep_label": "keep",
+                    "confidence": 0.88,
+                    "rationale": "Useful coverage.",
+                    "risk_flags": [],
+                    "visual_distinctiveness": 0.81,
+                    "clarity": 0.77,
+                    "story_relevance": 0.74,
+                }
+
+        asset = Asset(
+            id="asset-2",
+            name="Vendor Detail",
+            source_path="/tmp/vendor.mov",
+            proxy_path="/tmp/vendor.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C002",
+        )
+        segment = CandidateSegment(
+            id="segment-1",
+            asset_id="asset-2",
+            start_sec=0.0,
+            end_sec=5.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Vendor Detail provides a transition-ready moment.",
+            quality_metrics={
+                "visual_novelty": 0.82,
+                "subject_clarity": 0.79,
+                "story_alignment": 0.76,
+                "motion_energy": 0.66,
+                "duration_fit": 0.83,
+            },
+        )
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segment,
+            asset_segments=[segment],
+            segment_index=0,
+            story_prompt="Build a textured market sequence.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+        client = FakeClient()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            analyzer = LMStudioVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="lmstudio",
+                    model="qwen3.5-9b",
+                    base_url="http://127.0.0.1:1234/v1",
+                    timeout_sec=30.0,
+                ),
+                client=client,
+                cache_root=Path(tempdir),
+            )
+
+            first = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+            second = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(first.summary, second.summary)
+
+    def test_lmstudio_analyzer_batches_asset_segments(self) -> None:
+        class FakeBatchClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def create_json_completion(self, *, model: str, system_prompt: str, user_prompt: str, image_paths, timeout_sec: float):
+                self.calls += 1
+                return {
+                    "segments": [
+                        {
+                            "segment_id": "segment-1",
+                            "summary": "First strong moment.",
+                            "subjects": ["crowd"],
+                            "actions": ["moving"],
+                            "shot_type": "wide",
+                            "camera_motion": "gentle movement",
+                            "mood": "energetic",
+                            "story_roles": ["bridge"],
+                            "quality_findings": ["usable motion"],
+                            "keep_label": "keep",
+                            "confidence": 0.81,
+                            "rationale": "Useful first beat.",
+                            "risk_flags": [],
+                            "visual_distinctiveness": 0.8,
+                            "clarity": 0.76,
+                            "story_relevance": 0.72,
+                        },
+                        {
+                            "segment_id": "segment-2",
+                            "summary": "Second strong moment.",
+                            "subjects": ["subject"],
+                            "actions": ["walking"],
+                            "shot_type": "medium",
+                            "camera_motion": "active movement",
+                            "mood": "cinematic",
+                            "story_roles": ["payoff"],
+                            "quality_findings": ["clear framing"],
+                            "keep_label": "keep",
+                            "confidence": 0.84,
+                            "rationale": "Useful second beat.",
+                            "risk_flags": [],
+                            "visual_distinctiveness": 0.83,
+                            "clarity": 0.79,
+                            "story_relevance": 0.75,
+                        },
+                    ]
+                }
+
+        asset = Asset(
+            id="asset-3",
+            name="Crowd Walk",
+            source_path="/tmp/crowd.mov",
+            proxy_path="/tmp/crowd.mov",
+            duration_sec=16.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C003",
+        )
+        segment_one = CandidateSegment(
+            id="segment-1",
+            asset_id="asset-3",
+            start_sec=0.0,
+            end_sec=4.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="First",
+            quality_metrics={"visual_novelty": 0.78, "subject_clarity": 0.74, "story_alignment": 0.7, "motion_energy": 0.62, "duration_fit": 0.81},
+        )
+        segment_two = CandidateSegment(
+            id="segment-2",
+            asset_id="asset-3",
+            start_sec=4.0,
+            end_sec=8.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Second",
+            quality_metrics={"visual_novelty": 0.81, "subject_clarity": 0.78, "story_alignment": 0.73, "motion_energy": 0.68, "duration_fit": 0.82},
+        )
+        evidence_one = build_segment_evidence(
+            asset=asset,
+            segment=segment_one,
+            asset_segments=[segment_one, segment_two],
+            segment_index=0,
+            story_prompt="Build a rhythmic sequence.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+        evidence_two = build_segment_evidence(
+            asset=asset,
+            segment=segment_two,
+            asset_segments=[segment_one, segment_two],
+            segment_index=1,
+            story_prompt="Build a rhythmic sequence.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+        client = FakeBatchClient()
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            analyzer = LMStudioVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="lmstudio",
+                    model="moondream-2b-2025-04-14",
+                    base_url="http://127.0.0.1:1234/v1",
+                    timeout_sec=30.0,
+                ),
+                client=client,
+                cache_root=Path(tempdir),
+            )
+
+            results = analyzer.analyze_asset_segments(
+                asset=asset,
+                tasks=[
+                    (segment_one, evidence_one, evidence_one.story_prompt),
+                    (segment_two, evidence_two, evidence_two.story_prompt),
+                ],
+            )
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(set(results.keys()), {"segment-1", "segment-2"})
+        self.assertEqual(results["segment-1"].provider, "lmstudio")
+        self.assertEqual(results["segment-2"].provider, "lmstudio")
 
 
 if __name__ == "__main__":

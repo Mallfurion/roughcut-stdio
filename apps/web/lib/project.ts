@@ -21,6 +21,7 @@ export type SegmentEvidence = {
   analysis_mode: "speech" | "visual";
   keyframe_timestamps_sec: number[];
   keyframe_paths: string[];
+  contact_sheet_path?: string;
   context_window_start_sec: number;
   context_window_end_sec: number;
   metrics_snapshot: QualityMetrics;
@@ -108,6 +109,13 @@ export type TimelineProject = {
     story_prompt: string;
     status: string;
     media_roots?: string[];
+    analysis_summary?: {
+      prefilter_sample_count?: number;
+      candidate_segment_count?: number;
+      prefilter_shortlisted_count?: number;
+      vlm_target_count?: number;
+      filtered_before_vlm_count?: number;
+    };
   };
   assets: Asset[];
   candidate_segments: CandidateSegment[];

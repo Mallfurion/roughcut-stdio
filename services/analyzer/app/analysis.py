@@ -11,13 +11,23 @@ from typing import Callable, Protocol
 from .ai import (
     DeterministicVisionLanguageAnalyzer,
     VisionLanguageAnalyzer,
-    analyze_segments_bounded,
+    analyze_asset_segments,
     build_segment_evidence,
     default_vision_language_analyzer,
     load_ai_analysis_config,
 )
-from .domain import Asset, CandidateSegment, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
+from .domain import (
+    Asset,
+    CandidateSegment,
+    PrefilterDecision,
+    ProjectData,
+    ProjectMeta,
+    TakeRecommendation,
+    Timeline,
+    TimelineItem,
+)
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
+from .prefilter import aggregate_segment_prefilter, build_prefilter_segments, sample_asset_signals
 from .scoring import score_segment
 
 
@@ -137,6 +147,7 @@ def build_project_from_media_roots(
         transcript_provider=transcript_provider,
         segment_analyzer=segment_analyzer,
         artifacts_root=artifacts_root,
+        status_callback=status_callback,
         progress_callback=progress_callback,
     )
 
@@ -149,6 +160,7 @@ def analyze_assets(
     transcript_provider: TranscriptProvider | None = None,
     segment_analyzer: VisionLanguageAnalyzer | None = None,
     artifacts_root: str | Path | None = None,
+    status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
     detector = scene_detector or PySceneDetectAdapter()
@@ -160,10 +172,24 @@ def analyze_assets(
     )
     deterministic_analyzer = DeterministicVisionLanguageAnalyzer()
     candidate_segments: list[CandidateSegment] = []
+    total_prefilter_samples = 0
+    total_prefilter_shortlisted = 0
+    total_vlm_targets = 0
+    total_filtered_before_vlm = 0
 
     total_assets = len(assets)
     for asset_index, asset in enumerate(assets, start=1):
-        segment_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
+        base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
+        if not base_ranges:
+            base_ranges = fallback_segments(asset.duration_sec)
+        prefilter_signals = sample_asset_signals(asset)
+        total_prefilter_samples += len(prefilter_signals)
+        segment_ranges = build_prefilter_segments(
+            asset=asset,
+            base_ranges=base_ranges,
+            signals=prefilter_signals,
+            top_windows=2 if ai_config.mode == "fast" else 3,
+        )
         if not segment_ranges:
             segment_ranges = fallback_segments(asset.duration_sec)
 
@@ -171,7 +197,18 @@ def analyze_assets(
         for index, (start_sec, end_sec) in enumerate(segment_ranges, start=1):
             excerpt = transcriber.excerpt(asset, start_sec, end_sec).strip() if asset.has_speech else ""
             analysis_mode = "speech" if excerpt else "visual"
-            metrics = synthesize_quality_metrics(asset, start_sec, end_sec, analysis_mode)
+            prefilter_snapshot = aggregate_segment_prefilter(
+                signals=prefilter_signals,
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+            metrics = synthesize_quality_metrics(
+                asset,
+                start_sec,
+                end_sec,
+                analysis_mode,
+                prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
+            )
             asset_segments.append(
                 CandidateSegment(
                     id=f"{asset.id}-segment-{index:02d}",
@@ -182,9 +219,25 @@ def analyze_assets(
                     transcript_excerpt=excerpt,
                     description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
                     quality_metrics=metrics,
+                    prefilter=PrefilterDecision(
+                        score=float(prefilter_snapshot["score"]),
+                        shortlisted=False,
+                        filtered_before_vlm=False,
+                        selection_reason="Segment has not been evaluated for VLM shortlist yet.",
+                        sampled_frame_count=int(prefilter_snapshot["sampled_frame_count"]),
+                        sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
+                        top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
+                        metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
+                    ),
                 )
             )
 
+        prefilter_shortlist_ids = select_prefilter_shortlist_ids(
+            asset=asset,
+            segments=asset_segments,
+            max_segments_per_asset=ai_config.max_segments_per_asset,
+            mode=ai_config.mode,
+        )
         ai_target_ids = select_ai_target_segment_ids(
             asset=asset,
             segments=asset_segments,
@@ -192,9 +245,21 @@ def analyze_assets(
             max_segments_per_asset=ai_config.max_segments_per_asset,
             mode=ai_config.mode,
         )
-        ai_tasks: list[tuple[Asset, CandidateSegment, object, str]] = []
+        total_prefilter_shortlisted += len(prefilter_shortlist_ids)
+        total_vlm_targets += len(ai_target_ids)
+        ai_tasks: list[tuple[CandidateSegment, object, str]] = []
 
         for index, segment in enumerate(asset_segments):
+            if segment.prefilter is not None:
+                segment.prefilter.shortlisted = segment.id in prefilter_shortlist_ids
+                segment.prefilter.filtered_before_vlm = analyzer.requires_keyframes and segment.id not in ai_target_ids
+                segment.prefilter.selection_reason = describe_prefilter_selection(
+                    score=segment.prefilter.score,
+                    shortlisted=segment.prefilter.shortlisted,
+                    filtered_before_vlm=segment.prefilter.filtered_before_vlm,
+                )
+                if segment.prefilter.filtered_before_vlm:
+                    total_filtered_before_vlm += 1
             evidence = build_segment_evidence(
                 asset=asset,
                 segment=segment,
@@ -208,7 +273,7 @@ def analyze_assets(
             )
             segment.evidence_bundle = evidence
             if segment.id in ai_target_ids:
-                ai_tasks.append((asset, segment, evidence, project.story_prompt))
+                ai_tasks.append((segment, evidence, project.story_prompt))
             else:
                 understanding = deterministic_analyzer.analyze(
                     asset=asset,
@@ -224,8 +289,9 @@ def analyze_assets(
                     )
                 segment.ai_understanding = understanding
 
-        ai_results = analyze_segments_bounded(
+        ai_results = analyze_asset_segments(
             analyzer=analyzer,
+            asset=asset,
             tasks=ai_tasks,
             concurrency=ai_config.concurrency,
         )
@@ -235,6 +301,21 @@ def analyze_assets(
         candidate_segments.extend(asset_segments)
         if progress_callback is not None:
             progress_callback(asset_index, total_assets, asset)
+
+    project.analysis_summary = {
+        "prefilter_sample_count": total_prefilter_samples,
+        "candidate_segment_count": len(candidate_segments),
+        "prefilter_shortlisted_count": total_prefilter_shortlisted,
+        "vlm_target_count": total_vlm_targets,
+        "filtered_before_vlm_count": total_filtered_before_vlm,
+    }
+    if status_callback is not None:
+        status_callback(
+            "Prefilter sampled "
+            f"{total_prefilter_samples} frames and shortlisted {total_prefilter_shortlisted}/"
+            f"{len(candidate_segments)} segments before VLM analysis."
+        )
+        status_callback(f"VLM target segments: {total_vlm_targets}.")
 
     take_recommendations = build_take_recommendations(assets, candidate_segments)
     timeline = build_timeline(take_recommendations, candidate_segments, assets)
@@ -359,7 +440,32 @@ def synthesize_quality_metrics(
     start_sec: float,
     end_sec: float,
     analysis_mode: str,
+    prefilter_snapshot: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    if prefilter_snapshot and prefilter_snapshot.get("prefilter_score", 0.0) > 0.0:
+        duration = max(0.1, end_sec - start_sec)
+        duration_fit = clamp(1.0 - abs(duration - 5.5) / 7.0)
+        sharpness = clamp(prefilter_snapshot.get("sharpness", 0.0))
+        stability = clamp(prefilter_snapshot.get("stability", 0.0))
+        subject_clarity = clamp(prefilter_snapshot.get("subject_clarity", 0.0))
+        motion_energy = clamp(prefilter_snapshot.get("motion_energy", 0.0))
+        visual_novelty = clamp(prefilter_snapshot.get("visual_novelty", 0.0))
+        prefilter_score = clamp(prefilter_snapshot.get("prefilter_score", 0.0))
+        hook_strength = clamp((prefilter_score * 0.5) + (subject_clarity * 0.25) + (motion_energy * 0.25))
+        story_alignment = clamp((prefilter_score * 0.45) + (visual_novelty * 0.25) + (subject_clarity * 0.2) + (duration_fit * 0.1))
+        speech_presence = 0.92 if analysis_mode == "speech" else 0.0
+        return {
+            "sharpness": round(sharpness, 4),
+            "stability": round(stability, 4),
+            "visual_novelty": round(visual_novelty, 4),
+            "subject_clarity": round(subject_clarity, 4),
+            "motion_energy": round(motion_energy, 4),
+            "duration_fit": round(duration_fit, 4),
+            "speech_presence": round(speech_presence, 4),
+            "hook_strength": round(hook_strength, 4),
+            "story_alignment": round(story_alignment, 4),
+        }
+
     duration = max(0.1, end_sec - start_sec)
     seed = seeded_value(asset.id, start_sec, end_sec)
     variation = seeded_value(asset.name, end_sec, start_sec)
@@ -473,17 +579,48 @@ def select_ai_target_segment_ids(
     if not segments:
         return set()
     if not analyzer.requires_keyframes:
+        return set()
+    if mode != "fast":
         return {segment.id for segment in segments}
+
+    return select_prefilter_shortlist_ids(
+        asset=asset,
+        segments=segments,
+        max_segments_per_asset=max_segments_per_asset,
+        mode=mode,
+    )
+
+
+def select_prefilter_shortlist_ids(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    max_segments_per_asset: int,
+    mode: str,
+) -> set[str]:
+    if not segments:
+        return set()
     if mode != "fast":
         return {segment.id for segment in segments}
 
     ranked = sorted(
         segments,
-        key=lambda segment: score_segment(asset, segment).total,
+        key=lambda segment: (
+            segment.prefilter.score if segment.prefilter is not None else score_segment(asset, segment).total
+        ),
         reverse=True,
     )
     limit = max(1, min(max_segments_per_asset, len(ranked)))
     return {segment.id for segment in ranked[:limit]}
+
+
+def describe_prefilter_selection(*, score: float, shortlisted: bool, filtered_before_vlm: bool) -> str:
+    score_label = f"{round(score * 100):d}/100"
+    if filtered_before_vlm:
+        return f"Filtered before VLM analysis during vision prefiltering at {score_label}."
+    if shortlisted:
+        return f"Shortlisted by vision prefiltering at {score_label}."
+    return f"Scored {score_label} during vision prefiltering."
 
 
 def suggested_timeline_duration(segment: CandidateSegment) -> float:

@@ -161,7 +161,9 @@ What it does:
 - classifies source clips and proxy clips
 - matches proxies to sources
 - keeps source-only clips when no matching proxy exists
+- samples frames and runs a cheap visual prefilter before any VLM call
 - generates candidate segments
+- shortlists only the strongest candidate regions per asset for VLM refinement
 - builds evidence bundles for each segment
 - runs Phase 1 AI understanding when configured
 - falls back to deterministic structured analysis when no AI provider is available
@@ -174,7 +176,7 @@ Output files:
 - `generated/project.json`
 - `generated/process.log`
 - `generated/process-summary.txt`
-- `generated/analysis/` for extracted keyframes when `ffmpeg` is available and the AI provider requires them
+- `generated/analysis/` for extracted keyframes, contact sheets, and cached AI artifacts when `ffmpeg` is available and the AI provider requires them
 
 During processing, the CLI now reports:
 
@@ -185,6 +187,9 @@ During processing, the CLI now reports:
 - AI runtime mode, shortlist size, keyframe count, width, concurrency, and cache status
 - discovered video file count
 - matched source asset count
+- how many frames were sampled by the prefilter stage
+- how many segments were shortlisted before the VLM stage
+- how many segments actually reached the VLM stage
 - a per-asset progress bar with elapsed time and estimated time remaining
 
 You can customize the processing prompt with environment variables:
@@ -204,20 +209,22 @@ Add this to `.env.local`:
 
 ```bash
 TIMELINE_AI_PROVIDER=lmstudio
-TIMELINE_AI_MODEL=qwen3.5-9b
+# Prefer a smaller local VLM for the final refinement pass.
+# Examples: moondream-2b-2025-04-14, gemma-3-4b, qwen2.5-vl-7b
+TIMELINE_AI_MODEL=moondream-2b-2025-04-14
 TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
 TIMELINE_AI_TIMEOUT_SEC=45
 TIMELINE_AI_MODE=fast
-TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=2
-TIMELINE_AI_MAX_KEYFRAMES=2
-TIMELINE_AI_KEYFRAME_MAX_WIDTH=640
+TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1
+TIMELINE_AI_MAX_KEYFRAMES=1
+TIMELINE_AI_KEYFRAME_MAX_WIDTH=448
 TIMELINE_AI_CONCURRENCY=2
 TIMELINE_AI_CACHE=true
 ```
 
 Recommended local model:
 
-- `qwen3.5-9b`
+- a smaller vision model for the final pass, for example `moondream-2b-2025-04-14`
 
 Expected LM Studio setup:
 
@@ -235,7 +242,10 @@ That mode is designed to keep local-model processing practical:
 
 - only the top shortlisted segments per asset go through LM Studio
 - non-shortlisted segments still receive deterministic structured analysis
-- only a small number of downscaled keyframes are sent
+- a cheap sampled-frame prefilter runs before any VLM analysis
+- shortlisted segments are sent as stitched contact sheets instead of multiple loose images
+- LM Studio is called once per asset shortlist instead of once per segment whenever possible
+- only a very small number of downscaled keyframes are sent
 - LM Studio results are cached on disk
 - a small bounded concurrency is used instead of fully serial processing
 
@@ -251,9 +261,9 @@ Relevant settings:
 Recommended local defaults:
 
 - `TIMELINE_AI_MODE=fast`
-- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=2`
-- `TIMELINE_AI_MAX_KEYFRAMES=2`
-- `TIMELINE_AI_KEYFRAME_MAX_WIDTH=640`
+- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1`
+- `TIMELINE_AI_MAX_KEYFRAMES=1`
+- `TIMELINE_AI_KEYFRAME_MAX_WIDTH=448`
 - `TIMELINE_AI_CONCURRENCY=2`
 - `TIMELINE_AI_CACHE=true`
 

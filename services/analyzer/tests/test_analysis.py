@@ -8,8 +8,9 @@ from services.analyzer.app.analysis import (
     fallback_segments,
     inspect_runtime_capabilities,
     select_ai_target_segment_ids,
+    select_prefilter_shortlist_ids,
 )
-from services.analyzer.app.domain import Asset, CandidateSegment, ProjectMeta
+from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision, ProjectMeta
 
 
 class StaticSceneDetector:
@@ -94,10 +95,12 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertTrue(all(segment.analysis_mode == "visual" for segment in silent_segments))
         self.assertTrue(any(segment.analysis_mode == "speech" for segment in speech_segments))
         self.assertTrue(all(segment.evidence_bundle is not None for segment in project.candidate_segments))
+        self.assertTrue(all(segment.prefilter is not None for segment in project.candidate_segments))
         self.assertTrue(all(segment.ai_understanding is not None for segment in project.candidate_segments))
         self.assertTrue(all(segment.ai_understanding.provider for segment in project.candidate_segments if segment.ai_understanding))
         self.assertGreaterEqual(len(best_takes), 2)
         self.assertGreaterEqual(len(project.timeline.items), 2)
+        self.assertGreater(project.project.analysis_summary.get("prefilter_sample_count", 0), 0)
 
     def test_capabilities_are_reported_as_bools(self) -> None:
         capabilities = inspect_runtime_capabilities()
@@ -126,6 +129,16 @@ class AnalysisPipelineTests(unittest.TestCase):
                 transcript_excerpt="",
                 description="One",
                 quality_metrics={"visual_novelty": 0.6, "subject_clarity": 0.7, "story_alignment": 0.62, "motion_energy": 0.5, "duration_fit": 0.8, "hook_strength": 0.6},
+                prefilter=PrefilterDecision(
+                    score=0.61,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=2,
+                    sampled_frame_timestamps_sec=[1.0, 3.0],
+                    top_frame_timestamps_sec=[3.0],
+                    metrics_snapshot={},
+                ),
             ),
             CandidateSegment(
                 id="segment-2",
@@ -136,6 +149,16 @@ class AnalysisPipelineTests(unittest.TestCase):
                 transcript_excerpt="",
                 description="Two",
                 quality_metrics={"visual_novelty": 0.85, "subject_clarity": 0.84, "story_alignment": 0.78, "motion_energy": 0.74, "duration_fit": 0.82, "hook_strength": 0.8},
+                prefilter=PrefilterDecision(
+                    score=0.88,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=2,
+                    sampled_frame_timestamps_sec=[6.0, 8.0],
+                    top_frame_timestamps_sec=[8.0],
+                    metrics_snapshot={},
+                ),
             ),
             CandidateSegment(
                 id="segment-3",
@@ -146,9 +169,25 @@ class AnalysisPipelineTests(unittest.TestCase):
                 transcript_excerpt="",
                 description="Three",
                 quality_metrics={"visual_novelty": 0.82, "subject_clarity": 0.79, "story_alignment": 0.76, "motion_energy": 0.68, "duration_fit": 0.8, "hook_strength": 0.77},
+                prefilter=PrefilterDecision(
+                    score=0.84,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=2,
+                    sampled_frame_timestamps_sec=[11.0, 13.0],
+                    top_frame_timestamps_sec=[13.0],
+                    metrics_snapshot={},
+                ),
             ),
         ]
 
+        shortlist_ids = select_prefilter_shortlist_ids(
+            asset=asset,
+            segments=segments,
+            max_segments_per_asset=2,
+            mode="fast",
+        )
         target_ids = select_ai_target_segment_ids(
             asset=asset,
             segments=segments,
@@ -157,6 +196,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             mode="fast",
         )
 
+        self.assertEqual(shortlist_ids, target_ids)
         self.assertEqual(len(target_ids), 2)
         self.assertIn("segment-2", target_ids)
         self.assertIn("segment-3", target_ids)

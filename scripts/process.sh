@@ -80,10 +80,18 @@ payload = json.loads(Path("generated/project.json").read_text())
 assets = payload["assets"]
 source_only = [asset for asset in assets if asset.get("has_proxy") is False]
 proxy_backed = [asset for asset in assets if asset.get("has_proxy") is not False]
+analysis_summary = payload.get("project", {}).get("analysis_summary", {})
 
 print(f"Assets: {len(assets)}")
 print(f"Proxy-backed assets: {len(proxy_backed)}")
 print(f"Source-only assets: {len(source_only)}")
+if analysis_summary:
+    print("")
+    print(f"Prefilter sampled frames: {analysis_summary.get('prefilter_sample_count', 0)}")
+    print(f"Candidate segments: {analysis_summary.get('candidate_segment_count', 0)}")
+    print(f"Prefilter shortlisted: {analysis_summary.get('prefilter_shortlisted_count', 0)}")
+    print(f"VLM target segments: {analysis_summary.get('vlm_target_count', 0)}")
+    print(f"Filtered before VLM: {analysis_summary.get('filtered_before_vlm_count', 0)}")
 
 if source_only:
     print("")
