@@ -9,9 +9,48 @@ Timeline Cutter is structured around one simple flow:
 
 That is the intended interaction model for this repository.
 
-If you are using `lmstudio` or `moondream-local`, run `npm run check:ai` before `process`.
+If you are using `lmstudio` or `mlx-vlm-local`, run `npm run check:ai` before `process`.
 
 If you want Resolve import paths to match a specific footage location, set `TIMELINE_MEDIA_DIR` to that exact folder path before running `process`.
+
+## Configuration Overview
+
+The repository is driven primarily by environment variables loaded from:
+
+1. inline shell vars for a single command
+2. `.env`
+3. `.env.local`
+
+The three main AI configurations are:
+
+### Deterministic only
+
+```bash
+TIMELINE_AI_PROVIDER=deterministic
+```
+
+Use this when you want the fastest setup and no local model runtime.
+
+### LM Studio backend
+
+```bash
+TIMELINE_AI_PROVIDER=lmstudio
+TIMELINE_AI_MODEL=qwen3.5-9b
+TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
+```
+
+Use this when you want an external local model server managed through LM Studio.
+
+### Embedded MLX-VLM backend
+
+```bash
+TIMELINE_AI_PROVIDER=mlx-vlm-local
+TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit
+TIMELINE_AI_MODEL_CACHE_DIR=./models/mlx-vlm
+TIMELINE_AI_DEVICE=auto
+```
+
+Use this when you want the repo to own the local Apple-Silicon-optimized model runtime directly.
 
 ## Core Idea
 
@@ -95,7 +134,7 @@ Optional but recommended for real footage analysis:
 - `ffprobe`
 - `PySceneDetect`
 - `faster-whisper`
-- `LM Studio` for local multimodal analysis, or the Python runtime dependencies for `moondream-local`
+- `LM Studio` for local multimodal analysis, or the Python runtime dependencies for `mlx-vlm-local`
 
 Optional for the analyzer API:
 
@@ -104,11 +143,12 @@ Optional for the analyzer API:
 
 Notes:
 
+- on macOS with Homebrew, `npm run setup` will install `ffmpeg` automatically if it is missing
 - the pipeline still runs without those optional media tools
 - when they are missing, the analyzer uses deterministic fallbacks
 - silent b-roll workflows remain testable even without speech tooling
 - clips without proxies are supported and processed as source-only media
-- both `lmstudio` and `moondream-local` are optional; if the configured AI backend is unavailable, Phase 1 AI analysis falls back to deterministic structured output
+- both `lmstudio` and `mlx-vlm-local` are optional; if the configured AI backend is unavailable, Phase 1 AI analysis falls back to deterministic structured output
 
 ## The Main Flow
 
@@ -125,6 +165,7 @@ What it does:
 - runs `npm install`
 - creates `.venv`
 - creates `generated/`
+- installs `ffmpeg` automatically on macOS when Homebrew is available and `ffmpeg` is missing
 - creates `media -> fixtures/sample-media` if `media` does not already exist and `TIMELINE_MEDIA_DIR` is not set
 
 After setup, the next command is:
@@ -144,7 +185,7 @@ That command:
 - loads `.env` and `.env.local`
 - inspects the configured AI provider
 - validates LM Studio reachability when `TIMELINE_AI_PROVIDER=lmstudio`
-- validates local model readiness when `TIMELINE_AI_PROVIDER=moondream-local`
+- validates local model readiness when `TIMELINE_AI_PROVIDER=mlx-vlm-local`
 - exits with a non-zero status if the configured non-deterministic provider is unavailable
 
 ### 2. Process
@@ -208,15 +249,15 @@ npm run process
 
 ### Optional AI Configuration
 
-The analyzer can call a local model through either `lmstudio` or `moondream-local` during `process`.
+The analyzer can call a local model through either `lmstudio` or `mlx-vlm-local` during `process`.
 
 Add this to `.env.local`:
 
 ```bash
-TIMELINE_AI_PROVIDER=moondream-local
-TIMELINE_AI_MODEL_ID=vikhyatk/moondream2
+TIMELINE_AI_PROVIDER=mlx-vlm-local
+TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit
 TIMELINE_AI_MODEL_REVISION=
-TIMELINE_AI_MODEL_CACHE_DIR=./models/moondream
+TIMELINE_AI_MODEL_CACHE_DIR=./models/mlx-vlm
 TIMELINE_AI_DEVICE=auto
 TIMELINE_AI_TIMEOUT_SEC=45
 TIMELINE_AI_MODE=fast
@@ -229,15 +270,18 @@ TIMELINE_AI_CACHE=true
 
 Recommended local model:
 
-- `vikhyatk/moondream2` via `moondream-local`
+- `mlx-community/Qwen3.5-0.8B-4bit` via `mlx-vlm-local`
 - or a smaller vision model exposed through `lmstudio`
 
-For `moondream-local`:
+For `mlx-vlm-local`:
 
-1. set `TIMELINE_AI_PROVIDER=moondream-local`
+1. set `TIMELINE_AI_PROVIDER=mlx-vlm-local`
 2. run `npm run setup`
-3. the setup script installs the optional Python dependencies and downloads the configured model unless `TIMELINE_SKIP_MODEL_DOWNLOAD=1`
-4. run `npm run check:ai`
+3. the setup script installs the optional Python dependencies, including `mlx`, `mlx-vlm`, `torch`, and `torchvision`, and downloads the configured model into the local MLX cache unless `TIMELINE_SKIP_MODEL_DOWNLOAD=1`
+4. on macOS with Homebrew, setup also installs `ffmpeg` automatically if needed
+5. on other systems, install `ffmpeg` manually before running `npm run check:ai`
+6. run `npm run check:ai`
+7. `mlx-vlm-local` is intended for Apple Silicon; `TIMELINE_AI_DEVICE=auto` resolves to the Metal-backed MLX runtime and `cpu` is only for debugging
 
 Expected LM Studio setup:
 
@@ -246,6 +290,114 @@ Expected LM Studio setup:
 3. keep it available at `http://127.0.0.1:1234/v1`
 
 If the configured AI backend is not ready, `process` still succeeds and falls back to deterministic structured analysis.
+For `mlx-vlm-local`, normal `process` runs are expected to reuse the prepared local model files from setup instead of hitting the remote model hub again.
+
+## Configuration Reference
+
+These are the main environment variables the repository supports.
+
+### Footage And Project
+
+- `TIMELINE_MEDIA_DIR`
+  - Absolute or repo-relative path to the footage root used by `process`.
+  - If unset, the repo uses `media/`.
+- `TIMELINE_PROJECT_NAME`
+  - Project name written into `generated/project.json`.
+- `TIMELINE_STORY_PROMPT`
+  - High-level editing brief passed into the analyzer and AI layer.
+
+### AI Provider Selection
+
+- `TIMELINE_AI_PROVIDER`
+  - One of: `deterministic`, `lmstudio`, `mlx-vlm-local`
+  - `deterministic` disables model inference and uses rule-based structured output only.
+  - `lmstudio` uses the OpenAI-compatible HTTP API exposed by LM Studio.
+  - `mlx-vlm-local` uses the embedded MLX-VLM runtime.
+- `TIMELINE_AI_TIMEOUT_SEC`
+  - Request or inference timeout used by the provider path.
+
+### LM Studio Settings
+
+- `TIMELINE_AI_MODEL`
+  - Model name exposed by LM Studio.
+- `TIMELINE_AI_BASE_URL`
+  - LM Studio OpenAI-compatible endpoint, normally `http://127.0.0.1:1234/v1`.
+
+### MLX-VLM Local Settings
+
+- `TIMELINE_AI_MODEL_ID`
+  - Hugging Face model id for the embedded MLX-VLM backend.
+  - Default documented value: `mlx-community/Qwen3.5-0.8B-4bit`
+- `TIMELINE_AI_MODEL_REVISION`
+  - Optional pinned model revision.
+- `TIMELINE_AI_MODEL_CACHE_DIR`
+  - Local cache directory where model artifacts are stored.
+- `TIMELINE_AI_DEVICE`
+  - One of: `auto`, `metal`, `mps`, `gpu`, `cpu`
+  - For `mlx-vlm-local`, `auto`, `metal`, `mps`, and `gpu` all resolve to the Metal-backed MLX runtime.
+- `TIMELINE_SKIP_MODEL_DOWNLOAD`
+  - `0` or `1`
+  - Only used during `npm run setup`
+  - `1` skips the MLX-VLM bootstrap/download step.
+
+### AI Runtime Tuning
+
+- `TIMELINE_AI_MODE`
+  - `fast` or `full`
+  - `fast` is the default and is the recommended mode for normal use.
+  - `full` is slower and sends more segments to the AI layer.
+- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET`
+  - Maximum shortlisted candidate segments per source asset that can reach the AI stage.
+- `TIMELINE_AI_MAX_KEYFRAMES`
+  - Number of keyframes extracted per shortlisted segment before contact-sheet generation.
+- `TIMELINE_AI_KEYFRAME_MAX_WIDTH`
+  - Maximum width for extracted keyframes before they are stitched or sent to the provider path.
+- `TIMELINE_AI_CONCURRENCY`
+  - Bounded concurrency used for AI-stage work where applicable.
+- `TIMELINE_AI_CACHE`
+  - `true` or `false`
+  - Enables on-disk reuse of AI outputs across reruns.
+
+### Setup
+
+- `TIMELINE_PYTHON`
+  - Optional explicit Python interpreter path for `npm run setup`.
+
+## Recommended Configurations
+
+### Fastest setup
+
+```bash
+TIMELINE_AI_PROVIDER=deterministic
+TIMELINE_MEDIA_DIR=/absolute/path/to/your/footage
+```
+
+### Recommended self-contained local AI
+
+```bash
+TIMELINE_AI_PROVIDER=mlx-vlm-local
+TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit
+TIMELINE_AI_MODEL_CACHE_DIR=./models/mlx-vlm
+TIMELINE_AI_DEVICE=auto
+TIMELINE_AI_MODE=fast
+TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1
+TIMELINE_AI_MAX_KEYFRAMES=1
+TIMELINE_AI_KEYFRAME_MAX_WIDTH=448
+TIMELINE_AI_CACHE=true
+```
+
+### Recommended LM Studio setup
+
+```bash
+TIMELINE_AI_PROVIDER=lmstudio
+TIMELINE_AI_MODEL=qwen3.5-9b
+TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
+TIMELINE_AI_MODE=fast
+TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1
+TIMELINE_AI_MAX_KEYFRAMES=1
+TIMELINE_AI_KEYFRAME_MAX_WIDTH=448
+TIMELINE_AI_CACHE=true
+```
 
 ### Fast AI Mode
 
@@ -258,7 +410,7 @@ That mode is designed to keep local-model processing practical:
 - a cheap sampled-frame prefilter runs before any VLM analysis
 - shortlisted segments are sent as stitched contact sheets instead of multiple loose images
 - `lmstudio` is called once per asset shortlist instead of once per segment whenever possible
-- `moondream-local` runs in-process against shortlisted contact-sheet images
+- `mlx-vlm-local` runs in-process against shortlisted contact-sheet images on Apple Silicon
 - only a very small number of downscaled keyframes are sent
 - AI results are cached on disk
 - a small bounded concurrency is used instead of fully serial processing
@@ -295,9 +447,26 @@ Example successful output:
 configured_provider: lmstudio
 effective_provider: lmstudio
 model: qwen3.5-9b
+revision: (none)
+cache_dir: (none)
+device: auto
 base_url: http://127.0.0.1:1234/v1
 available: yes
 detail: LM Studio is reachable at http://127.0.0.1:1234/v1; model 'qwen3.5-9b' will be used.
+```
+
+Example `mlx-vlm-local` failure output before setup:
+
+```text
+configured_provider: mlx-vlm-local
+effective_provider: deterministic
+model: mlx-community/Qwen3.5-0.8B-4bit
+revision: (none)
+cache_dir: /absolute/path/to/repo/models/mlx-vlm
+device: auto
+base_url: http://127.0.0.1:1234/v1
+available: no
+detail: MLX-VLM local backend is not ready because required Python modules are missing: mlx, mlx-vlm, torch, torchvision, pillow. Falling back to deterministic analysis.
 ```
 
 After processing, the next command is:
@@ -375,9 +544,8 @@ To test the AI layer with fixture media:
 
 ```bash
 TIMELINE_MEDIA_DIR=fixtures/sample-media \
-TIMELINE_AI_PROVIDER=lmstudio \
-TIMELINE_AI_MODEL=qwen3.5-9b \
-TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1 \
+TIMELINE_AI_PROVIDER=mlx-vlm-local \
+TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit \
 npm run process
 
 npm run view
@@ -393,7 +561,7 @@ In `generated/project.json`, each `candidate_segment` should contain:
 - `evidence_bundle`
 - `ai_understanding`
 
-If `lmstudio` is active, `ai_understanding.provider` should be `lmstudio`. If `moondream-local` is active, it should be `moondream-local`.
+If `lmstudio` is active, `ai_understanding.provider` should be `lmstudio`. If `mlx-vlm-local` is active, it should be `mlx-vlm-local`.
 
 If not, it will usually be `deterministic`.
 
@@ -472,7 +640,7 @@ If installed locally:
 - `PySceneDetect` for scene boundaries
 - `faster-whisper` for transcript excerpts
 - `ffmpeg` for keyframe extraction
-- `lmstudio` or `moondream-local` for local multimodal segment understanding
+- `lmstudio` or `mlx-vlm-local` for local multimodal segment understanding
 
 If not installed:
 

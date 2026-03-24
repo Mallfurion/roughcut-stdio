@@ -25,7 +25,7 @@ def main() -> int:
     print(f"available: {'yes' if status.available else 'no'}")
     print(f"detail: {status.detail}")
 
-    if status.configured_provider in {"lmstudio", "moondream-local"} and not status.available:
+    if status.configured_provider in {"lmstudio", "mlx-vlm-local"} and not status.available:
         return 1
     return 0
 

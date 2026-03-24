@@ -1,0 +1,4 @@
+change:
+  id: mlx-vlm-local-backend
+  title: Replace moondream-local with MLX VLM local backend
+  status: proposed

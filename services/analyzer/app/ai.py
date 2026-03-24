@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import b64encode
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from hashlib import sha1
 import importlib
 import importlib.util
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -19,6 +21,7 @@ from .domain import Asset, CandidateSegment, SegmentEvidence, SegmentUnderstandi
 
 
 SCHEMA_VERSION = "segment-understanding-v1"
+MLX_MODEL_MANIFEST = "mlx-vlm-manifest.json"
 
 
 class ProviderClient(Protocol):
@@ -205,7 +208,7 @@ class OpenAICompatibleProviderClient:
             raise AIProviderRequestError(f"Provider request failed: {exc}") from exc
 
 
-class MoondreamRuntime:
+class MLXVLMRuntime:
     def __init__(
         self,
         *,
@@ -221,52 +224,37 @@ class MoondreamRuntime:
         self.device = device
         self.local_files_only = local_files_only
         self._model: Any | None = None
-        self._tokenizer: Any | None = None
+        self._processor: Any | None = None
+        self._config: Any | None = None
 
     def ensure_loaded(self) -> None:
         if self._model is not None:
             return
 
-        transformers = importlib.import_module("transformers")
-        torch = importlib.import_module("torch")
-        model_kwargs: dict[str, Any] = {
-            "trust_remote_code": True,
-            "cache_dir": self.cache_dir,
-            "local_files_only": self.local_files_only,
-        }
-        if self.revision:
-            model_kwargs["revision"] = self.revision
+        load = importlib.import_module("mlx_vlm").load
+        load_config = importlib.import_module("mlx_vlm.utils").load_config
 
-        model = transformers.AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
-        tokenizer = None
-        if hasattr(transformers, "AutoTokenizer"):
+        self.device = resolve_mlx_device(requested=self.device)
+        model_reference = resolve_prepared_mlx_vlm_model_path(
+            model_id=self.model_id,
+            revision=self.revision,
+            cache_dir=self.cache_dir,
+        )
+        if model_reference is None:
+            raise AIProviderRequestError(
+                "Prepared MLX-VLM model files were not found in the local cache. "
+                "Run `npm run setup` to download the configured model before processing."
+            )
+        with model_cache_environment(self.cache_dir):
+            model, processor = load(model_reference)
             try:
-                tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_id, **model_kwargs)
+                config = load_config(model_reference)
             except Exception:
-                tokenizer = None
-
-        resolved_device = resolve_torch_device(torch=torch, requested=self.device)
-        self.device = resolved_device
-
-        dtype = getattr(torch, "float16", None) if resolved_device != "cpu" else getattr(torch, "float32", None)
-        if hasattr(model, "to"):
-            try:
-                if dtype is not None:
-                    model = model.to(device=resolved_device, dtype=dtype)
-                else:
-                    model = model.to(device=resolved_device)
-            except TypeError:
-                model = model.to(resolved_device)
-            except Exception:
-                try:
-                    model = model.to(resolved_device)
-                except Exception:
-                    pass
-        if hasattr(model, "eval"):
-            model.eval()
+                config = getattr(model, "config", None)
 
         self._model = model
-        self._tokenizer = tokenizer
+        self._processor = processor
+        self._config = config
 
     def query_image(
         self,
@@ -275,39 +263,59 @@ class MoondreamRuntime:
         prompt: str,
     ) -> str:
         if not image_path:
-            raise AIProviderRequestError("Moondream local backend received no image path.")
+            raise AIProviderRequestError("MLX-VLM local backend received no image path.")
         path = Path(image_path)
         if not path.exists() or not path.is_file():
-            raise AIProviderRequestError(f"Moondream local backend image path is invalid: {image_path}")
+            raise AIProviderRequestError(f"MLX-VLM local backend image path is invalid: {image_path}")
 
         self.ensure_loaded()
         pil_image = importlib.import_module("PIL.Image")
         image = pil_image.open(path).convert("RGB")
+        apply_chat_template = importlib.import_module("mlx_vlm.prompt_utils").apply_chat_template
+        generate = importlib.import_module("mlx_vlm").generate
         model = self._model
-        tokenizer = self._tokenizer
+        processor = self._processor
+        config = self._config
         if model is None:
-            raise AIProviderRequestError("Moondream model did not initialize.")
+            raise AIProviderRequestError("MLX-VLM model did not initialize.")
+        if processor is None:
+            raise AIProviderRequestError("MLX-VLM processor did not initialize.")
 
-        result: Any
-        if hasattr(model, "query"):
-            result = model.query(image, prompt)
-        elif hasattr(model, "encode_image") and hasattr(model, "answer_question"):
-            encoded = model.encode_image(image)
-            if tokenizer is not None:
-                result = model.answer_question(encoded, prompt, tokenizer)
-            else:
-                result = model.answer_question(encoded, prompt)
-        else:
-            raise AIProviderRequestError("Moondream model does not expose a supported query interface.")
+        formatted_prompt = apply_chat_template(
+            processor,
+            config,
+            prompt,
+            num_images=1,
+        )
 
-        if isinstance(result, dict):
-            answer = result.get("answer") or result.get("text") or result.get("response")
-            if isinstance(answer, str) and answer.strip():
-                return answer.strip()
-            return json.dumps(result)
-        if isinstance(result, str):
-            return result.strip()
-        return str(result)
+        generation_attempts = (
+            (model, processor, formatted_prompt, [image]),
+            (model, processor, [image], formatted_prompt),
+            (model, processor, image_path, formatted_prompt),
+        )
+        last_type_error: TypeError | None = None
+        result: Any = None
+        for args in generation_attempts:
+            try:
+                result = generate(
+                    *args,
+                    verbose=False,
+                    max_tokens=600,
+                    temperature=0.1,
+                )
+                break
+            except TypeError as exc:
+                last_type_error = exc
+                try:
+                    result = generate(*args, verbose=False)
+                    break
+                except TypeError as retry_exc:
+                    last_type_error = retry_exc
+                    continue
+        if result is None and last_type_error is not None:
+            raise AIProviderRequestError(f"MLX-VLM generate call failed: {last_type_error}") from last_type_error
+
+        return str(result).strip()
 
 
 class DeterministicVisionLanguageAnalyzer:
@@ -558,7 +566,7 @@ class LMStudioVisionLanguageAnalyzer:
         )
 
 
-class MoondreamLocalVisionLanguageAnalyzer:
+class MLXVLMVisionLanguageAnalyzer:
     requires_keyframes = True
 
     def __init__(
@@ -603,8 +611,8 @@ class MoondreamLocalVisionLanguageAnalyzer:
                 segment=segment,
                 evidence=evidence,
                 story_prompt=story_prompt,
-                detail="No image evidence was available for moondream-local.",
-                risk_flag="moondream_no_image_evidence",
+                detail="No image evidence was available for mlx-vlm-local.",
+                risk_flag="mlx_vlm_no_image_evidence",
             )
             self._runtime_stats.fallback_segment_count += 1
             return understanding
@@ -613,7 +621,7 @@ class MoondreamLocalVisionLanguageAnalyzer:
             self._runtime_stats.live_request_count += 1
             raw = self.runtime.query_image(
                 image_path=image_path,
-                prompt=moondream_segment_understanding_prompt(
+                prompt=local_vlm_segment_understanding_prompt(
                     asset=asset,
                     segment=segment,
                     evidence=evidence,
@@ -622,10 +630,10 @@ class MoondreamLocalVisionLanguageAnalyzer:
             )
             payload = parse_json_object(raw)
             if payload is None:
-                raise AIProviderRequestError("Moondream local response did not contain valid JSON.")
+                raise AIProviderRequestError("MLX-VLM local response did not contain valid JSON.")
             understanding = normalize_model_output(
                 payload,
-                provider="moondream-local",
+                provider="mlx-vlm-local",
                 model=self.config.model,
                 fallback=self.fallback,
                 asset=asset,
@@ -633,13 +641,13 @@ class MoondreamLocalVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
             )
-            if understanding.provider == "moondream-local":
+            if understanding.provider == "mlx-vlm-local":
                 self._runtime_stats.live_segment_count += 1
             else:
                 self._runtime_stats.fallback_segment_count += 1
             store_cached_understanding(self.cache_root, cache_key, understanding)
             return understanding
-        except (AIProviderRequestError, OSError, ValueError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
+        except (AIProviderRequestError, OSError, ValueError, RuntimeError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
             self.last_error_detail = str(exc)
             understanding = self._fallback_understanding(
                 asset=asset,
@@ -647,7 +655,7 @@ class MoondreamLocalVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
                 detail=self.last_error_detail,
-                risk_flag="moondream_local_failed",
+                risk_flag="mlx_vlm_local_failed",
             )
             self._runtime_stats.fallback_segment_count += 1
             return understanding
@@ -696,7 +704,7 @@ class MoondreamLocalVisionLanguageAnalyzer:
         fallback.provider_model = "fallback-v1"
         fallback.risk_flags = sorted(set([*fallback.risk_flags, risk_flag]))
         fallback.rationale = (
-            f"{fallback.rationale} Moondream local analysis failed, so deterministic fallback was used: {detail}"
+            f"{fallback.rationale} MLX-VLM local analysis failed, so deterministic fallback was used: {detail}"
         )
         return fallback
 
@@ -715,10 +723,10 @@ def default_vision_language_analyzer(
             client=OpenAICompatibleProviderClient(config.base_url),
             cache_root=(Path(artifacts_root) / "ai-cache") if artifacts_root is not None and runtime_config.cache_enabled else None,
         )
-    if status.effective_provider == "moondream-local" and config.model:
-        return MoondreamLocalVisionLanguageAnalyzer(
+    if status.effective_provider == "mlx-vlm-local" and config.model:
+        return MLXVLMVisionLanguageAnalyzer(
             config=config,
-            runtime=MoondreamRuntime(
+            runtime=MLXVLMRuntime(
                 model_id=config.model,
                 revision=config.revision,
                 cache_dir=config.cache_dir,
@@ -743,11 +751,11 @@ def load_ai_provider_config() -> AIProviderConfig:
     cache_dir = os.environ.get("TIMELINE_AI_MODEL_CACHE_DIR", "").strip()
     device = os.environ.get("TIMELINE_AI_DEVICE", "auto").strip() or "auto"
 
-    if provider == "moondream-local":
-        model_id, revision = resolve_moondream_model(model=requested_model, model_id=model_id, revision=revision)
+    if provider == "mlx-vlm-local":
+        model_id, revision = resolve_mlx_vlm_model(model=requested_model, model_id=model_id, revision=revision)
         requested_model = model_id
         if not cache_dir:
-            cache_dir = str((Path.cwd() / "models" / "moondream").resolve())
+            cache_dir = str((Path.cwd() / "models" / "mlx-vlm").resolve())
 
     return AIProviderConfig(
         provider=provider,
@@ -786,8 +794,8 @@ def inspect_ai_provider_status(
 ) -> AIProviderStatus:
     effective_config = config or load_ai_provider_config()
 
-    if effective_config.provider == "moondream-local":
-        return inspect_moondream_provider_status(effective_config, runtime_probe=runtime_probe)
+    if effective_config.provider == "mlx-vlm-local":
+        return inspect_mlx_vlm_provider_status(effective_config, runtime_probe=runtime_probe)
 
     if effective_config.provider != "lmstudio":
         return AIProviderStatus(
@@ -872,18 +880,25 @@ def inspect_ai_provider_status(
         )
 
 
-def inspect_moondream_provider_status(
+def inspect_mlx_vlm_provider_status(
     config: AIProviderConfig,
     *,
     runtime_probe: bool = False,
 ) -> AIProviderStatus:
-    missing = missing_moondream_dependencies()
+    missing = missing_mlx_vlm_dependencies()
+    ffmpeg_available = shutil.which("ffmpeg") is not None
     cache_path = Path(config.cache_dir).expanduser() if config.cache_dir else None
     cache_exists = bool(cache_path and cache_path.exists())
+    prepared_model_path = resolve_prepared_mlx_vlm_model_path(
+        model_id=config.model,
+        revision=config.revision,
+        cache_dir=config.cache_dir,
+    )
+    apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
 
     if missing:
         return AIProviderStatus(
-            configured_provider="moondream-local",
+            configured_provider="mlx-vlm-local",
             effective_provider="deterministic",
             model=config.model,
             base_url=config.base_url,
@@ -892,15 +907,63 @@ def inspect_moondream_provider_status(
             device=config.device,
             available=False,
             detail=(
-                "Moondream local backend is not ready because required Python modules are missing: "
+                "MLX-VLM local backend is not ready because required Python modules are missing: "
                 + ", ".join(missing)
                 + ". Falling back to deterministic analysis."
             ),
         )
 
+    if not apple_silicon:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend requires Apple Silicon on macOS. "
+                "Falling back to deterministic analysis."
+            ),
+        )
+
+    if not ffmpeg_available:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend requires ffmpeg to extract keyframes and build contact sheets, "
+                "but ffmpeg is not installed or not on PATH. Falling back to deterministic analysis."
+            ),
+        )
+
+    if prepared_model_path is None:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend has no prepared local model files yet. "
+                "Run `npm run setup` to download the configured model before processing."
+            ),
+        )
+
     if runtime_probe:
         try:
-            runtime = MoondreamRuntime(
+            runtime = MLXVLMRuntime(
                 model_id=config.model,
                 revision=config.revision,
                 cache_dir=config.cache_dir,
@@ -908,8 +971,8 @@ def inspect_moondream_provider_status(
             )
             runtime.ensure_loaded()
             return AIProviderStatus(
-                configured_provider="moondream-local",
-                effective_provider="moondream-local",
+                configured_provider="mlx-vlm-local",
+                effective_provider="mlx-vlm-local",
                 model=config.model,
                 base_url=config.base_url,
                 revision=config.revision,
@@ -917,14 +980,14 @@ def inspect_moondream_provider_status(
                 device=runtime.device,
                 available=True,
                 detail=(
-                    f"Moondream local backend is ready; model '{config.model}'"
+                    f"MLX-VLM local backend is ready; model '{config.model}'"
                     + (f" revision '{config.revision}'" if config.revision else "")
                     + f" loaded on device '{runtime.device}'."
                 ),
             )
         except Exception as exc:
             return AIProviderStatus(
-                configured_provider="moondream-local",
+                configured_provider="mlx-vlm-local",
                 effective_provider="deterministic",
                 model=config.model,
                 base_url=config.base_url,
@@ -933,25 +996,26 @@ def inspect_moondream_provider_status(
                 device=config.device,
                 available=False,
                 detail=(
-                    "Moondream local backend could not load the configured model. "
+                    "MLX-VLM local backend could not load the configured model. "
                     f"Falling back to deterministic analysis. Error: {exc}"
                 ),
             )
 
     detail = (
-        f"Moondream local backend is configured for model '{config.model}'"
+        f"MLX-VLM local backend is configured for model '{config.model}'"
         + (f" revision '{config.revision}'" if config.revision else "")
         + (f"; cache {'found' if cache_exists else 'not found yet'} at {config.cache_dir}" if config.cache_dir else "")
-        + f"; requested device '{config.device}'."
+        + (f"; prepared model path {prepared_model_path}" if prepared_model_path else "")
+        + f"; requested runtime '{resolve_mlx_device(requested=config.device)}'."
     )
     return AIProviderStatus(
-        configured_provider="moondream-local",
-        effective_provider="moondream-local",
+        configured_provider="mlx-vlm-local",
+        effective_provider="mlx-vlm-local",
         model=config.model,
         base_url=config.base_url,
         revision=config.revision,
         cache_dir=config.cache_dir,
-        device=config.device,
+        device=resolve_mlx_device(requested=config.device),
         available=True,
         detail=detail,
     )
@@ -1200,7 +1264,7 @@ def segment_batch_understanding_user_prompt(
     return "\n".join(lines)
 
 
-def moondream_segment_understanding_prompt(
+def local_vlm_segment_understanding_prompt(
     *,
     asset: Asset,
     segment: CandidateSegment,
@@ -1423,6 +1487,110 @@ def encode_image_as_data_url(image_path: str) -> str | None:
     return f"data:{mime};base64,{payload}"
 
 
+@contextmanager
+def model_cache_environment(cache_dir: str):
+    if not cache_dir:
+        yield
+        return
+
+    cache_path = str(Path(cache_dir).expanduser())
+    Path(cache_path).mkdir(parents=True, exist_ok=True)
+    previous_hf_home = os.environ.get("HF_HOME")
+    previous_hf_hub = os.environ.get("HF_HUB_CACHE")
+    os.environ["HF_HOME"] = cache_path
+    os.environ["HF_HUB_CACHE"] = str(Path(cache_path) / "hub")
+    try:
+        yield
+    finally:
+        if previous_hf_home is None:
+            os.environ.pop("HF_HOME", None)
+        else:
+            os.environ["HF_HOME"] = previous_hf_home
+        if previous_hf_hub is None:
+            os.environ.pop("HF_HUB_CACHE", None)
+        else:
+            os.environ["HF_HUB_CACHE"] = previous_hf_hub
+
+
+def mlx_vlm_manifest_path(cache_dir: str) -> Path:
+    return Path(cache_dir).expanduser() / MLX_MODEL_MANIFEST
+
+
+def load_mlx_vlm_manifest(cache_dir: str) -> dict[str, dict[str, str]]:
+    if not cache_dir:
+        return {}
+    path = mlx_vlm_manifest_path(cache_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    manifest: dict[str, dict[str, str]] = {}
+    for key, value in payload.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            manifest[key] = {str(sub_key): str(sub_value) for sub_key, sub_value in value.items()}
+    return manifest
+
+
+def store_mlx_vlm_manifest_entry(
+    *,
+    cache_dir: str,
+    model_id: str,
+    revision: str,
+    local_path: str,
+) -> None:
+    if not cache_dir:
+        return
+    manifest = load_mlx_vlm_manifest(cache_dir)
+    manifest[manifest_model_key(model_id=model_id, revision=revision)] = {
+        "model_id": model_id,
+        "revision": revision,
+        "local_path": local_path,
+    }
+    path = mlx_vlm_manifest_path(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+
+def manifest_model_key(*, model_id: str, revision: str) -> str:
+    return f"{model_id}@{revision or 'latest'}"
+
+
+def slugify_model_id(model_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", model_id).strip("-") or "model"
+
+
+def derived_mlx_vlm_local_path(*, model_id: str, revision: str, cache_dir: str) -> Path:
+    return Path(cache_dir).expanduser() / f"{slugify_model_id(model_id)}-{revision or 'latest'}"
+
+
+def resolve_prepared_mlx_vlm_model_path(
+    *,
+    model_id: str,
+    revision: str,
+    cache_dir: str,
+) -> str | None:
+    if not model_id:
+        return None
+    direct_path = Path(model_id).expanduser()
+    if direct_path.exists():
+        return str(direct_path)
+    if not cache_dir:
+        return None
+    manifest = load_mlx_vlm_manifest(cache_dir)
+    entry = manifest.get(manifest_model_key(model_id=model_id, revision=revision), {})
+    local_path = str(entry.get("local_path", "")).strip()
+    if local_path and Path(local_path).exists():
+        return local_path
+    derived = derived_mlx_vlm_local_path(model_id=model_id, revision=revision, cache_dir=cache_dir)
+    if derived.exists():
+        return str(derived)
+    return None
+
+
 def parse_json_object(raw: str) -> dict[str, object] | None:
     try:
         loaded = json.loads(raw)
@@ -1438,10 +1606,12 @@ def parse_json_object(raw: str) -> dict[str, object] | None:
             return None
 
 
-def missing_moondream_dependencies() -> list[str]:
+def missing_mlx_vlm_dependencies() -> list[str]:
     required = {
+        "mlx": "mlx",
+        "mlx_vlm": "mlx-vlm",
         "torch": "torch",
-        "transformers": "transformers",
+        "torchvision": "torchvision",
         "PIL": "pillow",
     }
     missing: list[str] = []
@@ -1451,48 +1621,70 @@ def missing_moondream_dependencies() -> list[str]:
     return missing
 
 
-def resolve_moondream_model(
+def resolve_mlx_vlm_model(
     *,
     model: str,
     model_id: str,
     revision: str,
 ) -> tuple[str, str]:
     requested = (model_id or model).strip()
-    resolved_model_id = requested if "/" in requested else "vikhyatk/moondream2"
-    resolved_revision = revision.strip()
-    if not resolved_revision:
-        match = re.search(r"(\d{4}-\d{2}-\d{2})", model)
-        if match:
-            resolved_revision = match.group(1)
-    return resolved_model_id, resolved_revision
+    if requested and "/" in requested:
+        return requested, revision.strip()
+    return "mlx-community/Qwen3.5-0.8B-4bit", revision.strip()
 
 
-def resolve_torch_device(*, torch: Any, requested: str) -> str:
+def resolve_mlx_device(*, requested: str) -> str:
     requested_value = (requested or "auto").strip().lower()
-    if requested_value not in {"auto", "cpu", "mps", "cuda"}:
-        requested_value = "auto"
-    if requested_value != "auto":
-        return requested_value
-    if hasattr(torch, "backends") and hasattr(torch.backends, "mps"):
-        try:
-            if torch.backends.mps.is_available():
-                return "mps"
-        except Exception:
-            pass
-    if hasattr(torch, "cuda"):
-        try:
-            if torch.cuda.is_available():
-                return "cuda"
-        except Exception:
-            pass
-    return "cpu"
+    if requested_value in {"auto", "", "mps", "metal", "gpu"}:
+        return "metal"
+    if requested_value == "cpu":
+        return "cpu"
+    return "metal"
 
 
-def bootstrap_moondream_model(config: AIProviderConfig | None = None) -> AIProviderStatus:
+def prepare_mlx_vlm_model(config: AIProviderConfig) -> AIProviderStatus:
+    if config.provider != "mlx-vlm-local":
+        return inspect_ai_provider_status(config, runtime_probe=False)
+
+    missing = missing_mlx_vlm_dependencies()
+    if missing:
+        return inspect_ai_provider_status(config, runtime_probe=False)
+
+    local_target = derived_mlx_vlm_local_path(
+        model_id=config.model,
+        revision=config.revision,
+        cache_dir=config.cache_dir,
+    )
+    local_target.mkdir(parents=True, exist_ok=True)
+
+    huggingface_hub = importlib.import_module("huggingface_hub")
+    snapshot_download = getattr(huggingface_hub, "snapshot_download")
+
+    download_kwargs: dict[str, Any] = {
+        "repo_id": config.model,
+        "local_dir": str(local_target),
+        "local_dir_use_symlinks": False,
+    }
+    if config.revision:
+        download_kwargs["revision"] = config.revision
+
+    with model_cache_environment(config.cache_dir):
+        downloaded_path = snapshot_download(**download_kwargs)
+
+    store_mlx_vlm_manifest_entry(
+        cache_dir=config.cache_dir,
+        model_id=config.model,
+        revision=config.revision,
+        local_path=str(Path(downloaded_path).resolve()),
+    )
+    return inspect_ai_provider_status(config, runtime_probe=True)
+
+
+def bootstrap_mlx_vlm_model(config: AIProviderConfig | None = None) -> AIProviderStatus:
     effective_config = config or load_ai_provider_config()
-    if effective_config.provider != "moondream-local":
+    if effective_config.provider != "mlx-vlm-local":
         return inspect_ai_provider_status(effective_config, runtime_probe=False)
-    return inspect_ai_provider_status(effective_config, runtime_probe=True)
+    return prepare_mlx_vlm_model(effective_config)
 
 
 def string_or_default(value: object, default: str) -> str:

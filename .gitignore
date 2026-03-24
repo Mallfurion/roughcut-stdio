@@ -14,3 +14,4 @@ generated/*
 .env
 models/*
 services/analyzer/timeline_cutter_analyzer.egg-info
+.venv/*

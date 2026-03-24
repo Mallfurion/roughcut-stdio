@@ -9,16 +9,16 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from services.analyzer.app.ai import bootstrap_moondream_model, load_ai_provider_config  # noqa: E402
+from services.analyzer.app.ai import bootstrap_mlx_vlm_model, load_ai_provider_config  # noqa: E402
 
 
 def main() -> int:
     config = load_ai_provider_config()
-    if config.provider != "moondream-local":
-        print("Moondream bootstrap skipped because TIMELINE_AI_PROVIDER is not moondream-local.")
+    if config.provider != "mlx-vlm-local":
+        print("MLX-VLM bootstrap skipped because TIMELINE_AI_PROVIDER is not mlx-vlm-local.")
         return 0
 
-    status = bootstrap_moondream_model(config)
+    status = bootstrap_mlx_vlm_model(config)
     print(f"configured_provider: {status.configured_provider}")
     print(f"effective_provider: {status.effective_provider}")
     print(f"model: {status.model or '(none)'}")

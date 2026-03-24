@@ -40,6 +40,26 @@ PY
 
 PYTHON_BIN="$(select_python)"
 
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1; then
+    echo "ffmpeg is already available."
+    return 0
+  fi
+
+  local os_name
+  os_name="$(uname -s)"
+  if [ "$os_name" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+    echo "ffmpeg is missing. Installing it with Homebrew..."
+    brew install ffmpeg
+    return 0
+  fi
+
+  echo "ffmpeg is not installed."
+  echo "Automatic installation is only supported during setup on macOS with Homebrew."
+  echo "Install ffmpeg manually, then rerun npm run setup."
+  return 1
+}
+
 echo "Installing JavaScript dependencies..."
 npm install
 
@@ -52,18 +72,20 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1
 echo "Preparing generated output folder..."
 mkdir -p "$ROOT_DIR/generated"
 
+ensure_ffmpeg
+
 echo "Installing analyzer package into the virtual environment..."
 "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer"
 
-if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "moondream-local" ]; then
-  echo "Installing Moondream local runtime dependencies..."
-  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer[moondream]"
+if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
+  echo "Installing MLX-VLM local runtime dependencies..."
+  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer[mlx_vlm]"
 
   if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
-    echo "Bootstrapping Moondream local model..."
-    "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_moondream.py
+    echo "Bootstrapping MLX-VLM local model..."
+    "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_mlx_vlm.py
   else
-    echo "Skipping Moondream model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
+    echo "Skipping MLX-VLM model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
   fi
 fi
 

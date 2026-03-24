@@ -9,12 +9,13 @@ from services.analyzer.app.ai import (
     AIProviderConfig,
     DeterministicVisionLanguageAnalyzer,
     LMStudioVisionLanguageAnalyzer,
-    MoondreamLocalVisionLanguageAnalyzer,
+    MLXVLMVisionLanguageAnalyzer,
     build_segment_evidence,
     encode_image_as_data_url,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
     model_matches,
+    resolve_mlx_device,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment
 
@@ -152,23 +153,71 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(status.effective_provider, "deterministic")
         self.assertTrue(status.available)
 
-    def test_provider_status_reports_missing_moondream_dependencies(self) -> None:
-        with patch("services.analyzer.app.ai.missing_moondream_dependencies", return_value=["torch", "transformers"]):
+    def test_provider_status_reports_missing_mlx_vlm_dependencies(self) -> None:
+        with patch("services.analyzer.app.ai.missing_mlx_vlm_dependencies", return_value=["mlx", "mlx-vlm", "torch", "torchvision"]):
             status = inspect_ai_provider_status(
                 AIProviderConfig(
-                    provider="moondream-local",
-                    model="vikhyatk/moondream2",
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
                     base_url="",
                     timeout_sec=30.0,
-                    cache_dir="/tmp/moondream",
+                    cache_dir="/tmp/mlx-vlm",
                     device="auto",
                 )
             )
 
-        self.assertEqual(status.configured_provider, "moondream-local")
+        self.assertEqual(status.configured_provider, "mlx-vlm-local")
         self.assertEqual(status.effective_provider, "deterministic")
         self.assertFalse(status.available)
         self.assertIn("missing", status.detail.lower())
+        self.assertIn("torch", status.detail.lower())
+
+    def test_provider_status_reports_missing_ffmpeg_for_mlx_vlm(self) -> None:
+        with (
+            patch("services.analyzer.app.ai.missing_mlx_vlm_dependencies", return_value=[]),
+            patch("services.analyzer.app.ai.platform.system", return_value="Darwin"),
+            patch("services.analyzer.app.ai.platform.machine", return_value="arm64"),
+            patch("services.analyzer.app.ai.shutil.which", return_value=None),
+        ):
+            status = inspect_ai_provider_status(
+                AIProviderConfig(
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
+                    base_url="",
+                    timeout_sec=30.0,
+                    cache_dir="/tmp/mlx-vlm",
+                    device="auto",
+                )
+            )
+
+        self.assertEqual(status.configured_provider, "mlx-vlm-local")
+        self.assertEqual(status.effective_provider, "deterministic")
+        self.assertFalse(status.available)
+        self.assertIn("ffmpeg", status.detail.lower())
+
+    def test_provider_status_requires_prepared_local_mlx_model(self) -> None:
+        with (
+            patch("services.analyzer.app.ai.missing_mlx_vlm_dependencies", return_value=[]),
+            patch("services.analyzer.app.ai.platform.system", return_value="Darwin"),
+            patch("services.analyzer.app.ai.platform.machine", return_value="arm64"),
+            patch("services.analyzer.app.ai.shutil.which", return_value="/opt/homebrew/bin/ffmpeg"),
+            patch("services.analyzer.app.ai.resolve_prepared_mlx_vlm_model_path", return_value=None),
+        ):
+            status = inspect_ai_provider_status(
+                AIProviderConfig(
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
+                    base_url="",
+                    timeout_sec=30.0,
+                    cache_dir="/tmp/mlx-vlm",
+                    device="auto",
+                )
+            )
+
+        self.assertEqual(status.configured_provider, "mlx-vlm-local")
+        self.assertEqual(status.effective_provider, "deterministic")
+        self.assertFalse(status.available)
+        self.assertIn("setup", status.detail.lower())
 
     def test_model_matches_handles_aliases(self) -> None:
         self.assertTrue(model_matches("qwen3.5-9b", "lmstudio-community/qwen3.5-9b"))
@@ -178,6 +227,11 @@ class AIPhaseOneTests(unittest.TestCase):
     def test_encode_image_as_data_url_ignores_empty_or_directory_paths(self) -> None:
         self.assertIsNone(encode_image_as_data_url(""))
         self.assertIsNone(encode_image_as_data_url("."))
+
+    def test_resolve_mlx_device_defaults_to_metal(self) -> None:
+        self.assertEqual(resolve_mlx_device(requested="auto"), "metal")
+        self.assertEqual(resolve_mlx_device(requested="mps"), "metal")
+        self.assertEqual(resolve_mlx_device(requested="cpu"), "cpu")
 
     def test_lmstudio_analyzer_stores_and_reuses_cache(self) -> None:
         class FakeClient:
@@ -380,7 +434,7 @@ class AIPhaseOneTests(unittest.TestCase):
             analyzer = LMStudioVisionLanguageAnalyzer(
                 config=AIProviderConfig(
                     provider="lmstudio",
-                    model="moondream-2b-2025-04-14",
+                    model="qwen3.5-9b",
                     base_url="http://127.0.0.1:1234/v1",
                     timeout_sec=30.0,
                 ),
@@ -406,13 +460,13 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(stats.fallback_segment_count, 0)
         self.assertEqual(stats.live_request_count, 1)
 
-    def test_moondream_local_analyzer_uses_runtime_and_cache(self) -> None:
+    def test_mlx_vlm_local_analyzer_uses_runtime_and_cache(self) -> None:
         class FakeRuntime:
             def __init__(self) -> None:
-                self.model_id = "vikhyatk/moondream2"
-                self.revision = "2025-04-14"
-                self.device = "cpu"
-                self.cache_dir = "/tmp/moondream"
+                self.model_id = "mlx-community/Qwen3.5-0.8B-4bit"
+                self.revision = ""
+                self.device = "metal"
+                self.cache_dir = "/tmp/mlx-vlm"
                 self.calls = 0
 
             def query_image(self, *, image_path: str, prompt: str) -> str:
@@ -473,15 +527,15 @@ class AIPhaseOneTests(unittest.TestCase):
             )
             evidence.contact_sheet_path = str(image_path)
             runtime = FakeRuntime()
-            analyzer = MoondreamLocalVisionLanguageAnalyzer(
+            analyzer = MLXVLMVisionLanguageAnalyzer(
                 config=AIProviderConfig(
-                    provider="moondream-local",
-                    model="vikhyatk/moondream2",
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
                     base_url="",
                     timeout_sec=30.0,
-                    revision="2025-04-14",
+                    revision="",
                     cache_dir=tempdir,
-                    device="cpu",
+                    device="auto",
                 ),
                 runtime=runtime,
                 cache_root=Path(tempdir) / "cache",
@@ -502,11 +556,86 @@ class AIPhaseOneTests(unittest.TestCase):
             stats = analyzer.runtime_stats()
 
         self.assertEqual(runtime.calls, 1)
-        self.assertEqual(first.provider, "moondream-local")
-        self.assertEqual(second.provider, "moondream-local")
+        self.assertEqual(first.provider, "mlx-vlm-local")
+        self.assertEqual(second.provider, "mlx-vlm-local")
         self.assertEqual(stats.live_segment_count, 1)
         self.assertEqual(stats.cached_segment_count, 1)
         self.assertEqual(stats.fallback_segment_count, 0)
+        self.assertEqual(stats.live_request_count, 1)
+
+    def test_mlx_vlm_local_analyzer_falls_back_on_runtime_error(self) -> None:
+        class FailingRuntime:
+            def __init__(self) -> None:
+                self.model_id = "mlx-community/Qwen3.5-0.8B-4bit"
+                self.revision = ""
+                self.device = "metal"
+                self.cache_dir = "/tmp/mlx-vlm"
+
+            def query_image(self, *, image_path: str, prompt: str) -> str:
+                raise RuntimeError("mlx runtime failure")
+
+        asset = Asset(
+            id="asset-5",
+            name="Fallback Shot",
+            source_path="/tmp/fallback.mov",
+            proxy_path="/tmp/fallback.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A005_C031",
+        )
+        segment = CandidateSegment(
+            id="segment-1",
+            asset_id="asset-5",
+            start_sec=0.0,
+            end_sec=4.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Fallback shot.",
+            quality_metrics={"visual_novelty": 0.8, "subject_clarity": 0.79, "story_alignment": 0.73, "motion_energy": 0.66, "duration_fit": 0.8},
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            image_path = Path(tempdir) / "segment.jpg"
+            image_path.write_bytes(b"fake")
+            evidence = build_segment_evidence(
+                asset=asset,
+                segment=segment,
+                asset_segments=[segment],
+                segment_index=0,
+                story_prompt="Build a rough cut.",
+                artifacts_root=None,
+                extract_keyframes=False,
+            )
+            evidence.contact_sheet_path = str(image_path)
+            analyzer = MLXVLMVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
+                    base_url="",
+                    timeout_sec=30.0,
+                    revision="",
+                    cache_dir=tempdir,
+                    device="auto",
+                ),
+                runtime=FailingRuntime(),
+                cache_root=Path(tempdir) / "cache",
+            )
+
+            understanding = analyzer.analyze(
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+            stats = analyzer.runtime_stats()
+
+        self.assertEqual(understanding.provider, "deterministic")
+        self.assertIn("mlx_vlm_local_failed", understanding.risk_flags)
+        self.assertEqual(stats.live_segment_count, 0)
+        self.assertEqual(stats.cached_segment_count, 0)
+        self.assertEqual(stats.fallback_segment_count, 1)
         self.assertEqual(stats.live_request_count, 1)
 
 
