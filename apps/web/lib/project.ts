@@ -25,6 +25,10 @@ export type Asset = {
   height: number;
   has_speech: boolean;
   interchange_reel_name: string;
+  source_timecode?: string;
+  has_proxy?: boolean;
+  proxy_match_confidence?: number;
+  proxy_match_reason?: string;
 };
 
 export type CandidateSegment = {

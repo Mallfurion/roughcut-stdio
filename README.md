@@ -12,7 +12,7 @@ That is the intended interaction model for this repository.
 ## Core Idea
 
 - `setup` installs everything the repository needs locally
-- `process` scans the repository `media/` path, matches proxies, analyzes footage, and writes a generated timeline
+- `process` scans the repository `media/` path, matches proxies when available, analyzes footage, and writes a generated timeline
 - `view` starts the timeline selector web app against the latest generated timeline
 - `export` writes a DaVinci Resolve `FCPXML` file from that generated timeline
 
@@ -72,6 +72,7 @@ Notes:
 - the pipeline still runs without those optional media tools
 - when they are missing, the analyzer uses deterministic fallbacks
 - silent b-roll workflows remain testable even without speech tooling
+- clips without proxies are supported and processed as source-only media
 
 ## The Main Flow
 
@@ -110,6 +111,7 @@ What it does:
 - discovers candidate video files
 - classifies source clips and proxy clips
 - matches proxies to sources
+- keeps source-only clips when no matching proxy exists
 - generates candidate segments
 - scores silent and spoken footage
 - builds a timeline
@@ -119,6 +121,7 @@ Output files:
 
 - `generated/project.json`
 - `generated/process.log`
+- `generated/process-summary.txt`
 
 You can customize the processing prompt with environment variables:
 
@@ -215,6 +218,23 @@ your-footage/
   Proxy/
 ```
 
+No-proxy workflows are also supported:
+
+```text
+your-footage/
+  DJI_0692.MP4
+  DJI_0693.MP4
+  A001_08101522_C001.mov
+```
+
+If no proxy exists for a clip:
+
+- the clip is still processed
+- the original file is used as the analysis reference
+- the original file is used as the export reference
+- `generated/process-summary.txt` lists it as `source-only`
+- Resolve must be able to access that original file path when you import the XML
+
 Proxy detection currently uses:
 
 - directory names like `Proxy`, `Proxies`, `Optimized Media`
@@ -246,6 +266,7 @@ That means:
 
 - spoken clips work better with the optional tools installed
 - silent b-roll still works without them
+- source-only clips still participate in the timeline when no proxy is available
 
 ## Optional Manual Commands
 
@@ -310,6 +331,7 @@ The intended test sequence is:
 Expected results:
 
 - `generated/project.json` exists after `process`
+- `generated/process-summary.txt` tells you how many clips are proxy-backed vs source-only
 - the browser app shows a generated timeline after `view`
 - `generated/timeline.fcpxml` exists after `export`
 

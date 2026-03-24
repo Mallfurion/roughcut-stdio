@@ -12,7 +12,9 @@ fi
 
 MEDIA_DIR="${ROOT_DIR}/media"
 OUTPUT_JSON="${ROOT_DIR}/generated/project.json"
+TMP_OUTPUT_JSON="${ROOT_DIR}/generated/project.json.tmp"
 LOG_FILE="${ROOT_DIR}/generated/process.log"
+SUMMARY_FILE="${ROOT_DIR}/generated/process-summary.txt"
 PROJECT_NAME="${TIMELINE_PROJECT_NAME:-Timeline Cutter Project}"
 STORY_PROMPT="${TIMELINE_STORY_PROMPT:-Build a coherent rough cut from the strongest visual and spoken beats.}"
 
@@ -29,7 +31,9 @@ echo "Processing media from ${MEDIA_DIR}"
   "$PROJECT_NAME" \
   "$MEDIA_DIR" \
   "$STORY_PROMPT" \
-  > "$OUTPUT_JSON"
+  > "$TMP_OUTPUT_JSON"
+
+mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 
 {
   echo "processed_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -37,7 +41,31 @@ echo "Processing media from ${MEDIA_DIR}"
   echo "media_dir=$MEDIA_DIR"
 } > "$LOG_FILE"
 
+"$PYTHON_BIN" - <<'PY' > "$SUMMARY_FILE"
+import json
+from pathlib import Path
+
+payload = json.loads(Path("generated/project.json").read_text())
+assets = payload["assets"]
+source_only = [asset for asset in assets if asset.get("has_proxy") is False]
+proxy_backed = [asset for asset in assets if asset.get("has_proxy") is not False]
+
+print(f"Assets: {len(assets)}")
+print(f"Proxy-backed assets: {len(proxy_backed)}")
+print(f"Source-only assets: {len(source_only)}")
+
+if source_only:
+    print("")
+    print("Source-only clips:")
+    for asset in source_only[:50]:
+        print(f"- {asset['interchange_reel_name']} -> {asset['source_path']}")
+        reason = asset.get("proxy_match_reason")
+        if reason:
+            print(f"  reason: {reason}")
+PY
+
 echo "Generated timeline project at $OUTPUT_JSON"
+echo "Process summary written to $SUMMARY_FILE"
 echo "Next:"
 echo "  npm run view"
 echo "  npm run export"

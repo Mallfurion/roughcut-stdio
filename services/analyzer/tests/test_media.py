@@ -64,6 +64,7 @@ class MediaDiscoveryTests(unittest.TestCase):
             self.assertEqual(len(assets), 1)
             self.assertEqual(assets[0].proxy_path, str(proxy.resolve()))
             self.assertEqual(assets[0].source_timecode, "01:00:00:00")
+            self.assertTrue(assets[0].has_proxy)
 
     def test_proxy_only_file_is_usable_placeholder(self) -> None:
         proxy = DiscoveredMedia(
@@ -79,6 +80,27 @@ class MediaDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0].proxy.path, proxy.path)
         self.assertGreater(matches[0].confidence, 0.4)
+
+    def test_source_only_clip_is_supported_without_proxy(self) -> None:
+        source = DiscoveredMedia(
+            path="/tmp/DJI_0692.MP4",
+            role="source",
+            clip_key="DJI0692",
+            stem="DJI_0692",
+            extension=".mp4",
+            probe=MediaProbe(28.97, 59.94, 1920, 1080, False, "06:50:32:00"),
+        )
+
+        matches = match_media_files([source])
+        assets = build_assets_from_matches(matches)
+
+        self.assertEqual(len(matches), 1)
+        self.assertIsNone(matches[0].proxy)
+        self.assertEqual(matches[0].confidence, 1.0)
+        self.assertIn("Source-only processing", matches[0].reason)
+        self.assertEqual(len(assets), 1)
+        self.assertFalse(assets[0].has_proxy)
+        self.assertEqual(assets[0].proxy_path, source.path)
 
     def test_datetime_metadata_can_be_used_as_timecode(self) -> None:
         self.assertEqual(datetime_to_timecode("2025-08-10T15:22:18+0300"), "15:22:18:00")

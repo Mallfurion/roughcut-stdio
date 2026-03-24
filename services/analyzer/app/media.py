@@ -232,6 +232,9 @@ def build_assets_from_matches(matches: Iterable[MatchedMedia]) -> list[Asset]:
                 has_speech=bool(source_probe.has_audio),
                 interchange_reel_name=reel_name,
                 source_timecode=source_probe.timecode or "00:00:00:00",
+                has_proxy=match.proxy is not None and match.proxy.path != match.source.path,
+                proxy_match_confidence=match.confidence,
+                proxy_match_reason=match.reason,
             )
         )
 
@@ -264,7 +267,7 @@ def select_best_proxy(
     proxies: list[DiscoveredMedia],
 ) -> tuple[DiscoveredMedia | None, float, str]:
     if not proxies:
-        return None, 0.0, "No proxy candidate found."
+        return None, 1.0, "No proxy candidate found. Source-only processing is active for this clip."
 
     ranked = sorted(
         ((score_proxy_match(source, proxy), proxy) for proxy in proxies),

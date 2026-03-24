@@ -11,6 +11,8 @@ export default async function Page() {
   const takeViews = resolveTakeViews(project);
   const silentCount = project.assets.filter((asset) => !asset.has_speech).length;
   const dialogueCount = project.assets.length - silentCount;
+  const sourceOnlyCount = project.assets.filter((asset) => asset.has_proxy === false).length;
+  const proxyBackedCount = project.assets.length - sourceOnlyCount;
   const totalTimelineDuration = project.timeline.items.reduce(
     (sum, item) => sum + Math.max(0, item.trim_out_sec - item.trim_in_sec),
     0
@@ -45,6 +47,8 @@ export default async function Page() {
             <MetricCard label="Best takes" value={String(takeViews.length)} />
             <MetricCard label="Silent clips" value={String(silentCount)} />
             <MetricCard label="Dialogue clips" value={String(dialogueCount)} />
+            <MetricCard label="Proxy-backed" value={String(proxyBackedCount)} />
+            <MetricCard label="Source-only" value={String(sourceOnlyCount)} />
             <MetricCard label="Timeline" value={`${totalTimelineDuration.toFixed(2)}s`} />
             <MetricCard label="Timeline version" value={`v${project.timeline.version}`} />
         </div>
@@ -76,8 +80,10 @@ export default async function Page() {
                 <span>{asset.name}</span>
                 <span>{formatDuration(segment.start_sec, segment.end_sec)}</span>
                 <span>{asset.interchange_reel_name}</span>
+                <span>{asset.has_proxy === false ? "source-only" : "proxy-backed"}</span>
               </div>
               <p>{take.selection_reason}</p>
+              {asset.proxy_match_reason ? <p>{asset.proxy_match_reason}</p> : null}
               {segment.transcript_excerpt ? <p>“{segment.transcript_excerpt}”</p> : null}
             </article>
           ))}

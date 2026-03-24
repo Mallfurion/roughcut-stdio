@@ -28,6 +28,9 @@ class Asset:
     has_speech: bool
     interchange_reel_name: str
     source_timecode: str = "00:00:00:00"
+    has_proxy: bool = True
+    proxy_match_confidence: float = 1.0
+    proxy_match_reason: str = "Exact source/proxy mapping."
 
 
 @dataclass(slots=True)
