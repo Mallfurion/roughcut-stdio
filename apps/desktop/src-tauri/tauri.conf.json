@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Timeline Cutter",
+  "version": "0.1.0",
+  "identifier": "com.timelinecutter.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev --workspace @timeline-cutter/desktop",
+    "beforeBuildCommand": "npm run build --workspace @timeline-cutter/desktop",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Timeline Cutter",
+        "width": 1440,
+        "height": 960,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

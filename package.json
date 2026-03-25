@@ -3,17 +3,17 @@
   "name": "timeline-cutter",
   "private": true,
   "workspaces": [
-    "apps/web"
+    "apps/desktop"
   ],
   "scripts": {
     "setup": "bash ./scripts/setup.sh",
     "check:ai": "bash ./scripts/check_ai.sh",
     "process": "bash ./scripts/process.sh",
-    "view": "bash ./scripts/view.sh",
+    "view": "npm run dev:desktop",
     "export": "bash ./scripts/export.sh",
-    "dev:web": "npm run dev --workspace @timeline-cutter/web",
-    "build:web": "npm run build --workspace @timeline-cutter/web",
-    "lint:web": "npm run lint --workspace @timeline-cutter/web",
+    "dev:desktop": "npm run tauri:dev --workspace @timeline-cutter/desktop",
+    "build:desktop": "npm run tauri:build --workspace @timeline-cutter/desktop",
+    "build:web": "echo 'Web app has been replaced by the desktop app. Use npm run build:desktop.'",
     "test:python": "python3 -m unittest discover services/analyzer/tests -v"
   }
 }

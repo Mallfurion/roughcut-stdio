@@ -3,18 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from services.analyzer.app.ai import (
     AIProviderConfig,
     DeterministicVisionLanguageAnalyzer,
     LMStudioVisionLanguageAnalyzer,
+    MLXVLMRuntime,
     MLXVLMVisionLanguageAnalyzer,
     build_segment_evidence,
     encode_image_as_data_url,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
     model_matches,
+    normalize_model_output,
     resolve_mlx_device,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment
@@ -139,6 +142,75 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertTrue(understanding.summary)
         self.assertIn(understanding.keep_label, {"keep", "maybe", "reject"})
         self.assertTrue(0.0 <= understanding.confidence <= 1.0)
+
+    def test_normalize_model_output_rejects_placeholder_values(self) -> None:
+        asset = Asset(
+            id="asset-3",
+            name="Field Build",
+            source_path="/tmp/field.mov",
+            proxy_path="/tmp/field.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C003",
+        )
+        segment = CandidateSegment(
+            id="segment-1",
+            asset_id="asset-3",
+            start_sec=0.0,
+            end_sec=4.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="People build a structure in a field.",
+            quality_metrics={
+                "visual_novelty": 0.74,
+                "subject_clarity": 0.78,
+                "story_alignment": 0.71,
+                "motion_energy": 0.61,
+                "duration_fit": 0.79,
+            },
+        )
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segment,
+            asset_segments=[segment],
+            segment_index=0,
+            story_prompt="Build a practical outdoor sequence.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+
+        understanding = normalize_model_output(
+            {
+                "summary": "short sentence",
+                "subjects": ["short label", "worker"],
+                "actions": ["item1", "climbing"],
+                "shot_type": "short label",
+                "camera_motion": "short label",
+                "mood": "short label",
+                "keep_label": "short label",
+                "confidence": 0.72,
+                "rationale": "short sentence",
+            },
+            provider="mlx-vlm-local",
+            model="mlx-community/Qwen3.5-0.8B-4bit",
+            fallback=DeterministicVisionLanguageAnalyzer(),
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=evidence.story_prompt,
+        )
+
+        self.assertNotEqual(understanding.summary, "short sentence")
+        self.assertNotEqual(understanding.shot_type, "short label")
+        self.assertNotEqual(understanding.camera_motion, "short label")
+        self.assertNotEqual(understanding.mood, "short label")
+        self.assertNotEqual(understanding.rationale, "short sentence")
+        self.assertNotIn("short label", understanding.subjects)
+        self.assertNotIn("item1", understanding.actions)
+        self.assertIn(understanding.keep_label, {"keep", "maybe", "reject"})
 
     def test_provider_status_defaults_to_deterministic(self) -> None:
         status = inspect_ai_provider_status(
@@ -637,6 +709,82 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(stats.cached_segment_count, 0)
         self.assertEqual(stats.fallback_segment_count, 1)
         self.assertEqual(stats.live_request_count, 1)
+
+    def test_mlx_vlm_runtime_uses_prepared_inputs_for_qwen3_models(self) -> None:
+        class FakeArray(list):
+            def __init__(self, value):
+                if isinstance(value, FakeArray):
+                    super().__init__(value)
+                elif isinstance(value, list):
+                    super().__init__(value)
+                else:
+                    super().__init__([value])
+
+        class FakeProcessor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.calls += 1
+                self.last_messages = messages
+                self.last_kwargs = kwargs
+                return {
+                    "input_ids": [[1, 2, 3]],
+                    "attention_mask": [[1, 1, 1]],
+                    "pixel_values": [[0.1, 0.2, 0.3]],
+                    "image_grid_thw": [[1, 1, 1]],
+                }
+
+        class FakeGenerateModule:
+            def __init__(self) -> None:
+                self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def generate(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return '{"summary":"ok"}'
+
+        fake_processor = FakeProcessor()
+        fake_generate_module = FakeGenerateModule()
+        fake_mx = SimpleNamespace(array=FakeArray)
+        runtime = MLXVLMRuntime(
+            model_id="mlx-community/Qwen3.5-0.8B-4bit",
+            revision="",
+            cache_dir="/tmp/mlx-vlm",
+            device="metal",
+        )
+        runtime._model = object()
+        runtime._processor = fake_processor
+        runtime._config = {"model_type": "qwen3_5"}
+
+        def fake_import_module(name: str):
+            if name == "mlx.core":
+                return fake_mx
+            if name == "mlx_vlm":
+                return SimpleNamespace(generate=fake_generate_module.generate)
+            raise AssertionError(f"Unexpected import: {name}")
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            image_path = Path(tempdir) / "segment.jpg"
+            image_path.write_bytes(b"fake")
+            with patch("services.analyzer.app.ai.importlib.import_module", side_effect=fake_import_module):
+                result = runtime.query_image(image_path=str(image_path), prompt="Describe this segment.")
+
+        self.assertEqual(result, '{"summary":"ok"}')
+        self.assertEqual(fake_processor.calls, 1)
+        self.assertEqual(len(fake_generate_module.calls), 1)
+        args, kwargs = fake_generate_module.calls[0]
+        self.assertEqual(args[0], runtime._model)
+        self.assertEqual(args[1], fake_processor)
+        self.assertEqual(args[2], "")
+        self.assertIn("input_ids", kwargs)
+        self.assertIn("pixel_values", kwargs)
+        self.assertIn("mask", kwargs)
+        self.assertIn("image_grid_thw", kwargs)
+        self.assertEqual(
+            fake_processor.last_messages[0]["content"][0]["image"],
+            str(image_path),
+        )
+        self.assertEqual(fake_processor.last_kwargs["return_tensors"], "pt")
 
 
 if __name__ == "__main__":

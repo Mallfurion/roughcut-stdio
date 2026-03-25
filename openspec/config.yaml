@@ -10,9 +10,9 @@ context: |
   - Secondary promise: assemble shortlisted segments into a rough timeline that can continue in DaVinci Resolve.
 
   Current repository shape:
-  - Frontend: Next.js app under apps/web
+  - Frontend: Tauri desktop app under apps/desktop
   - Backend/core: Python analyzer under services/analyzer
-  - Primary interaction model: npm run setup -> npm run process -> npm run view -> npm run export
+  - Primary interaction model: desktop-guided local workflow over setup, process, review, and export
   - Optional AI health check: npm run check:ai
 
   Current implemented baseline:
@@ -44,7 +44,7 @@ rules:
     - Prefer concise impact lists that mention the affected systems, generated artifacts, and user-visible workflow changes.
 
   design:
-    - Preserve the npm-first workflow unless the change explicitly redefines it.
+    - Preserve the local-first workflow unless the change explicitly redefines the user interaction model.
     - Call out local-first, Resolve compatibility, deterministic fallback, and silent-footage support when they are relevant.
     - Distinguish editorial intelligence from deterministic guardrails; do not move path integrity, timecode safety, or export correctness into model-only behavior.
     - Explain runtime-cost tradeoffs whenever a design adds AI inference, batching, caching, or concurrency changes.
@@ -57,7 +57,7 @@ rules:
     - For review-related specs, keep the editor override path explicit when the change touches recommendations or timeline decisions.
 
   tasks:
-    - Group tasks by vertical slice: analyzer, web app, export, docs, validation.
-    - Include verification tasks for the relevant repository commands such as npm run process, npm run view, npm run export, npm run build:web, and python3 -m unittest discover services/analyzer/tests -v.
+    - Group tasks by vertical slice: analyzer, desktop app, export, docs, validation.
+    - Include verification tasks for the relevant repository commands such as npm run process, npm run view, npm run export, npm run build:desktop, and python3 -m unittest discover services/analyzer/tests -v.
     - Include documentation updates when a change alters the user workflow, environment variables, generated artifacts, or AI/runtime behavior.
     - Keep tasks concrete and implementation-ready; each checkbox should describe something that can be completed and verified in one session.

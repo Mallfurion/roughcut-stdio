@@ -60,6 +60,44 @@ ensure_ffmpeg() {
   return 1
 }
 
+ensure_rust() {
+  if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+    echo "Rust toolchain is already available."
+    return 0
+  fi
+
+  local os_name
+  os_name="$(uname -s)"
+  if [ "$os_name" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
+    echo "Rust toolchain is missing. Installing it with Homebrew..."
+    brew install rust
+    return 0
+  fi
+
+  echo "Rust toolchain is not installed."
+  echo "Automatic installation is only supported during setup on macOS with Homebrew."
+  echo "Install Rust manually, then rerun npm run setup."
+  return 1
+}
+
+ensure_macos_build_tools() {
+  local os_name
+  os_name="$(uname -s)"
+  if [ "$os_name" != "Darwin" ]; then
+    return 0
+  fi
+
+  if xcode-select -p >/dev/null 2>&1; then
+    echo "Xcode Command Line Tools are available."
+    return 0
+  fi
+
+  echo "Xcode Command Line Tools are required to build the desktop app."
+  echo "Run: xcode-select --install"
+  echo "Then rerun npm run setup."
+  return 1
+}
+
 echo "Installing JavaScript dependencies..."
 npm install
 
@@ -73,6 +111,8 @@ echo "Preparing generated output folder..."
 mkdir -p "$ROOT_DIR/generated"
 
 ensure_ffmpeg
+ensure_macos_build_tools
+ensure_rust
 
 echo "Installing analyzer package into the virtual environment..."
 "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer"
@@ -101,9 +141,14 @@ fi
 echo
 echo "Setup complete."
 echo "Main flow:"
-echo "  npm run process"
 echo "  npm run view"
-echo "  npm run export"
+echo
+echo "Inside the desktop app:"
+echo "  1. choose runtime"
+echo "  2. choose media folder"
+echo "  3. process footage"
+echo "  4. review shots"
+echo "  5. export timeline"
 echo "  npm run check:ai"
 echo
 echo "Media root selection:"

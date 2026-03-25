@@ -7,6 +7,6 @@ cd "$ROOT_DIR"
 
 . "${ROOT_DIR}/scripts/lib/load_env.sh"
 
-echo "Starting timeline selector app..."
-echo "If you have not processed media yet, run: npm run process"
-npm run dev:web
+echo "Starting Timeline Cutter desktop app..."
+echo "If you have not processed media yet, the desktop app will still open and you can run setup/process there."
+npm run dev:desktop

@@ -33,11 +33,10 @@ Phase 2 should make segment recommendation trustworthy by ranking the prefilter 
   - `services/analyzer/app/ai.py`
   - `services/analyzer/app/domain.py`
   - `services/analyzer/app/scoring.py`
-  - `apps/web/app/page.tsx`
-  - `apps/web/lib/project.ts`
+  - desktop review UI under `apps/desktop`
 - Affected outputs:
   - `generated/project.json`
-  - recommendation state shown in the web UI
+  - recommendation state shown in the desktop review workflow
 - Dependencies and systems:
   - batched per-asset VLM request strategy
   - deterministic fallback path

@@ -22,6 +22,20 @@ from .domain import Asset, CandidateSegment, SegmentEvidence, SegmentUnderstandi
 
 SCHEMA_VERSION = "segment-understanding-v1"
 MLX_MODEL_MANIFEST = "mlx-vlm-manifest.json"
+PLACEHOLDER_TEXT_VALUES = {
+    "short label",
+    "short sentence",
+    "item1",
+    "item2",
+    "item 1",
+    "item 2",
+    "label",
+    "sentence",
+    "n/a",
+    "none",
+    "null",
+    "placeholder",
+}
 
 
 class ProviderClient(Protocol):
@@ -256,6 +270,86 @@ class MLXVLMRuntime:
         self._processor = processor
         self._config = config
 
+    def _model_type(self) -> str:
+        config = self._config
+        if isinstance(config, dict):
+            return str(config.get("model_type", "")).strip().lower()
+        return str(getattr(config, "model_type", "")).strip().lower()
+
+    def _to_mx_array(self, value: Any) -> Any:
+        mx = importlib.import_module("mlx.core")
+        if value is None:
+            return None
+        if isinstance(value, mx.array):
+            return value
+        if hasattr(value, "detach") and hasattr(value, "cpu"):
+            value = value.detach().cpu().numpy()
+        return mx.array(value)
+
+    def _query_qwen_with_prepared_inputs(
+        self,
+        *,
+        image_path: str,
+        prompt: str,
+    ) -> str:
+        generate = importlib.import_module("mlx_vlm").generate
+        model = self._model
+        processor = self._processor
+        if model is None:
+            raise AIProviderRequestError("MLX-VLM model did not initialize.")
+        if processor is None:
+            raise AIProviderRequestError("MLX-VLM processor did not initialize.")
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image_path},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+
+        kwargs: dict[str, Any] = {
+            "input_ids": self._to_mx_array(inputs["input_ids"]),
+            "mask": self._to_mx_array(inputs.get("attention_mask")),
+            "max_tokens": 120,
+            "temperature": 0.0,
+            "verbose": False,
+        }
+
+        pixel_values = inputs.get("pixel_values_videos", inputs.get("pixel_values"))
+        if pixel_values is None:
+            raise AIProviderRequestError("MLX-VLM processor did not return pixel values for the image input.")
+        kwargs["pixel_values"] = self._to_mx_array(pixel_values)
+
+        for key in (
+            "image_grid_thw",
+            "video_grid_thw",
+            "pixel_attention_mask",
+            "aspect_ratio_ids",
+            "aspect_ratio_mask",
+            "cross_attention_mask",
+        ):
+            if key in inputs and inputs[key] is not None:
+                kwargs[key] = self._to_mx_array(inputs[key])
+
+        result = generate(
+            model,
+            processor,
+            "",
+            **kwargs,
+        )
+        return extract_generation_text(result)
+
     def query_image(
         self,
         *,
@@ -269,6 +363,13 @@ class MLXVLMRuntime:
             raise AIProviderRequestError(f"MLX-VLM local backend image path is invalid: {image_path}")
 
         self.ensure_loaded()
+        model_type = self._model_type()
+        if model_type.startswith("qwen3"):
+            return self._query_qwen_with_prepared_inputs(
+                image_path=image_path,
+                prompt=prompt,
+            )
+
         pil_image = importlib.import_module("PIL.Image")
         image = pil_image.open(path).convert("RGB")
         apply_chat_template = importlib.import_module("mlx_vlm.prompt_utils").apply_chat_template
@@ -288,34 +389,16 @@ class MLXVLMRuntime:
             num_images=1,
         )
 
-        generation_attempts = (
-            (model, processor, formatted_prompt, [image]),
-            (model, processor, [image], formatted_prompt),
-            (model, processor, image_path, formatted_prompt),
+        result = generate(
+            model,
+            processor,
+            formatted_prompt,
+            [image],
+            verbose=False,
+            max_tokens=120,
+            temperature=0.0,
         )
-        last_type_error: TypeError | None = None
-        result: Any = None
-        for args in generation_attempts:
-            try:
-                result = generate(
-                    *args,
-                    verbose=False,
-                    max_tokens=600,
-                    temperature=0.1,
-                )
-                break
-            except TypeError as exc:
-                last_type_error = exc
-                try:
-                    result = generate(*args, verbose=False)
-                    break
-                except TypeError as retry_exc:
-                    last_type_error = retry_exc
-                    continue
-        if result is None and last_type_error is not None:
-            raise AIProviderRequestError(f"MLX-VLM generate call failed: {last_type_error}") from last_type_error
-
-        return str(result).strip()
+        return extract_generation_text(result)
 
 
 class DeterministicVisionLanguageAnalyzer:
@@ -576,12 +659,14 @@ class MLXVLMVisionLanguageAnalyzer:
         runtime: LocalVisionRuntime,
         fallback: VisionLanguageAnalyzer | None = None,
         cache_root: str | Path | None = None,
+        debug_log_path: str | Path | None = None,
     ) -> None:
         self.config = config
         self.runtime = runtime
         self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
         self.last_error_detail = ""
         self.cache_root = Path(cache_root) if cache_root is not None else None
+        self.debug_log_path = Path(debug_log_path) if debug_log_path is not None else None
         self._runtime_stats = AIRuntimeStats()
 
     def analyze(
@@ -628,8 +713,33 @@ class MLXVLMVisionLanguageAnalyzer:
                     story_prompt=story_prompt,
                 ),
             )
+            self._write_debug_entry(
+                event="raw_response",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": self.config.model,
+                    "image_path": image_path,
+                    "raw_response": raw,
+                },
+            )
             payload = parse_json_object(raw)
             if payload is None:
+                self._write_debug_entry(
+                    event="parse_failed",
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    payload={
+                        "provider": "mlx-vlm-local",
+                        "model": self.config.model,
+                        "image_path": image_path,
+                        "raw_response": raw,
+                        "error": "MLX-VLM local response did not contain valid JSON.",
+                    },
+                )
                 raise AIProviderRequestError("MLX-VLM local response did not contain valid JSON.")
             understanding = normalize_model_output(
                 payload,
@@ -641,6 +751,18 @@ class MLXVLMVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
             )
+            self._write_debug_entry(
+                event="parsed_response",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": self.config.model,
+                    "image_path": image_path,
+                    "parsed_payload": payload,
+                },
+            )
             if understanding.provider == "mlx-vlm-local":
                 self._runtime_stats.live_segment_count += 1
             else:
@@ -649,6 +771,18 @@ class MLXVLMVisionLanguageAnalyzer:
             return understanding
         except (AIProviderRequestError, OSError, ValueError, RuntimeError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
             self.last_error_detail = str(exc)
+            self._write_debug_entry(
+                event="analyze_failed",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": self.config.model,
+                    "image_path": image_path,
+                    "error": self.last_error_detail,
+                },
+            )
             understanding = self._fallback_understanding(
                 asset=asset,
                 segment=segment,
@@ -683,6 +817,32 @@ class MLXVLMVisionLanguageAnalyzer:
             fallback_segment_count=self._runtime_stats.fallback_segment_count,
             live_request_count=self._runtime_stats.live_request_count,
         )
+
+    def _write_debug_entry(
+        self,
+        *,
+        event: str,
+        asset: Asset,
+        segment: CandidateSegment,
+        evidence: SegmentEvidence,
+        payload: dict[str, Any],
+    ) -> None:
+        if self.debug_log_path is None:
+            return
+        self.debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "event": event,
+            "asset_id": asset.id,
+            "asset_name": asset.name,
+            "segment_id": segment.id,
+            "segment_range": [round(segment.start_sec, 3), round(segment.end_sec, 3)],
+            "analysis_mode": segment.analysis_mode,
+            "contact_sheet_path": evidence.contact_sheet_path,
+            "keyframe_paths": evidence.keyframe_paths,
+            **payload,
+        }
+        with self.debug_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
 
     def _fallback_understanding(
         self,
@@ -733,6 +893,7 @@ def default_vision_language_analyzer(
                 device=config.device,
             ),
             cache_root=(Path(artifacts_root) / "ai-cache") if artifacts_root is not None and runtime_config.cache_enabled else None,
+            debug_log_path=(Path(artifacts_root) / "vlm-debug.jsonl") if artifacts_root is not None else None,
         )
     return DeterministicVisionLanguageAnalyzer()
 
@@ -1177,8 +1338,11 @@ def create_segment_contact_sheet(
 def segment_understanding_system_prompt() -> str:
     return (
         "You analyze short video segments for an editor. "
-        "Return JSON only. Do not add markdown. "
-        "Use concise editorial language. "
+        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
+        "Use concise editorial language and keep the response short. "
+        "subjects, actions, story_roles, quality_findings, and risk_flags must each contain at most 3 short items. "
+        "keep_label must be one of: keep, maybe, reject. "
+        "confidence, visual_distinctiveness, clarity, and story_relevance must be numbers from 0 to 1. "
         "Keys required: summary, subjects, actions, shot_type, camera_motion, mood, "
         "story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
         "visual_distinctiveness, clarity, story_relevance."
@@ -1188,7 +1352,11 @@ def segment_understanding_system_prompt() -> str:
 def segment_batch_understanding_system_prompt() -> str:
     return (
         "You analyze shortlisted video segments from the same source clip for an editor. "
-        "Return JSON only. Do not add markdown. "
+        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
+        "Keep each segment result short. subjects, actions, story_roles, quality_findings, and risk_flags "
+        "must each contain at most 3 short items. "
+        "keep_label must be one of: keep, maybe, reject. "
+        "confidence, visual_distinctiveness, clarity, and story_relevance must be numbers from 0 to 1. "
         "Respond with an object containing a `segments` array. "
         "Each array item must include: segment_id, summary, subjects, actions, shot_type, camera_motion, "
         "mood, story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
@@ -1276,10 +1444,18 @@ def local_vlm_segment_understanding_prompt(
     )
     transcript = evidence.transcript_excerpt or "No transcript excerpt available."
     return (
-        "Analyze this stitched contact sheet from a shortlisted video segment and respond with JSON only. "
-        "Use concise editorial language. Keys required: summary, subjects, actions, shot_type, camera_motion, "
-        "mood, story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
-        "visual_distinctiveness, clarity, story_relevance.\n\n"
+        "Analyze this stitched contact sheet from a shortlisted video segment and respond with exactly one compact JSON object. "
+        "No markdown fences. No commentary outside JSON. No duplicated list items. "
+        "Return JSON with these keys only: "
+        "summary, subjects, actions, shot_type, camera_motion, mood, keep_label, confidence, rationale.\n"
+        "Rules: summary and rationale must each be one short sentence with real content. "
+        "subjects and actions may contain 0 to 2 short items only. "
+        "shot_type must be a real label like wide, medium, close, detail, overhead, or low angle. "
+        "camera_motion must be a real label like static, handheld, pan, tilt, tracking, or walking. "
+        "mood must be a real label like calm, active, tense, work, or casual. "
+        "keep_label must be exactly one of keep, maybe, reject. "
+        "confidence must be a number between 0 and 1. "
+        "If unsure, use fewer items, not more. Do not use placeholder words like short label, short sentence, item1, or item2.\n\n"
         f"Project story prompt: {story_prompt}\n"
         f"Asset: {asset.name}\n"
         f"Reel: {asset.interchange_reel_name}\n"
@@ -1290,6 +1466,13 @@ def local_vlm_segment_understanding_prompt(
         f"Metrics: {metrics}\n"
         "Focus on whether the segment has a clear subject, usable motion, readable composition, and editorial usefulness."
     )
+
+
+def extract_generation_text(result: Any) -> str:
+    text = getattr(result, "text", None)
+    if isinstance(text, str):
+        return text.strip()
+    return str(result).strip()
 
 
 def normalize_model_output(
@@ -1325,7 +1508,7 @@ def normalize_model_output(
             payload.get("quality_findings"),
             fallback_understanding.quality_findings,
         ),
-        keep_label=string_or_default(payload.get("keep_label"), fallback_understanding.keep_label),
+        keep_label=keep_label_or_default(payload.get("keep_label"), fallback_understanding.keep_label),
         confidence=rounded_metric(number_or_default(payload.get("confidence"), fallback_understanding.confidence)),
         rationale=string_or_default(payload.get("rationale"), fallback_understanding.rationale),
         risk_flags=list_or_default(payload.get("risk_flags"), fallback_understanding.risk_flags),
@@ -1598,12 +1781,66 @@ def parse_json_object(raw: str) -> dict[str, object] | None:
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
-            return None
+            return salvage_partial_json_object(raw)
         try:
             loaded = json.loads(match.group(0))
             return loaded if isinstance(loaded, dict) else None
         except json.JSONDecodeError:
-            return None
+            return salvage_partial_json_object(match.group(0))
+
+
+def salvage_partial_json_object(raw: str) -> dict[str, object] | None:
+    start = raw.find("{")
+    if start < 0:
+        return None
+
+    candidate = raw[start:].rstrip()
+    while candidate:
+        try:
+            loaded = json.loads(candidate)
+            return loaded if isinstance(loaded, dict) else None
+        except json.JSONDecodeError:
+            last_comma = candidate.rfind(",")
+            if last_comma < 0:
+                break
+            candidate = close_partial_json(candidate[:last_comma].rstrip())
+
+    return None
+
+
+def close_partial_json(raw: str) -> str:
+    output: list[str] = []
+    closers: list[str] = []
+    in_string = False
+    escaped = False
+
+    for char in raw:
+        output.append(char)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            closers.append("}")
+        elif char == "[":
+            closers.append("]")
+        elif char in {"]", "}"} and closers and closers[-1] == char:
+            closers.pop()
+
+    if in_string:
+        output.append('"')
+
+    while closers:
+        output.append(closers.pop())
+
+    return "".join(output)
 
 
 def missing_mlx_vlm_dependencies() -> list[str]:
@@ -1688,17 +1925,48 @@ def bootstrap_mlx_vlm_model(config: AIProviderConfig | None = None) -> AIProvide
 
 
 def string_or_default(value: object, default: str) -> str:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and not looks_like_placeholder_text(cleaned):
+            return cleaned
     return default
 
 
 def list_or_default(value: object, default: list[str]) -> list[str]:
     if isinstance(value, list):
-        items = [str(item).strip() for item in value if str(item).strip()]
+        items: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = str(item).strip()
+            if not cleaned or looks_like_placeholder_text(cleaned):
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(cleaned)
         if items:
             return items
     return default
+
+
+def keep_label_or_default(value: object, default: str) -> str:
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        if cleaned in {"keep", "maybe", "reject"}:
+            return cleaned
+    return default
+
+
+def looks_like_placeholder_text(value: str) -> bool:
+    normalized = re.sub(r"\s+", " ", value.strip().lower())
+    if not normalized:
+        return True
+    if normalized in PLACEHOLDER_TEXT_VALUES:
+        return True
+    if normalized.startswith("short "):
+        return True
+    return bool(re.fullmatch(r"item\s*\d+", normalized))
 
 
 def number_or_default(value: object, default: float) -> float:

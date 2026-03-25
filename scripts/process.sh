@@ -24,6 +24,7 @@ OUTPUT_JSON="${ROOT_DIR}/generated/project.json"
 TMP_OUTPUT_JSON="${ROOT_DIR}/generated/project.json.tmp"
 LOG_FILE="${ROOT_DIR}/generated/process.log"
 SUMMARY_FILE="${ROOT_DIR}/generated/process-summary.txt"
+VLM_DEBUG_FILE="${ROOT_DIR}/generated/analysis/vlm-debug.jsonl"
 PROJECT_NAME="${TIMELINE_PROJECT_NAME:-Timeline Cutter Project}"
 STORY_PROMPT="${TIMELINE_STORY_PROMPT:-Build a coherent rough cut from the strongest visual and spoken beats.}"
 
@@ -47,7 +48,7 @@ mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 AI_STATUS_LINES="$("$PYTHON_BIN" - <<'PY'
 from services.analyzer.app.ai import inspect_ai_provider_status, load_ai_analysis_config
 
-status = inspect_ai_provider_status()
+status = inspect_ai_provider_status(runtime_probe=True)
 analysis = load_ai_analysis_config()
 print(f"ai_provider_configured={status.configured_provider}")
 print(f"ai_provider_effective={status.effective_provider}")
@@ -110,8 +111,18 @@ if source_only:
             print(f"  reason: {reason}")
 PY
 
+if [ -f "$VLM_DEBUG_FILE" ]; then
+  {
+    echo ""
+    echo "VLM debug log: $VLM_DEBUG_FILE"
+  } >> "$SUMMARY_FILE"
+fi
+
 echo "Generated timeline project at $OUTPUT_JSON"
 echo "Process summary written to $SUMMARY_FILE"
+if [ -f "$VLM_DEBUG_FILE" ]; then
+  echo "VLM debug log written to $VLM_DEBUG_FILE"
+fi
 echo "Next:"
 echo "  npm run view"
 echo "  npm run export"

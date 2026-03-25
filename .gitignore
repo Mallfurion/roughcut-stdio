@@ -15,3 +15,5 @@ generated/*
 models/*
 services/analyzer/timeline_cutter_analyzer.egg-info
 .venv/*
+apps/desktop/dist
+apps/desktop/src-tauri/target
