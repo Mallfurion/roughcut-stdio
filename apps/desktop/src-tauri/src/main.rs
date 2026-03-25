@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,38 @@ struct RuntimeCheckResult {
     available: bool,
     detail: String,
     output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppSettings {
+    #[serde(rename = "aiProvider")]
+    ai_provider: String,
+    #[serde(rename = "projectName")]
+    project_name: String,
+    #[serde(rename = "storyPrompt")]
+    story_prompt: String,
+    #[serde(rename = "aiMode")]
+    ai_mode: String,
+    #[serde(rename = "aiTimeoutSec")]
+    ai_timeout_sec: String,
+    #[serde(rename = "aiModel")]
+    ai_model: String,
+    #[serde(rename = "aiBaseUrl")]
+    ai_base_url: String,
+    #[serde(rename = "aiModelId")]
+    ai_model_id: String,
+    #[serde(rename = "aiDevice")]
+    ai_device: String,
+    #[serde(rename = "aiMaxSegmentsPerAsset")]
+    ai_max_segments_per_asset: String,
+    #[serde(rename = "aiMaxKeyframes")]
+    ai_max_keyframes: String,
+    #[serde(rename = "aiKeyframeMaxWidth")]
+    ai_keyframe_max_width: String,
+    #[serde(rename = "aiConcurrency")]
+    ai_concurrency: String,
+    #[serde(rename = "aiCacheEnabled")]
+    ai_cache_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +131,19 @@ impl Default for ProcessRunState {
 #[derive(Default)]
 struct ProcessController {
     state: Arc<Mutex<ProcessRunState>>,
+}
+
+#[tauri::command]
+fn load_app_settings() -> Result<AppSettings, String> {
+    let root = workspace_root()?;
+    read_app_settings(&root)
+}
+
+#[tauri::command]
+fn save_app_settings(settings: AppSettings) -> Result<AppSettings, String> {
+    let root = workspace_root()?;
+    write_app_settings(&root, &settings)?;
+    read_app_settings(&root)
 }
 
 #[tauri::command]
@@ -300,6 +346,191 @@ fn count_video_files(root: &Path) -> Result<usize, String> {
     }
 
     Ok(count)
+}
+
+fn default_app_settings() -> AppSettings {
+    AppSettings {
+        ai_provider: "deterministic".into(),
+        project_name: "Roughcut Stdio Project".into(),
+        story_prompt: "Build a coherent rough cut from the strongest visual and spoken beats.".into(),
+        ai_mode: "fast".into(),
+        ai_timeout_sec: "45".into(),
+        ai_model: "qwen3.5-9b".into(),
+        ai_base_url: "http://127.0.0.1:1234/v1".into(),
+        ai_model_id: "mlx-community/Qwen3.5-0.8B-4bit".into(),
+        ai_device: "auto".into(),
+        ai_max_segments_per_asset: "1".into(),
+        ai_max_keyframes: "1".into(),
+        ai_keyframe_max_width: "448".into(),
+        ai_concurrency: "2".into(),
+        ai_cache_enabled: true,
+    }
+}
+
+fn read_app_settings(root: &Path) -> Result<AppSettings, String> {
+    let env_path = root.join(".env");
+    let env_map = read_env_map(&env_path)?;
+    let mut settings = default_app_settings();
+
+    if let Some(value) = env_map.get("TIMELINE_AI_PROVIDER") {
+        settings.ai_provider = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_PROJECT_NAME") {
+        settings.project_name = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_STORY_PROMPT") {
+        settings.story_prompt = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_MODE") {
+        settings.ai_mode = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_TIMEOUT_SEC") {
+        settings.ai_timeout_sec = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_MODEL") {
+        settings.ai_model = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_BASE_URL") {
+        settings.ai_base_url = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_MODEL_ID") {
+        settings.ai_model_id = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_DEVICE") {
+        settings.ai_device = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_MAX_SEGMENTS_PER_ASSET") {
+        settings.ai_max_segments_per_asset = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_MAX_KEYFRAMES") {
+        settings.ai_max_keyframes = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_KEYFRAME_MAX_WIDTH") {
+        settings.ai_keyframe_max_width = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_CONCURRENCY") {
+        settings.ai_concurrency = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_CACHE") {
+        settings.ai_cache_enabled = parse_bool(value, true);
+    }
+
+    Ok(settings)
+}
+
+fn write_app_settings(root: &Path, settings: &AppSettings) -> Result<(), String> {
+    let env_path = root.join(".env");
+    let mut lines = if env_path.exists() {
+        fs::read_to_string(&env_path)
+            .map_err(|error| format!("Failed to read {}: {error}", env_path.display()))?
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let entries = managed_app_settings_entries(settings);
+    let mut seen = HashSet::new();
+    let mut rewritten = Vec::new();
+
+    for line in lines.drain(..) {
+        let Some((key, _value)) = parse_env_assignment(&line) else {
+            rewritten.push(line);
+            continue;
+        };
+
+        if let Some((_, value)) = entries.iter().find(|(entry_key, _)| entry_key == &key) {
+            if seen.insert(key.clone()) {
+                rewritten.push(format!("{key}={value}"));
+            }
+            continue;
+        }
+
+        rewritten.push(line);
+    }
+
+    if !rewritten.is_empty() && rewritten.last().is_some_and(|line| !line.is_empty()) {
+        rewritten.push(String::new());
+    }
+
+    for (key, value) in entries {
+        if seen.insert(key.clone()) {
+            rewritten.push(format!("{key}={value}"));
+        }
+    }
+
+    let content = format!("{}\n", rewritten.join("\n"));
+    fs::write(&env_path, content)
+        .map_err(|error| format!("Failed to write {}: {error}", env_path.display()))
+}
+
+fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)> {
+    vec![
+        ("TIMELINE_AI_PROVIDER".into(), sanitize_single_line(&settings.ai_provider)),
+        ("TIMELINE_PROJECT_NAME".into(), sanitize_single_line(&settings.project_name)),
+        ("TIMELINE_STORY_PROMPT".into(), sanitize_single_line(&settings.story_prompt)),
+        ("TIMELINE_AI_MODE".into(), sanitize_single_line(&settings.ai_mode)),
+        ("TIMELINE_AI_TIMEOUT_SEC".into(), sanitize_single_line(&settings.ai_timeout_sec)),
+        ("TIMELINE_AI_MODEL".into(), sanitize_single_line(&settings.ai_model)),
+        ("TIMELINE_AI_BASE_URL".into(), sanitize_single_line(&settings.ai_base_url)),
+        ("TIMELINE_AI_MODEL_ID".into(), sanitize_single_line(&settings.ai_model_id)),
+        ("TIMELINE_AI_DEVICE".into(), sanitize_single_line(&settings.ai_device)),
+        (
+            "TIMELINE_AI_MAX_SEGMENTS_PER_ASSET".into(),
+            sanitize_single_line(&settings.ai_max_segments_per_asset),
+        ),
+        ("TIMELINE_AI_MAX_KEYFRAMES".into(), sanitize_single_line(&settings.ai_max_keyframes)),
+        (
+            "TIMELINE_AI_KEYFRAME_MAX_WIDTH".into(),
+            sanitize_single_line(&settings.ai_keyframe_max_width),
+        ),
+        ("TIMELINE_AI_CONCURRENCY".into(), sanitize_single_line(&settings.ai_concurrency)),
+        (
+            "TIMELINE_AI_CACHE".into(),
+            if settings.ai_cache_enabled { "true".into() } else { "false".into() },
+        ),
+    ]
+}
+
+fn parse_env_assignment(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+    let (key, value) = trimmed.split_once('=')?;
+    Some((key.trim().to_string(), value.trim().to_string()))
+}
+
+fn read_env_map(path: &Path) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut values = std::collections::HashMap::new();
+    if !path.exists() {
+        return Ok(values);
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    for line in content.lines() {
+        if let Some((key, value)) = parse_env_assignment(line) {
+            values.insert(key, value);
+        }
+    }
+    Ok(values)
+}
+
+fn sanitize_single_line(value: &str) -> String {
+    value
+        .replace('\n', " ")
+        .replace('\r', " ")
+        .trim()
+        .to_string()
+}
+
+fn parse_bool(value: &str, default: bool) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
 }
 
 fn build_env(config: &RuntimeConfig, media_dir: Option<&str>) -> Vec<(String, String)> {
@@ -513,8 +744,10 @@ pub fn run() {
             export_timeline,
             get_process_state,
             inspect_media_folder,
+            load_app_settings,
             load_active_project,
             run_setup,
+            save_app_settings,
             start_process,
         ])
         .run(tauri::generate_context!())

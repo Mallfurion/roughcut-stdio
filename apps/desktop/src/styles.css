@@ -133,7 +133,7 @@ h2 {
 
 .stepper-layout {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto 1fr auto;
   gap: 12px;
   align-items: center;
 }
@@ -227,6 +227,36 @@ h2 {
   background: #111319;
   color: var(--text);
   padding: 12px 14px;
+}
+
+.field select {
+  min-height: 50px;
+  padding-right: 42px;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 20px) calc(50% - 3px),
+    calc(100% - 14px) calc(50% - 3px);
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 0.95rem;
+  min-height: 48px;
+}
+
+.checkbox-field input {
+  width: 18px;
+  height: 18px;
 }
 
 .button {
@@ -372,6 +402,57 @@ h2 {
 
 .log-box.small {
   min-height: 120px;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 8, 12, 0.7);
+  backdrop-filter: blur(8px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 20;
+}
+
+.dialog-card {
+  width: min(980px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent), var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+.dialog-head {
+  margin-bottom: 16px;
+}
+
+.dialog-actions {
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 18px;
+}
+
+.settings-section {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 20px;
+  background: var(--panel-strong);
+  padding: 18px;
+}
+
+.settings-section h3 {
+  margin-bottom: 14px;
+}
+
+.settings-grid-advanced {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .clip-grid {

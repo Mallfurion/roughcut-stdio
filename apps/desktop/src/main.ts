@@ -5,6 +5,7 @@ import "./styles.css";
 
 type Step = "choose" | "process" | "results";
 type AIMode = "fast" | "full";
+type AIProvider = "deterministic" | "lmstudio" | "mlx-vlm-local";
 
 type ProcessState = {
   running: boolean;
@@ -130,10 +131,32 @@ type LoadedProject = {
   file_path: string;
 };
 
+type AppSettings = {
+  aiProvider: AIProvider;
+  projectName: string;
+  storyPrompt: string;
+  aiMode: AIMode;
+  aiTimeoutSec: string;
+  aiModel: string;
+  aiBaseUrl: string;
+  aiModelId: string;
+  aiDevice: string;
+  aiMaxSegmentsPerAsset: string;
+  aiMaxKeyframes: string;
+  aiKeyframeMaxWidth: string;
+  aiConcurrency: string;
+  aiCacheEnabled: boolean;
+};
+
 type AppState = {
   currentStep: Step;
   mediaDir: string;
   aiMode: AIMode;
+  settings: AppSettings | null;
+  settingsDraft: AppSettings | null;
+  settingsOpen: boolean;
+  settingsBusy: boolean;
+  settingsMessage: string;
   mediaSummary: MediaFolderSummary | null;
   mediaSummaryError: string;
   process: ProcessState;
@@ -146,11 +169,24 @@ type AppState = {
 };
 
 const MEDIA_STORAGE_KEY = "roughcut-stdio.desktop.media-dir.v1";
-const AI_MODE_STORAGE_KEY = "roughcut-stdio.desktop.ai-mode.v1";
 
-function loadStoredAIMode(): AIMode {
-  const value = localStorage.getItem(AI_MODE_STORAGE_KEY);
-  return value === "full" ? "full" : "fast";
+function createDefaultSettings(): AppSettings {
+  return {
+    aiProvider: "deterministic",
+    projectName: "Roughcut Stdio Project",
+    storyPrompt: "Build a coherent rough cut from the strongest visual and spoken beats.",
+    aiMode: "fast",
+    aiTimeoutSec: "45",
+    aiModel: "qwen3.5-9b",
+    aiBaseUrl: "http://127.0.0.1:1234/v1",
+    aiModelId: "mlx-community/Qwen3.5-0.8B-4bit",
+    aiDevice: "auto",
+    aiMaxSegmentsPerAsset: "1",
+    aiMaxKeyframes: "1",
+    aiKeyframeMaxWidth: "448",
+    aiConcurrency: "2",
+    aiCacheEnabled: true,
+  };
 }
 
 function createInitialProcessState(): ProcessState {
@@ -171,7 +207,12 @@ function createInitialProcessState(): ProcessState {
 const appState: AppState = {
   currentStep: "choose",
   mediaDir: localStorage.getItem(MEDIA_STORAGE_KEY) ?? "",
-  aiMode: loadStoredAIMode(),
+  aiMode: "fast",
+  settings: null,
+  settingsDraft: null,
+  settingsOpen: false,
+  settingsBusy: false,
+  settingsMessage: "",
   mediaSummary: null,
   mediaSummaryError: "",
   process: createInitialProcessState(),
@@ -214,6 +255,12 @@ async function bootstrap() {
   }
 
   try {
+    await refreshSettings();
+  } catch (error) {
+    pushProcessLog(`Settings load failed: ${stringifyError(error)}`);
+  }
+
+  try {
     appState.process = await invoke<ProcessState>("get_process_state");
   } catch (error) {
     pushProcessLog(`Initial process state unavailable: ${stringifyError(error)}`);
@@ -245,10 +292,6 @@ function persistMediaDir() {
   localStorage.setItem(MEDIA_STORAGE_KEY, appState.mediaDir);
 }
 
-function persistAIMode() {
-  localStorage.setItem(AI_MODE_STORAGE_KEY, appState.aiMode);
-}
-
 function hasGeneratedResults() {
   return Boolean(appState.project && appState.project.source === "generated");
 }
@@ -266,6 +309,27 @@ async function refreshProject() {
   } catch {
     appState.project = null;
   }
+}
+
+async function refreshSettings() {
+  const settings = await invoke<AppSettings>("load_app_settings");
+  appState.settings = settings;
+  appState.aiMode = settings.aiMode;
+}
+
+function openSettingsDialog() {
+  appState.settingsDraft = { ...(appState.settings ?? createDefaultSettings()) };
+  appState.settingsOpen = true;
+  appState.settingsMessage = "";
+  render();
+}
+
+function closeSettingsDialog() {
+  appState.settingsOpen = false;
+  appState.settingsDraft = null;
+  appState.settingsBusy = false;
+  appState.settingsMessage = "";
+  render();
 }
 
 async function refreshMediaSummary() {
@@ -350,7 +414,7 @@ async function resetWorkflow() {
   stopProcessPolling();
   appState.currentStep = "choose";
   appState.mediaDir = "";
-  appState.aiMode = loadStoredAIMode();
+  appState.aiMode = appState.settings?.aiMode ?? "fast";
   appState.mediaSummary = null;
   appState.mediaSummaryError = "";
   appState.process = createInitialProcessState();
@@ -406,10 +470,22 @@ function render() {
             ${renderStepChip("process", "2", "Process videos")}
             ${renderStepChip("results", "3", "View results")}
           </div>
+          <button
+            id="open-settings"
+            class="icon-button"
+            title="Settings"
+            aria-label="Settings"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3.75 13.5 6l2.62.58-.75 2.57 1.8 1.95-1.8 1.95.75 2.57L13.5 18 12 20.25 10.5 18l-2.62-.58.75-2.57-1.8-1.95 1.8-1.95-.75-2.57L10.5 6 12 3.75Z" />
+              <circle cx="12" cy="12" r="2.75" />
+            </svg>
+          </button>
         </div>
       </section>
 
       ${renderCurrentStep()}
+      ${renderSettingsDialog()}
     </main>
   `;
 
@@ -458,6 +534,150 @@ function renderChooseStep() {
         <button id="continue-process" class="button" ${!canContinue ? "disabled" : ""}>Continue to processing</button>
       </div>
     </section>
+  `;
+}
+
+function renderSettingsDialog() {
+  if (!appState.settingsOpen || !appState.settingsDraft) {
+    return "";
+  }
+
+  const draft = appState.settingsDraft;
+  const provider = draft.aiProvider;
+
+  return `
+    <div class="dialog-backdrop">
+      <section class="dialog-card">
+        <div class="view-head dialog-head">
+          <div>
+            <p class="eyebrow">Settings</p>
+            <h2>Application settings</h2>
+            <p class="muted">Save env-backed defaults for provider selection, prompts, and AI runtime tuning.</p>
+          </div>
+          <button id="close-settings" class="icon-button" title="Close settings" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6 18 18" />
+              <path d="M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+
+        ${
+          appState.settingsMessage
+            ? `<p class="status ${appState.settingsMessage.startsWith("Saved") ? "ok" : "warn"}">${escapeHtml(appState.settingsMessage)}</p>`
+            : ""
+        }
+
+        <div class="settings-grid">
+          <section class="settings-section">
+            <h3>General</h3>
+            <div class="field-grid">
+              <label class="field">
+                AI provider
+                <select id="settings-ai-provider">
+                  <option value="deterministic" ${provider === "deterministic" ? "selected" : ""}>Deterministic</option>
+                  <option value="lmstudio" ${provider === "lmstudio" ? "selected" : ""}>LM Studio</option>
+                  <option value="mlx-vlm-local" ${provider === "mlx-vlm-local" ? "selected" : ""}>MLX-VLM Local</option>
+                </select>
+              </label>
+              <label class="field">
+                AI mode
+                <select id="settings-ai-mode">
+                  <option value="fast" ${draft.aiMode === "fast" ? "selected" : ""}>Fast</option>
+                  <option value="full" ${draft.aiMode === "full" ? "selected" : ""}>Full</option>
+                </select>
+              </label>
+              <label class="field">
+                Project name
+                <input id="settings-project-name" type="text" value="${escapeHtml(draft.projectName)}" />
+              </label>
+              <label class="field">
+                Story prompt
+                <textarea id="settings-story-prompt" rows="4">${escapeHtml(draft.storyPrompt)}</textarea>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>Provider</h3>
+            <div class="field-grid">
+              ${
+                provider === "lmstudio"
+                  ? `
+                <label class="field">
+                  LM Studio model
+                  <input id="settings-ai-model" type="text" value="${escapeHtml(draft.aiModel)}" />
+                </label>
+                <label class="field">
+                  LM Studio base URL
+                  <input id="settings-ai-base-url" type="text" value="${escapeHtml(draft.aiBaseUrl)}" />
+                </label>`
+                  : ""
+              }
+              ${
+                provider === "mlx-vlm-local"
+                  ? `
+                <label class="field">
+                  MLX-VLM model ID
+                  <input id="settings-ai-model-id" type="text" value="${escapeHtml(draft.aiModelId)}" />
+                </label>
+                <label class="field">
+                  MLX-VLM device
+                  <select id="settings-ai-device">
+                    <option value="auto" ${draft.aiDevice === "auto" ? "selected" : ""}>auto</option>
+                    <option value="metal" ${draft.aiDevice === "metal" ? "selected" : ""}>metal</option>
+                    <option value="cpu" ${draft.aiDevice === "cpu" ? "selected" : ""}>cpu</option>
+                  </select>
+                </label>`
+                  : ""
+              }
+              ${
+                provider === "deterministic"
+                  ? `<p class="muted">Deterministic mode does not require model-specific configuration.</p>`
+                  : ""
+              }
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <h3>Advanced</h3>
+            <div class="field-grid settings-grid-advanced">
+              <label class="field">
+                AI timeout (sec)
+                <input id="settings-ai-timeout-sec" type="number" min="1" value="${escapeHtml(draft.aiTimeoutSec)}" />
+              </label>
+              <label class="field">
+                Max segments per asset
+                <input id="settings-ai-max-segments" type="number" min="1" value="${escapeHtml(draft.aiMaxSegmentsPerAsset)}" />
+              </label>
+              <label class="field">
+                Max keyframes per segment
+                <input id="settings-ai-max-keyframes" type="number" min="1" value="${escapeHtml(draft.aiMaxKeyframes)}" />
+              </label>
+              <label class="field">
+                Keyframe max width
+                <input id="settings-ai-keyframe-width" type="number" min="160" value="${escapeHtml(draft.aiKeyframeMaxWidth)}" />
+              </label>
+              <label class="field">
+                AI concurrency
+                <input id="settings-ai-concurrency" type="number" min="1" value="${escapeHtml(draft.aiConcurrency)}" />
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-ai-cache" type="checkbox" ${draft.aiCacheEnabled ? "checked" : ""} />
+                <span>Enable AI cache</span>
+              </label>
+            </div>
+          </section>
+        </div>
+
+        <div class="action-row dialog-actions">
+          <button id="cancel-settings" class="button secondary" ${appState.settingsBusy ? "disabled" : ""}>Cancel</button>
+          <button id="save-settings" class="button" ${appState.settingsBusy ? "disabled" : ""}>
+            ${appState.settingsBusy ? "Saving..." : "Save settings"}
+          </button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -602,7 +822,24 @@ function metric(label: string, value: string) {
   return `<article class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></article>`;
 }
 
+function updateSettingsDraft(patch: Partial<AppSettings>) {
+  if (!appState.settingsDraft) {
+    return;
+  }
+  appState.settingsDraft = {
+    ...appState.settingsDraft,
+    ...patch,
+  };
+}
+
 function bindActions() {
+  const openSettings = document.getElementById("open-settings");
+  if (openSettings) {
+    openSettings.onclick = () => {
+      openSettingsDialog();
+    };
+  }
+
   const pickMedia = document.getElementById("pick-media");
   if (pickMedia) {
     pickMedia.onclick = async () => {
@@ -669,7 +906,12 @@ function bindActions() {
   if (aiModeSelect) {
     aiModeSelect.onchange = () => {
       appState.aiMode = aiModeSelect.value === "full" ? "full" : "fast";
-      persistAIMode();
+      if (appState.settings) {
+        appState.settings = {
+          ...appState.settings,
+          aiMode: appState.aiMode,
+        };
+      }
       render();
     };
   }
@@ -740,7 +982,105 @@ function bindActions() {
     };
   });
 
+  const closeSettings = document.getElementById("close-settings");
+  if (closeSettings) {
+    closeSettings.onclick = () => {
+      closeSettingsDialog();
+    };
+  }
+
+  const cancelSettings = document.getElementById("cancel-settings");
+  if (cancelSettings) {
+    cancelSettings.onclick = () => {
+      closeSettingsDialog();
+    };
+  }
+
+  const settingsProvider = document.getElementById("settings-ai-provider") as HTMLSelectElement | null;
+  if (settingsProvider) {
+    settingsProvider.onchange = () => {
+      updateSettingsDraft({
+        aiProvider: settingsProvider.value as AIProvider,
+      });
+      render();
+    };
+  }
+
+  const settingsAIMode = document.getElementById("settings-ai-mode") as HTMLSelectElement | null;
+  if (settingsAIMode) {
+    settingsAIMode.onchange = () => {
+      updateSettingsDraft({
+        aiMode: settingsAIMode.value === "full" ? "full" : "fast",
+      });
+    };
+  }
+
+  bindTextSetting("settings-project-name", (value) => updateSettingsDraft({ projectName: value }));
+  bindTextSetting("settings-story-prompt", (value) => updateSettingsDraft({ storyPrompt: value }));
+  bindTextSetting("settings-ai-model", (value) => updateSettingsDraft({ aiModel: value }));
+  bindTextSetting("settings-ai-base-url", (value) => updateSettingsDraft({ aiBaseUrl: value }));
+  bindTextSetting("settings-ai-model-id", (value) => updateSettingsDraft({ aiModelId: value }));
+  bindTextSetting("settings-ai-timeout-sec", (value) => updateSettingsDraft({ aiTimeoutSec: value }));
+  bindTextSetting("settings-ai-max-segments", (value) => updateSettingsDraft({ aiMaxSegmentsPerAsset: value }));
+  bindTextSetting("settings-ai-max-keyframes", (value) => updateSettingsDraft({ aiMaxKeyframes: value }));
+  bindTextSetting("settings-ai-keyframe-width", (value) => updateSettingsDraft({ aiKeyframeMaxWidth: value }));
+  bindTextSetting("settings-ai-concurrency", (value) => updateSettingsDraft({ aiConcurrency: value }));
+
+  const settingsAIDevice = document.getElementById("settings-ai-device") as HTMLSelectElement | null;
+  if (settingsAIDevice) {
+    settingsAIDevice.onchange = () => {
+      updateSettingsDraft({ aiDevice: settingsAIDevice.value });
+    };
+  }
+
+  const settingsAICache = document.getElementById("settings-ai-cache") as HTMLInputElement | null;
+  if (settingsAICache) {
+    settingsAICache.onchange = () => {
+      updateSettingsDraft({ aiCacheEnabled: settingsAICache.checked });
+    };
+  }
+
+  const saveSettings = document.getElementById("save-settings");
+  if (saveSettings) {
+    saveSettings.onclick = async () => {
+      if (!appState.settingsDraft) {
+        return;
+      }
+      appState.settingsBusy = true;
+      appState.settingsMessage = "";
+      render();
+      try {
+        const saved = await invoke<AppSettings>("save_app_settings", {
+          settings: appState.settingsDraft,
+        });
+        appState.settings = saved;
+        appState.aiMode = saved.aiMode;
+        appState.settingsDraft = { ...saved };
+        appState.settingsBusy = false;
+        appState.settingsMessage = "Saved settings to .env";
+        render();
+      } catch (error) {
+        appState.settingsBusy = false;
+        appState.settingsMessage = `Save failed: ${stringifyError(error)}`;
+        render();
+      }
+    };
+  }
+
   syncProcessLogScroll();
+}
+
+function bindTextSetting(
+  id: string,
+  apply: (value: string) => void,
+) {
+  const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!element) {
+    return;
+  }
+  element.oninput = () => {
+    apply(element.value);
+  };
 }
 
 function resolveClipViews(project: TimelineProject) {
