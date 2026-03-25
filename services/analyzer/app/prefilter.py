@@ -562,11 +562,12 @@ def _fallback_audio_signals(timestamps: list[float]) -> list[AudioSignal]:
 
 
 def _detect_silence_intervals(path: str) -> list[tuple[float, float]]:
+    # -v info is required: silencedetect writes at info level, not warning
     process = subprocess.run(
         [
-            "ffmpeg", "-v", "warning",
+            "ffmpeg", "-v", "info",
             "-i", path,
-            "-vn",
+            "-map", "0:a:0",
             "-af", "silencedetect=noise=-35dB:duration=0.3",
             "-f", "null", "-",
         ],
@@ -578,11 +579,11 @@ def _detect_silence_intervals(path: str) -> list[tuple[float, float]]:
     silence_start: float | None = None
     for line in process.stderr.splitlines():
         if "silence_start:" in line:
-            match = re.search(r"silence_start:\s*([\d.eE+-]+)", line)
+            match = re.search(r"silence_start:\s*([-\d.eE+]+)", line)
             if match:
                 silence_start = float(match.group(1))
         elif "silence_end:" in line and silence_start is not None:
-            match = re.search(r"silence_end:\s*([\d.eE+-]+)", line)
+            match = re.search(r"silence_end:\s*([-\d.eE+]+)", line)
             if match:
                 intervals.append((silence_start, float(match.group(1))))
                 silence_start = None
@@ -596,34 +597,53 @@ def _extract_rms_by_time(
     duration_sec: float,
     target_count: int,
 ) -> list[tuple[float, float]]:
+    import tempfile
+
     chunk_len = max(0.1, min(2.0, duration_sec / max(1, target_count * 2)))
-    process = subprocess.run(
-        [
-            "ffmpeg", "-v", "warning",
-            "-i", path,
-            "-vn",
-            "-af", f"astats=length={chunk_len:.3f}:metadata=1,ametadata=mode=print:file=pipe:1",
-            "-f", "null", "-",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if not process.stdout:
+    tmp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp_path = tmp_file.name
+    tmp_file.close()
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "warning",
+                "-i", path,
+                "-map", "0:a:0",
+                "-af", f"astats=length={chunk_len:.3f}:metadata=1:reset=1,ametadata=mode=print:file={tmp_path}",
+                "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = Path(tmp_path).read_text(errors="replace") if Path(tmp_path).exists() else ""
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if not output:
         return []
 
     results: list[tuple[float, float]] = []
     current_time: float | None = None
-    for line in process.stdout.splitlines():
+    for line in output.splitlines():
         time_match = re.search(r"pts_time:([\d.eE+-]+)", line)
         if time_match:
             current_time = float(time_match.group(1))
         if current_time is not None:
-            rms_match = re.search(r"lavfi\.astats\.Overall\.RMS_amplitude=([\d.eE+-]+)", line)
+            rms_match = re.search(r"lavfi\.astats\.Overall\.RMS_level=([-\d.eEinf+]+)", line)
             if rms_match:
                 try:
-                    rms = clamp(float(rms_match.group(1)))
-                    results.append((current_time, rms))
+                    rms_str = rms_match.group(1).strip()
+                    if "inf" in rms_str or "nan" in rms_str:
+                        rms_linear = 0.0
+                    else:
+                        rms_dbfs = float(rms_str)
+                        rms_linear = clamp(10.0 ** (rms_dbfs / 20.0))
+                    results.append((current_time, rms_linear))
                     current_time = None
                 except ValueError:
                     pass
