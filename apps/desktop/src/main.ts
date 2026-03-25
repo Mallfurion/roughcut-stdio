@@ -151,6 +151,9 @@ type AppSettings = {
   aiKeyframeMaxWidth: string;
   aiConcurrency: string;
   aiCacheEnabled: boolean;
+  audioEnabled: boolean;
+  deduplicationEnabled: boolean;
+  dedupThreshold: string;
 };
 
 type AppState = {
@@ -191,7 +194,10 @@ function createDefaultSettings(): AppSettings {
     aiMaxKeyframes: "1",
     aiKeyframeMaxWidth: "448",
     aiConcurrency: "2",
-    aiCacheEnabled: true
+    aiCacheEnabled: true,
+    audioEnabled: true,
+    deduplicationEnabled: true,
+    dedupThreshold: "0.85"
   };
 }
 
@@ -662,6 +668,18 @@ function renderSettingsDialog() {
                 <input id="settings-ai-cache" type="checkbox" ${draft.aiCacheEnabled ? "checked" : ""} />
                 <span>Enable AI cache</span>
               </label>
+              <label class="checkbox-field">
+                <input id="settings-audio-enabled" type="checkbox" ${draft.audioEnabled ? "checked" : ""} />
+                <span>Enable audio signal extraction</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-deduplication-enabled" type="checkbox" ${draft.deduplicationEnabled ? "checked" : ""} />
+                <span>Enable deduplication</span>
+              </label>
+              <label class="field">
+                Dedup threshold
+                <input id="settings-dedup-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.dedupThreshold)}" />
+              </label>
             </div>
           </section>
         </div>
@@ -1042,6 +1060,22 @@ function bindActions() {
       updateSettingsDraft({ aiCacheEnabled: settingsAICache.checked });
     };
   }
+
+  const settingsAudioEnabled = document.getElementById("settings-audio-enabled") as HTMLInputElement | null;
+  if (settingsAudioEnabled) {
+    settingsAudioEnabled.onchange = () => {
+      updateSettingsDraft({ audioEnabled: settingsAudioEnabled.checked });
+    };
+  }
+
+  const settingsDeduplicationEnabled = document.getElementById("settings-deduplication-enabled") as HTMLInputElement | null;
+  if (settingsDeduplicationEnabled) {
+    settingsDeduplicationEnabled.onchange = () => {
+      updateSettingsDraft({ deduplicationEnabled: settingsDeduplicationEnabled.checked });
+    };
+  }
+
+  bindTextSetting("settings-dedup-threshold", (value) => updateSettingsDraft({ dedupThreshold: value }));
 
   const saveSettings = document.getElementById("save-settings");
   if (saveSettings) {
