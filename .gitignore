@@ -9,11 +9,14 @@ __pycache__
 .DS_Store
 *.log
 media
+generated*
 generated/*
 .uv-cache
 .env
 models/*
 services/analyzer/timeline_cutter_analyzer.egg-info
+services/analyzer/roughcut_stdio_analyzer.egg-info
 .venv/*
 apps/desktop/dist
 apps/desktop/src-tauri/target
+repomix-output.xml

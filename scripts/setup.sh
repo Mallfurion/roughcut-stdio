@@ -115,18 +115,38 @@ ensure_macos_build_tools
 ensure_rust
 
 echo "Installing analyzer package into the virtual environment..."
-"$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer"
+install_extras=""
+
+# CLIP is enabled by default
+install_extras="${install_extras}clip,"
 
 if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
-  echo "Installing MLX-VLM local runtime dependencies..."
-  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer[mlx_vlm]"
+  install_extras="${install_extras}mlx_vlm,"
+fi
 
-  if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
+if [ -n "${install_extras}" ]; then
+  # Remove trailing comma
+  install_extras="${install_extras%,}"
+  echo "Installing analyzer with extras: $install_extras"
+  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer[${install_extras}]"
+else
+  "$ROOT_DIR/.venv/bin/python3" -m pip install -e "./services/analyzer"
+fi
+
+if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
+  echo ""
+  echo "Bootstrapping AI models..."
+
+  if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
     echo "Bootstrapping MLX-VLM local model..."
     "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_mlx_vlm.py
-  else
-    echo "Skipping MLX-VLM model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
   fi
+
+  # CLIP is enabled by default, download its model
+  echo "Bootstrapping CLIP semantic scoring model..."
+  "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_clip.py
+else
+  echo "Skipping model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
 fi
 
 if [ -n "${TIMELINE_MEDIA_DIR:-}" ]; then

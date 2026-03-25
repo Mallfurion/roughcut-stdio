@@ -523,6 +523,35 @@ h2 {
   padding: 20px;
 }
 
+.section-card--deduplicated {
+  opacity: 0.65;
+  background: rgba(255, 202, 107, 0.04);
+  border-color: rgba(255, 202, 107, 0.12);
+}
+
+.section-card--deduplicated .section-summary {
+  color: var(--muted);
+}
+
+.pill-dedup {
+  background: rgba(255, 202, 107, 0.15);
+  border-color: rgba(255, 202, 107, 0.3);
+  color: #ffe7a8;
+}
+
+.pill-dedup-kept {
+  background: rgba(95, 209, 166, 0.15);
+  border-color: rgba(95, 209, 166, 0.3);
+  color: #cff7e8;
+}
+
+.pill-dedup-info {
+  background: rgba(255, 202, 107, 0.1);
+  border-color: rgba(255, 202, 107, 0.2);
+  color: #ffe7a8;
+  font-size: 0.73rem;
+}
+
 .section-summary {
   margin: 16px 0 12px;
   font-size: 1.18rem;
@@ -540,6 +569,78 @@ h2 {
   margin-top: 10px;
   font-size: 0.98rem;
   line-height: 1.5;
+}
+
+.audio-metrics {
+  display: flex;
+  gap: 24px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  flex-wrap: wrap;
+  max-width: fit-content;
+}
+
+.audio-metric {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 140px;
+}
+
+.audio-metric-silent {
+  flex: none;
+}
+
+.audio-icon {
+  font-size: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: rgba(95, 209, 166, 0.1);
+  border-radius: 6px;
+}
+
+.audio-metric-silent .audio-icon {
+  background: rgba(255, 202, 107, 0.1);
+}
+
+.audio-metric-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.audio-label {
+  font-size: 0.73rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.audio-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.audio-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #88f0c9);
+  border-radius: 3px;
+  transition: width 0.2s ease;
+}
+
+.audio-value {
+  font-size: 0.73rem;
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .ai-box {

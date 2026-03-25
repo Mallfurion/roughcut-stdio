@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import md5
 import math
+import os
 from pathlib import Path
 import re
 import shutil
@@ -25,13 +26,24 @@ class FrameSignal:
     source: str
 
 
+@dataclass(slots=True)
+class AudioSignal:
+    timestamp_sec: float
+    rms_energy: float
+    peak_loudness: float
+    is_silent: bool
+    source: str
+
+
 def sample_asset_signals(
     asset: Asset,
     *,
     target_count: int | None = None,
+    timestamps: list[float] | None = None,
     frame_width: int = 64,
 ) -> list[FrameSignal]:
-    timestamps = sample_timestamps(asset.duration_sec, target_count=target_count)
+    if timestamps is None:
+        timestamps = sample_timestamps(asset.duration_sec, target_count=target_count)
     signals: list[FrameSignal] = []
     previous_pixels: bytes | None = None
 
@@ -62,6 +74,7 @@ def build_prefilter_segments(
     asset: Asset,
     base_ranges: list[tuple[float, float]],
     signals: list[FrameSignal],
+    audio_signals: list[AudioSignal] | None = None,
     top_windows: int = 2,
 ) -> list[tuple[float, float]]:
     ranges = normalized_ranges(base_ranges, asset.duration_sec)
@@ -73,10 +86,18 @@ def build_prefilter_segments(
         signals=signals,
         limit=top_windows,
     )
-    if not peak_windows:
-        return ranges
 
-    combined = ranges + peak_windows
+    audio_peak_windows: list[tuple[float, float]] = []
+    if audio_signals:
+        audio_peak_windows = windows_from_peak_audio_signals(
+            asset=asset,
+            audio_signals=audio_signals,
+            limit=top_windows,
+        )
+
+    combined = ranges + peak_windows + audio_peak_windows
+    if not combined:
+        return ranges
     return dedupe_ranges(combined, asset.duration_sec)
 
 
@@ -85,6 +106,7 @@ def aggregate_segment_prefilter(
     signals: list[FrameSignal],
     start_sec: float,
     end_sec: float,
+    audio_signals: list[AudioSignal] | None = None,
 ) -> dict[str, object]:
     matching = [
         signal
@@ -108,6 +130,14 @@ def aggregate_segment_prefilter(
     motion_values = [signal.motion_energy for signal in matching]
     stability = clamp(1.0 - statistics.pstdev(motion_values) * 1.6) if len(motion_values) > 1 else 0.72
     score = average(signal.score for signal in matching)
+
+    matching_audio = _matching_audio_signals(audio_signals, start_sec, end_sec)
+    audio_energy = average(sig.rms_energy for sig in matching_audio) if matching_audio else 0.0
+    speech_ratio = (
+        sum(1 for sig in matching_audio if not sig.is_silent) / len(matching_audio)
+        if matching_audio else 0.0
+    )
+
     metrics_snapshot = {
         "sharpness": round(average(signal.sharpness for signal in matching), 4),
         "stability": round(stability, 4),
@@ -120,6 +150,8 @@ def aggregate_segment_prefilter(
         "prefilter_brightness": round(average(signal.brightness for signal in matching), 4),
         "prefilter_contrast": round(average(signal.contrast for signal in matching), 4),
         "prefilter_score": round(score, 4),
+        "audio_energy": round(clamp(audio_energy), 4),
+        "speech_ratio": round(clamp(speech_ratio), 4),
     }
     top_timestamps = [
         round(signal.timestamp_sec, 3)
@@ -426,3 +458,210 @@ def combine_signal_score(
         + (distinctiveness * 0.2)
         + (center_focus * 0.16)
     )
+
+
+def sample_audio_signals(
+    asset: Asset,
+    timestamps: list[float],
+) -> list[AudioSignal]:
+    if not timestamps:
+        return []
+    if os.environ.get("TIMELINE_AI_AUDIO_ENABLED", "true").lower() == "false":
+        return _fallback_audio_signals(timestamps)
+    if not asset.has_speech:
+        return _fallback_audio_signals(timestamps)
+    if shutil.which("ffmpeg") is None or not Path(asset.proxy_path).exists():
+        return _fallback_audio_signals(timestamps)
+
+    try:
+        silence_intervals = _detect_silence_intervals(asset.proxy_path)
+        rms_by_time = _extract_rms_by_time(asset.proxy_path, asset.duration_sec, len(timestamps))
+    except Exception:
+        return _fallback_audio_signals(timestamps)
+
+    if not rms_by_time:
+        return _fallback_audio_signals(timestamps)
+
+    half_window = (asset.duration_sec / (len(timestamps) + 1)) / 2.0
+    signals: list[AudioSignal] = []
+    for ts in timestamps:
+        window_start = max(0.0, ts - half_window)
+        window_end = min(asset.duration_sec, ts + half_window)
+        matching_rms = [rms for time, rms in rms_by_time if window_start <= time <= window_end]
+        rms_energy = sum(matching_rms) / len(matching_rms) if matching_rms else 0.0
+        peak_loudness = max(matching_rms) if matching_rms else 0.0
+        is_silent = _is_window_silent(silence_intervals, window_start, window_end)
+        signals.append(
+            AudioSignal(
+                timestamp_sec=round(ts, 3),
+                rms_energy=round(clamp(rms_energy), 4),
+                peak_loudness=round(clamp(peak_loudness), 4),
+                is_silent=is_silent,
+                source="ffmpeg",
+            )
+        )
+    return signals
+
+
+def windows_from_peak_audio_signals(
+    *,
+    asset: Asset,
+    audio_signals: list[AudioSignal],
+    limit: int,
+    min_energy_threshold: float = 0.05,
+) -> list[tuple[float, float]]:
+    energetic = [sig for sig in audio_signals if sig.rms_energy >= min_energy_threshold and not sig.is_silent]
+    if not energetic:
+        return []
+
+    sorted_signals = sorted(energetic, key=lambda sig: sig.rms_energy, reverse=True)
+    window_size = clamp(asset.duration_sec / 8.0, 2.5, 5.5)
+    windows: list[tuple[float, float]] = []
+
+    for signal in sorted_signals:
+        start = max(0.0, signal.timestamp_sec - (window_size / 2.0))
+        end = min(asset.duration_sec, start + window_size)
+        if end - start < 1.5:
+            continue
+        candidate = (round(start, 3), round(end, 3))
+        if any(overlap_ratio(candidate, existing) >= 0.7 for existing in windows):
+            continue
+        windows.append(candidate)
+        if len(windows) >= limit:
+            break
+
+    return windows
+
+
+def _matching_audio_signals(
+    audio_signals: list[AudioSignal] | None,
+    start_sec: float,
+    end_sec: float,
+) -> list[AudioSignal]:
+    if not audio_signals:
+        return []
+    matching = [sig for sig in audio_signals if start_sec <= sig.timestamp_sec <= end_sec]
+    if not matching:
+        center = (start_sec + end_sec) / 2.0
+        nearest = min(audio_signals, key=lambda sig: abs(sig.timestamp_sec - center))
+        matching = [nearest]
+    return matching
+
+
+def _fallback_audio_signals(timestamps: list[float]) -> list[AudioSignal]:
+    return [
+        AudioSignal(
+            timestamp_sec=round(ts, 3),
+            rms_energy=0.0,
+            peak_loudness=0.0,
+            is_silent=True,
+            source="fallback",
+        )
+        for ts in timestamps
+    ]
+
+
+def _detect_silence_intervals(path: str) -> list[tuple[float, float]]:
+    # -v info is required: silencedetect writes at info level, not warning
+    process = subprocess.run(
+        [
+            "ffmpeg", "-v", "info",
+            "-i", path,
+            "-map", "0:a:0",
+            "-af", "silencedetect=noise=-35dB:duration=0.3",
+            "-f", "null", "-",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    intervals: list[tuple[float, float]] = []
+    silence_start: float | None = None
+    for line in process.stderr.splitlines():
+        if "silence_start:" in line:
+            match = re.search(r"silence_start:\s*([-\d.eE+]+)", line)
+            if match:
+                silence_start = float(match.group(1))
+        elif "silence_end:" in line and silence_start is not None:
+            match = re.search(r"silence_end:\s*([-\d.eE+]+)", line)
+            if match:
+                intervals.append((silence_start, float(match.group(1))))
+                silence_start = None
+    if silence_start is not None:
+        intervals.append((silence_start, float("inf")))
+    return intervals
+
+
+def _extract_rms_by_time(
+    path: str,
+    duration_sec: float,
+    target_count: int,
+) -> list[tuple[float, float]]:
+    import tempfile
+
+    chunk_len = max(0.1, min(2.0, duration_sec / max(1, target_count * 2)))
+    tmp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp_path = tmp_file.name
+    tmp_file.close()
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "warning",
+                "-i", path,
+                "-map", "0:a:0",
+                "-af", f"astats=length={chunk_len:.3f}:metadata=1:reset=1,ametadata=mode=print:file={tmp_path}",
+                "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = Path(tmp_path).read_text(errors="replace") if Path(tmp_path).exists() else ""
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if not output:
+        return []
+
+    results: list[tuple[float, float]] = []
+    current_time: float | None = None
+    for line in output.splitlines():
+        time_match = re.search(r"pts_time:([\d.eE+-]+)", line)
+        if time_match:
+            current_time = float(time_match.group(1))
+        if current_time is not None:
+            rms_match = re.search(r"lavfi\.astats\.Overall\.RMS_level=([-\d.eEinf+]+)", line)
+            if rms_match:
+                try:
+                    rms_str = rms_match.group(1).strip()
+                    if "inf" in rms_str or "nan" in rms_str:
+                        rms_linear = 0.0
+                    else:
+                        rms_dbfs = float(rms_str)
+                        rms_linear = clamp(10.0 ** (rms_dbfs / 20.0))
+                    results.append((current_time, rms_linear))
+                    current_time = None
+                except ValueError:
+                    pass
+    return results
+
+
+def _is_window_silent(
+    intervals: list[tuple[float, float]],
+    start: float,
+    end: float,
+) -> bool:
+    window_dur = end - start
+    if window_dur <= 0:
+        return True
+    silent_overlap = 0.0
+    for s, e in intervals:
+        overlap_start = max(s, start)
+        overlap_end = min(e, end)
+        if overlap_end > overlap_start:
+            silent_overlap += overlap_end - overlap_start
+    return (silent_overlap / window_dur) >= 0.5

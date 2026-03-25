@@ -1,214 +1,121 @@
 # Roughcut Stdio
 
-Roughcut Stdio is now a desktop-first local Mac app for screening footage, surfacing the strongest visual segments, and exporting a Resolve-ready timeline.
+A local-first AI-assisted footage screening and rough-cut tool for video editors.
+
+## What This Does
+
+There is too much footage to watch manually. **Roughcut Stdio** solves this by:
+
+- **Scanning** a large set of videos to find candidate moments
+- **Surfacing** the strongest visual segments using AI analysis
+- **Grading** each segment on visual qualities like subject, motion, composition, and interest
+- **Assembling** those selections into a first-pass rough timeline
+
+The goal is to help editors skip raw footage scrubbing and move directly from media ingestion to usable shot selection.
+
+📖 **Read the full vision:** [docs/manifesto.md](docs/manifesto.md)
 
 ## Quick Start
 
-For a fresh clone on macOS, the intended flow is:
+**macOS setup:**
 
 ```bash
-git clone <repo>
-cd timeline-cutter
+git clone https://github.com/your-org/roughcut-stdio
+cd roughcut-stdio
 npm run setup
 npm run view
 ```
 
-After that, use the desktop app to:
+**Then in the desktop app:**
 
-1. choose media folder
-2. process footage
-3. review shortlisted shots
-4. export a DaVinci Resolve timeline
+1. Choose a media folder
+2. Click "Process" (the analyzer screens the footage)
+3. Review shortlisted shots and their grades
+4. Click "Export" to save a DaVinci Resolve timeline
 
-## Product Flow
+![Roughcut Stdio desktop app](docs/images/app.png)
 
-The intended user flow is:
+📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
 
-1. run `npm run setup` before opening the app
-2. choose media folder
-3. process footage with visual progress
-4. review shortlisted shots and grades
-5. export a DaVinci Resolve timeline
+## How It Works
 
-The desktop interface lives in [apps/desktop](/Users/florin/Projects/personal/timeline-cutter/apps/desktop).
+The analyzer runs in four phases:
 
-## Current Architecture
+1. **Media Discovery** — Find all video files and match sources to proxies
+2. **Per-Asset Analysis** — Extract signals, build candidate segments, score them, run AI analysis
+3. **Take Selection** — Score all candidates and pick the best segments per asset
+4. **Timeline Assembly** — Order selected takes into a rough cut
 
-- `apps/desktop`
-  - Tauri desktop shell
-  - new guided UI written from scratch
-  - native macOS file/save dialog integration
-  - local command orchestration for process, review, and export
-- `services/analyzer`
-  - Python analysis and export engine
-  - media discovery, prefiltering, shortlist construction, AI segment understanding, and `FCPXML` export
-- `scripts`
-  - shell entrypoints still used underneath by the desktop app
+📖 **Detailed walkthrough:** [docs/analyzer-pipeline.md](docs/analyzer-pipeline.md)
 
-The browser app has been removed from the product surface. The analyzer and scripts remain the processing backend for the desktop app.
+## Documentation
 
-## Desktop Commands
+- 📖 [docs/setup.md](docs/setup.md) — Installation & requirements
+- 📖 [docs/configuration.md](docs/configuration.md) — Environment variables & AI provider setup
+- 📖 [docs/commands.md](docs/commands.md) — npm commands & debugging
+- 📖 [docs/analyzer-pipeline.md](docs/analyzer-pipeline.md) — How the analysis pipeline works
+- 📖 [docs/architecture.md](docs/architecture.md) — System design & specs
+- 📖 [docs/manifesto.md](docs/manifesto.md) — Project vision & principles
+- 🔍 [docs/research.md](docs/research.md) — Research notes & design decisions
+- ⚙️ [.env.example](.env.example) — All environment variable defaults
 
-Run the desktop app in development:
+## Architecture
 
-```bash
-npm run dev:desktop
-```
+The project is split into three layers:
 
-Build the desktop app:
+**Frontend** — `apps/desktop/`
 
-```bash
-npm run build:desktop
-```
+- Native macOS Tauri desktop app with media selection, progress display, and export dialog
 
-The old `view` entrypoint now opens the desktop app in development:
+**Backend** — `services/analyzer/` (Python)
 
-```bash
-npm run view
-```
+- Media discovery, signal extraction, scoring, CLIP deduplication, VLM analysis, FCPXML export
 
-## Backend Commands
+**Scripts** — `scripts/`
 
-These commands still exist because the desktop app orchestrates them internally and they are useful for debugging:
+- Shell entrypoints for setup, processing, and export
 
-```bash
-npm run setup
-npm run check:ai
-npm run process
-npm run export
-```
+See [docs/architecture.md](docs/architecture.md) for detailed design decisions and extensibility points.
 
-## Environment Variables
+## Core Features
 
-The repository still uses env vars for the analyzer runtime and media configuration. Configure those outside the app through `.env.local` or direct shell env vars. The desktop app is focused on media selection, processing, review, and export.
+- **CLIP-based deduplication** — Semantic near-duplicate detection using embeddings (cosine similarity >= 0.95)
+- **Audio & visual analysis** — Frame signals (sharpness, motion, distinctiveness) + audio signals (RMS, silence)
+- **Three-stage VLM filtering** — Dedup filter → CLIP gate → per-asset limit for efficient compute
+- **Caching & reuse** — CLIP embeddings cached during scoring, reused by dedup (zero redundant computation)
+- **Histogram fallback** — Deduplication works without CLIP (configurable threshold)
+- **Local-first** — All processing stays on your machine; no cloud dependencies
+- **DaVinci Resolve export** — FCPXML timelines ready to import and continue editing
 
-### Core
+## AI Provider Options
 
-- `TIMELINE_MEDIA_DIR`
-- `TIMELINE_PROJECT_NAME`
-- `TIMELINE_STORY_PROMPT`
-- `TIMELINE_PYTHON`
+| Provider | Setup | Speed | Quality | Best For |
+| --- | --- | --- | --- | --- |
+| **Deterministic** | None | Fast | Basic | Testing, prototyping |
+| **MLX-VLM Local** | Auto-installed | Moderate | High | Local workflows, Apple Silicon Macs |
+| **LM Studio** | Download app | Varies | High | Trying different models, non-MLX systems |
 
-### AI Provider
+See [docs/configuration.md](docs/configuration.md) for setup details and examples.
 
-- `TIMELINE_AI_PROVIDER`
-  - `deterministic`
-  - `lmstudio`
-  - `mlx-vlm-local`
-- `TIMELINE_AI_TIMEOUT_SEC`
-
-### LM Studio
-
-- `TIMELINE_AI_MODEL`
-- `TIMELINE_AI_BASE_URL`
-
-### MLX-VLM Local
-
-- `TIMELINE_AI_MODEL_ID`
-- `TIMELINE_AI_MODEL_REVISION`
-- `TIMELINE_AI_MODEL_CACHE_DIR`
-- `TIMELINE_AI_DEVICE`
-- `TIMELINE_SKIP_MODEL_DOWNLOAD`
-
-### AI Runtime Tuning
-
-- `TIMELINE_AI_MODE`
-- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET`
-- `TIMELINE_AI_MAX_KEYFRAMES`
-- `TIMELINE_AI_KEYFRAME_MAX_WIDTH`
-- `TIMELINE_AI_CONCURRENCY`
-- `TIMELINE_AI_CACHE`
-
-See [.env.example](/Users/florin/Projects/personal/timeline-cutter/.env.example) for the current defaults.
-
-## Recommended Local AI Config
-
-Embedded Apple Silicon path:
+## Development
 
 ```bash
-TIMELINE_AI_PROVIDER=mlx-vlm-local
-TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit
-TIMELINE_AI_MODEL_CACHE_DIR=./models/mlx-vlm
-TIMELINE_AI_DEVICE=auto
-TIMELINE_AI_MODE=fast
-TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1
-TIMELINE_AI_MAX_KEYFRAMES=1
-TIMELINE_AI_KEYFRAME_MAX_WIDTH=448
-TIMELINE_AI_CACHE=true
+npm run dev:desktop    # Launch app in dev mode
+npm run build:desktop  # Build production app
+npm run process        # Run analyzer directly
+npm run test:python    # Run Python tests
 ```
 
-External local server path:
-
-```bash
-TIMELINE_AI_PROVIDER=lmstudio
-TIMELINE_AI_MODEL=qwen3.5-9b
-TIMELINE_AI_BASE_URL=http://127.0.0.1:1234/v1
-```
-
-No-model path:
-
-```bash
-TIMELINE_AI_PROVIDER=deterministic
-```
+Full command reference: [docs/commands.md](docs/commands.md)
 
 ## Requirements
 
-Required:
+- Node.js 18+, npm 9+, Python 3.12+
+- Xcode Command Line Tools, Rust/Cargo
+- ffmpeg (installed automatically by setup script)
 
-- Node.js
-- npm
-- Python 3.12+
-- Xcode Command Line Tools on macOS
-- Rust / Cargo for the Tauri desktop shell
+See [docs/setup.md](docs/setup.md) for detailed requirements and troubleshooting.
 
-For the useful local media-analysis path:
+## License
 
-- `ffmpeg`
-- optional `ffprobe`
-- optional `PySceneDetect`
-- optional `faster-whisper`
-
-For `mlx-vlm-local`:
-
-- `mlx`
-- `mlx-vlm`
-- `torch`
-- `torchvision`
-- `pillow`
-- local prepared model files in `models/mlx-vlm`
-
-The setup script now:
-
-- runs `npm install`
-- creates the Python environment
-- installs `ffmpeg` automatically on macOS with Homebrew when possible
-- checks for Xcode Command Line Tools
-- installs Rust with Homebrew on macOS when possible
-- installs the embedded MLX runtime requirements by default
-- prepares the local MLX model cache
-
-## Resolve Export
-
-The analyzer exports `FCPXML` for DaVinci Resolve.
-
-Backend export writes:
-
-- [generated/timeline.fcpxml](/Users/florin/Projects/personal/timeline-cutter/generated/timeline.fcpxml)
-
-The desktop app adds a native save flow on top of that backend export so the user can choose the final export destination visually.
-
-## Verification
-
-Python tests:
-
-```bash
-npm run test:python
-```
-
-Desktop app build:
-
-```bash
-npm run build:desktop
-```
-
-Note: this environment did not have Rust installed, so the Tauri shell could not be compiled here. The Python analyzer remains verified locally through the test suite.
+[Your License Here]

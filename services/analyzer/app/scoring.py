@@ -24,7 +24,7 @@ def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
             "stability": metrics.get("stability", 0.0),
             "duration_fit": metrics.get("duration_fit", 0.0),
             "subject_clarity": metrics.get("subject_clarity", 0.0),
-            "speech_presence": metrics.get("speech_presence", 0.0) if analysis_mode == "speech" else 0.0,
+            "audio_energy": metrics.get("audio_energy", 0.0) if analysis_mode == "speech" else 0.0,
             "motion_energy": metrics.get("motion_energy", 0.0) if analysis_mode == "visual" else 0.0,
         },
         {
@@ -32,26 +32,31 @@ def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
             "stability": 0.18,
             "duration_fit": 0.2,
             "subject_clarity": 0.18,
-            "speech_presence": 0.22,
+            "audio_energy": 0.22,
             "motion_energy": 0.22,
         },
     )
 
     if analysis_mode == "speech":
-        semantic = weighted_average(
-            {
-                "hook_strength": metrics.get("hook_strength", 0.0),
-                "story_alignment": metrics.get("story_alignment", 0.0),
-                "speech_presence": metrics.get("speech_presence", 0.0),
-                "subject_clarity": metrics.get("subject_clarity", 0.0),
-            },
-            {
-                "hook_strength": 0.32,
-                "story_alignment": 0.28,
-                "speech_presence": 0.24,
-                "subject_clarity": 0.16,
-            },
-        )
+        semantic_values = {
+            "hook_strength": metrics.get("hook_strength", 0.0),
+            "story_alignment": metrics.get("story_alignment", 0.0),
+            "speech_ratio": metrics.get("speech_ratio", 0.0),
+            "subject_clarity": metrics.get("subject_clarity", 0.0),
+        }
+        semantic_weights = {
+            "hook_strength": 0.32,
+            "story_alignment": 0.28,
+            "speech_ratio": 0.24,
+            "subject_clarity": 0.16,
+        }
+
+        # Include CLIP score if available
+        if segment.prefilter and "clip_score" in segment.prefilter.metrics_snapshot:
+            semantic_values["clip_score"] = segment.prefilter.metrics_snapshot["clip_score"]
+            semantic_weights["clip_score"] = 0.12
+
+        semantic = weighted_average(semantic_values, semantic_weights)
         story = weighted_average(
             {
                 "story_alignment": metrics.get("story_alignment", 0.0),
@@ -65,20 +70,25 @@ def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
             },
         )
     else:
-        semantic = weighted_average(
-            {
-                "visual_novelty": metrics.get("visual_novelty", 0.0),
-                "subject_clarity": metrics.get("subject_clarity", 0.0),
-                "motion_energy": metrics.get("motion_energy", 0.0),
-                "hook_strength": metrics.get("hook_strength", 0.0),
-            },
-            {
-                "visual_novelty": 0.34,
-                "subject_clarity": 0.18,
-                "motion_energy": 0.24,
-                "hook_strength": 0.24,
-            },
-        )
+        semantic_values = {
+            "visual_novelty": metrics.get("visual_novelty", 0.0),
+            "subject_clarity": metrics.get("subject_clarity", 0.0),
+            "motion_energy": metrics.get("motion_energy", 0.0),
+            "hook_strength": metrics.get("hook_strength", 0.0),
+        }
+        semantic_weights = {
+            "visual_novelty": 0.34,
+            "subject_clarity": 0.18,
+            "motion_energy": 0.24,
+            "hook_strength": 0.24,
+        }
+
+        # Include CLIP score if available
+        if segment.prefilter and "clip_score" in segment.prefilter.metrics_snapshot:
+            semantic_values["clip_score"] = segment.prefilter.metrics_snapshot["clip_score"]
+            semantic_weights["clip_score"] = 0.15
+
+        semantic = weighted_average(semantic_values, semantic_weights)
         story = weighted_average(
             {
                 "story_alignment": metrics.get("story_alignment", 0.0),

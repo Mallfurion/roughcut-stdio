@@ -47,6 +47,7 @@ mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 
 AI_STATUS_LINES="$("$PYTHON_BIN" - <<'PY'
 from services.analyzer.app.ai import inspect_ai_provider_status, load_ai_analysis_config
+from services.analyzer.app.clip import is_available as is_clip_available
 
 status = inspect_ai_provider_status(runtime_probe=True)
 analysis = load_ai_analysis_config()
@@ -65,6 +66,12 @@ print(f"ai_max_keyframes={analysis.max_keyframes_per_segment}")
 print(f"ai_keyframe_max_width={analysis.keyframe_max_width}")
 print(f"ai_concurrency={analysis.concurrency}")
 print(f"ai_cache_enabled={str(analysis.cache_enabled).lower()}")
+print(f"clip_enabled={str(analysis.clip_enabled).lower()}")
+print(f"clip_available={str(is_clip_available()).lower()}")
+if analysis.clip_enabled:
+    print(f"clip_min_score={analysis.clip_min_score}")
+    print(f"clip_model={analysis.clip_model}")
+    print(f"vlm_budget_pct={analysis.vlm_budget_pct}")
 PY
 )"
 
@@ -94,8 +101,40 @@ if analysis_summary:
     print(f"Prefilter sampled frames: {analysis_summary.get('prefilter_sample_count', 0)}")
     print(f"Candidate segments: {analysis_summary.get('candidate_segment_count', 0)}")
     print(f"Prefilter shortlisted: {analysis_summary.get('prefilter_shortlisted_count', 0)}")
+
+    # CLIP statistics
+    clip_scored = analysis_summary.get('clip_scored_count', 0)
+    clip_gated = analysis_summary.get('clip_gated_count', 0)
+    if clip_scored > 0:
+        print(f"CLIP scored segments: {clip_scored}")
+        print(f"CLIP gated segments: {clip_gated}")
+
+    # Deduplication statistics
+    clip_dedup_groups = analysis_summary.get('clip_dedup_group_count', 0)
+    clip_dedup_elim = analysis_summary.get('clip_dedup_eliminated_count', 0)
+    hist_dedup_groups = analysis_summary.get('histogram_dedup_group_count', 0)
+    hist_dedup_elim = analysis_summary.get('histogram_dedup_eliminated_count', 0)
+
+    if clip_dedup_groups > 0 or hist_dedup_groups > 0:
+        if clip_dedup_groups > 0:
+            print(f"CLIP deduplication: {clip_dedup_elim} eliminated from {clip_dedup_groups} groups")
+        if hist_dedup_groups > 0:
+            print(f"Histogram deduplication: {hist_dedup_elim} eliminated from {hist_dedup_groups} groups")
+
     print(f"VLM target segments: {analysis_summary.get('vlm_target_count', 0)}")
+    vlm_budget_cap_pct = analysis_summary.get('vlm_budget_cap_pct', 100)
+    if vlm_budget_cap_pct < 100:
+        vlm_was_binding = analysis_summary.get('vlm_budget_was_binding', False)
+        vlm_target_pct = analysis_summary.get('vlm_target_pct_of_candidates', 0.0)
+        print(f"VLM budget cap: {vlm_budget_cap_pct}% of candidates")
+        if vlm_was_binding:
+            print(f"VLM budget was binding ({vlm_target_pct:.1f}% of all candidates selected)")
+
     print(f"Filtered before VLM: {analysis_summary.get('filtered_before_vlm_count', 0)}")
+    audio_signal = analysis_summary.get('audio_signal_asset_count', 0)
+    audio_silent = analysis_summary.get('audio_silent_asset_count', 0)
+    print(f"Audio signal assets: {audio_signal}")
+    print(f"Silent/no-audio assets: {audio_silent}")
     print(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
     print(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
     print(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")

@@ -112,6 +112,11 @@ class AIAnalysisConfig:
     keyframe_max_width: int
     concurrency: int
     cache_enabled: bool
+    clip_enabled: bool = True
+    clip_min_score: float = 0.35
+    vlm_budget_pct: int = 100
+    clip_model: str = "ViT-B-32"
+    clip_model_pretrained: str = "laion2b_s34b_b79k"
 
 
 @dataclass(slots=True)
@@ -938,6 +943,17 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     max_keyframes_default = 1 if mode == "fast" else 4
     max_width_default = 448 if mode == "fast" else 960
 
+    # CLIP configuration
+    clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.35").strip()
+    try:
+        clip_min_score = float(clip_min_score_raw)
+        clip_min_score = max(0.0, min(1.0, clip_min_score))  # Clamp to [0, 1]
+    except ValueError:
+        clip_min_score = 0.35
+
+    vlm_budget_pct = parse_int_env("TIMELINE_AI_VLM_BUDGET_PCT", 100)
+    vlm_budget_pct = max(0, min(100, vlm_budget_pct))  # Clamp to [0, 100]
+
     return AIAnalysisConfig(
         mode=mode,
         max_segments_per_asset=max(1, parse_int_env("TIMELINE_AI_MAX_SEGMENTS_PER_ASSET", max_segments_default)),
@@ -945,6 +961,11 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
         keyframe_max_width=max(160, parse_int_env("TIMELINE_AI_KEYFRAME_MAX_WIDTH", max_width_default)),
         concurrency=max(1, parse_int_env("TIMELINE_AI_CONCURRENCY", 2)),
         cache_enabled=parse_bool_env("TIMELINE_AI_CACHE", True),
+        clip_enabled=parse_bool_env("TIMELINE_AI_CLIP_ENABLED", True),
+        clip_min_score=clip_min_score,
+        vlm_budget_pct=vlm_budget_pct,
+        clip_model=os.environ.get("TIMELINE_AI_CLIP_MODEL", "ViT-B-32").strip() or "ViT-B-32",
+        clip_model_pretrained=os.environ.get("TIMELINE_AI_CLIP_MODEL_PRETRAINED", "laion2b_s34b_b79k").strip() or "laion2b_s34b_b79k",
     )
 
 

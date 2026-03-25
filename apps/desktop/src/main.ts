@@ -35,6 +35,8 @@ type QualityMetrics = {
   speech_presence: number;
   hook_strength: number;
   story_alignment: number;
+  audio_energy?: number;
+  speech_ratio?: number;
 };
 
 type SegmentEvidence = {
@@ -49,6 +51,11 @@ type SegmentPrefilter = {
   shortlisted: boolean;
   filtered_before_vlm: boolean;
   selection_reason: string;
+  deduplicated?: boolean;
+  dedup_group_id?: number;
+  clip_gated?: boolean;
+  vlm_budget_capped?: boolean;
+  metrics_snapshot?: Record<string, number>;
 };
 
 type SegmentUnderstanding = {
@@ -146,6 +153,12 @@ type AppSettings = {
   aiKeyframeMaxWidth: string;
   aiConcurrency: string;
   aiCacheEnabled: boolean;
+  audioEnabled: boolean;
+  deduplicationEnabled: boolean;
+  dedupThreshold: string;
+  clipEnabled: boolean;
+  clipMinScore: string;
+  vlmBudgetPct: string;
 };
 
 type AppState = {
@@ -186,7 +199,13 @@ function createDefaultSettings(): AppSettings {
     aiMaxKeyframes: "1",
     aiKeyframeMaxWidth: "448",
     aiConcurrency: "2",
-    aiCacheEnabled: true
+    aiCacheEnabled: true,
+    audioEnabled: true,
+    deduplicationEnabled: true,
+    dedupThreshold: "0.85",
+    clipEnabled: true,
+    clipMinScore: "0.35",
+    vlmBudgetPct: "100"
   };
 }
 
@@ -653,9 +672,35 @@ function renderSettingsDialog() {
                 AI concurrency
                 <input id="settings-ai-concurrency" type="number" min="1" value="${escapeHtml(draft.aiConcurrency)}" />
               </label>
+              <label class="field">
+                Dedup threshold
+                <input id="settings-dedup-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.dedupThreshold)}" />
+              </label>
+              <label class="field">
+                CLIP min score
+                <input id="settings-clip-min-score" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.clipMinScore)}" />
+              </label>
+              <label class="field">
+                VLM budget %
+                <input id="settings-vlm-budget-pct" type="number" min="0" max="100" step="1" value="${escapeHtml(draft.vlmBudgetPct)}" />
+              </label>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.5rem;">
               <label class="checkbox-field">
                 <input id="settings-ai-cache" type="checkbox" ${draft.aiCacheEnabled ? "checked" : ""} />
                 <span>Enable AI cache</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-audio-enabled" type="checkbox" ${draft.audioEnabled ? "checked" : ""} />
+                <span>Enable audio extraction</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-deduplication-enabled" type="checkbox" ${draft.deduplicationEnabled ? "checked" : ""} />
+                <span>Enable deduplication</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-clip-enabled" type="checkbox" ${draft.clipEnabled ? "checked" : ""} />
+                <span>Enable CLIP semantic scoring</span>
               </label>
             </div>
           </section>
@@ -1038,6 +1083,32 @@ function bindActions() {
     };
   }
 
+  const settingsAudioEnabled = document.getElementById("settings-audio-enabled") as HTMLInputElement | null;
+  if (settingsAudioEnabled) {
+    settingsAudioEnabled.onchange = () => {
+      updateSettingsDraft({ audioEnabled: settingsAudioEnabled.checked });
+    };
+  }
+
+  const settingsDeduplicationEnabled = document.getElementById("settings-deduplication-enabled") as HTMLInputElement | null;
+  if (settingsDeduplicationEnabled) {
+    settingsDeduplicationEnabled.onchange = () => {
+      updateSettingsDraft({ deduplicationEnabled: settingsDeduplicationEnabled.checked });
+    };
+  }
+
+  bindTextSetting("settings-dedup-threshold", (value) => updateSettingsDraft({ dedupThreshold: value }));
+
+  const settingsClipEnabled = document.getElementById("settings-clip-enabled") as HTMLInputElement | null;
+  if (settingsClipEnabled) {
+    settingsClipEnabled.onchange = () => {
+      updateSettingsDraft({ clipEnabled: settingsClipEnabled.checked });
+    };
+  }
+
+  bindTextSetting("settings-clip-min-score", (value) => updateSettingsDraft({ clipMinScore: value }));
+  bindTextSetting("settings-vlm-budget-pct", (value) => updateSettingsDraft({ vlmBudgetPct: value }));
+
   const saveSettings = document.getElementById("save-settings");
   if (saveSettings) {
     saveSettings.onclick = async () => {
@@ -1089,6 +1160,9 @@ function resolveClipViews(project: TimelineProject) {
 
 function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
   const expanded = appState.expandedClipIds.includes(view.asset.id);
+  const dedupCount = view.segments.filter((s) => s.prefilter?.deduplicated).length;
+  const activCount = view.segments.length - dedupCount;
+
   return `
     <article class="clip-card">
       <button class="clip-toggle" data-clip-id="${escapeHtml(view.asset.id)}" aria-expanded="${expanded ? "true" : "false"}">
@@ -1099,6 +1173,7 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
           </div>
           <div class="clip-toggle-meta">
             <span class="pill">${view.segments.length} sections</span>
+            ${dedupCount > 0 ? `<span class="pill pill-dedup-info">${activCount} active, ${dedupCount} dup</span>` : ""}
             <span class="clip-chevron">${expanded ? "−" : "+"}</span>
           </div>
         </div>
@@ -1118,17 +1193,27 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
 function renderSegmentCard(segment: CandidateSegment) {
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
+  const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
+  const clipGated = segment.prefilter?.clip_gated ?? false;
+  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
   const vlmText = ai?.summary || segment.description;
   const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
+  const isDeduplicated = segment.prefilter?.deduplicated ?? false;
+  const dedupGroupId = segment.prefilter?.dedup_group_id;
 
   return `
-    <article class="section-card">
+    <article class="section-card${isDeduplicated ? " section-card--deduplicated" : ""}">
       <div class="section-head">
         <div>
           <div class="pill-row">
             <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
-            <span class="pill section-pill">score ${formatScore(score)}</span>
+            <span class="pill section-pill">prefilter ${formatScore(score)}</span>
+            ${clipScore !== undefined ? `<span class="pill section-pill" title="CLIP semantic score">CLIP ${formatScore(clipScore)}</span>` : ""}
             <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
+            ${isDeduplicated ? `<span class="pill pill-dedup">Duplicate (Group ${dedupGroupId})</span>` : ""}
+            ${!isDeduplicated && dedupGroupId !== undefined ? `<span class="pill pill-dedup-kept">Kept (Group ${dedupGroupId})</span>` : ""}
+            ${clipGated ? `<span class="pill" style="background-color: #f97316; color: white;">CLIP Gated</span>` : ""}
+            ${vlmBudgetCapped ? `<span class="pill" style="background-color: #d946ef; color: white;">Budget Capped</span>` : ""}
             ${formatKeepLabelWithColor(ai?.keep_label)}
             ${formatConfidenceWithColor(ai?.confidence)}
           </div>
@@ -1136,6 +1221,7 @@ function renderSegmentCard(segment: CandidateSegment) {
       </div>
       <p class="section-summary">${escapeHtml(vlmText)}</p>
       ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
+      ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
       <div class="meta-list section-meta">
         ${renderOptionalMeta(ai?.shot_type)}
         ${renderOptionalMeta(ai?.camera_motion)}
@@ -1198,8 +1284,56 @@ function renderOptionalMeta(value?: string) {
   return `<span>${escapeHtml(value)}</span>`;
 }
 
-function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+function renderAudioMetrics(metrics: Record<string, number> | undefined) {
+  const audioEnergy = metrics?.audio_energy ?? 0;
+  const speechRatio = metrics?.speech_ratio ?? 0;
+
+  if (audioEnergy === 0 && speechRatio === 0) {
+    return "";
+  }
+
+  const audioEnergyPercent = Math.round(audioEnergy * 100);
+  const speechRatioPercent = Math.round(speechRatio * 100);
+  const isSilent = audioEnergy < 0.01;
+
+  return `
+    <div class="audio-metrics">
+      <div class="audio-metric">
+        <span class="audio-icon">🔊</span>
+        <div class="audio-metric-content">
+          <span class="audio-label">Energy</span>
+          <div class="audio-bar">
+            <div class="audio-bar-fill" style="width: ${audioEnergyPercent}%"></div>
+          </div>
+          <span class="audio-value">${audioEnergyPercent}%</span>
+        </div>
+      </div>
+      <div class="audio-metric">
+        <span class="audio-icon">🎤</span>
+        <div class="audio-metric-content">
+          <span class="audio-label">Speech</span>
+          <div class="audio-bar">
+            <div class="audio-bar-fill" style="width: ${speechRatioPercent}%"></div>
+          </div>
+          <span class="audio-value">${speechRatioPercent}%</span>
+        </div>
+      </div>
+      ${
+        isSilent
+          ? `<div class="audio-metric audio-metric-silent">
+               <span class="audio-icon">🔇</span>
+               <span class="audio-label">Silent</span>
+             </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function escapeHtml(value: string | undefined | null) {
+  if (!value) return "";
+  const str = String(value);
+  return str.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 function stringifyError(error: unknown) {

@@ -3,10 +3,13 @@ from __future__ import annotations
 from hashlib import md5
 import importlib
 import importlib.util
+import logging
 from pathlib import Path
 import re
 import shutil
 from typing import Callable, Protocol
+
+logger = logging.getLogger(__name__)
 
 from .ai import (
     DeterministicVisionLanguageAnalyzer,
@@ -16,6 +19,24 @@ from .ai import (
     default_vision_language_analyzer,
     get_ai_runtime_stats,
     load_ai_analysis_config,
+)
+
+# Lazy imports for optional CLIP dependencies
+CLIPScorer = None
+CLIPDeduplicator = None
+is_clip_available = lambda: False
+
+try:
+    from .clip import CLIPScorer, is_available as is_clip_available
+    from .clip_dedup import CLIPDeduplicator
+except ImportError:
+    pass
+from .deduplication import (
+    HistogramDeduplicator,
+    apply_deduplication_results,
+    deduplicate_segments,
+    get_dedup_threshold,
+    is_deduplication_enabled,
 )
 from .domain import (
     Asset,
@@ -28,7 +49,13 @@ from .domain import (
     TimelineItem,
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
-from .prefilter import aggregate_segment_prefilter, build_prefilter_segments, sample_asset_signals
+from .prefilter import (
+    aggregate_segment_prefilter,
+    build_prefilter_segments,
+    sample_asset_signals,
+    sample_audio_signals,
+    sample_timestamps,
+)
 from .scoring import score_segment
 
 
@@ -177,18 +204,42 @@ def analyze_assets(
     total_prefilter_shortlisted = 0
     total_vlm_targets = 0
     total_filtered_before_vlm = 0
+    total_audio_signal_assets = 0
+    total_deduplicated_segments = 0
+    total_clip_scored = 0
+    total_clip_gated = 0
+    deduplication_enabled = is_deduplication_enabled()
+    dedup_threshold = get_dedup_threshold()
+    total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
+    total_dedup_eliminated_count = 0  # Accumulate deduplicated segment count
 
     total_assets = len(assets)
+    all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
+
     for asset_index, asset in enumerate(assets, start=1):
+        if status_callback is not None:
+            status_callback(f"[{asset_index}/{total_assets}] Analyzing: {asset.name}")
+
         base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
         if not base_ranges:
             base_ranges = fallback_segments(asset.duration_sec)
-        prefilter_signals = sample_asset_signals(asset)
+        timestamps = sample_timestamps(asset.duration_sec)
+        prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+
+        # Audio signal sampling
+        audio_signals = sample_audio_signals(asset, timestamps)
         total_prefilter_samples += len(prefilter_signals)
+        has_audio = any(sig.source == "ffmpeg" for sig in audio_signals)
+        if has_audio:
+            total_audio_signal_assets += 1
+        if status_callback is not None:
+            audio_status = f"audio detected" if has_audio else "silent/no audio"
+            status_callback(f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})")
         segment_ranges = build_prefilter_segments(
             asset=asset,
             base_ranges=base_ranges,
             signals=prefilter_signals,
+            audio_signals=audio_signals,
             top_windows=2 if ai_config.mode == "fast" else 3,
         )
         if not segment_ranges:
@@ -202,6 +253,7 @@ def analyze_assets(
                 signals=prefilter_signals,
                 start_sec=start_sec,
                 end_sec=end_sec,
+                audio_signals=audio_signals,
             )
             metrics = synthesize_quality_metrics(
                 asset,
@@ -233,62 +285,208 @@ def analyze_assets(
                 )
             )
 
+        # Deduplication pass: runs after prefilter scoring and before shortlist selection
+        if deduplication_enabled and len(asset_segments) > 1:
+            if status_callback is not None:
+                status_callback(f"  ✓ Deduplicating {len(asset_segments)} prefilter segments...")
+
+            # Build frame signals per segment based on time window
+            frame_signals_by_id = {}
+            for segment in asset_segments:
+                matching_signals = [
+                    signal
+                    for signal in prefilter_signals
+                    if segment.start_sec <= signal.timestamp_sec <= segment.end_sec
+                ]
+                # If no signals fall within segment, use the nearest signal for context
+                if not matching_signals and prefilter_signals:
+                    center = (segment.start_sec + segment.end_sec) / 2.0
+                    nearest = min(
+                        prefilter_signals,
+                        key=lambda signal: abs(signal.timestamp_sec - center),
+                    )
+                    matching_signals = [nearest]
+                frame_signals_by_id[segment.id] = matching_signals
+                all_frame_signals_by_id[segment.id] = matching_signals  # Accumulate for histogram dedup fallback
+
+            dedup_results = deduplicate_segments(
+                segments=asset_segments,
+                frame_signals_by_id=frame_signals_by_id,
+                similarity_threshold=dedup_threshold,
+            )
+            apply_deduplication_results(asset_segments, dedup_results)
+            asset_dedup_count = sum(1 for deduplicated, _ in dedup_results.values() if deduplicated)
+            total_deduplicated_segments += asset_dedup_count
+            if asset_dedup_count > 0 and status_callback is not None:
+                status_callback(f"    → Eliminated {asset_dedup_count} near-duplicate(s)")
+
+        # Filter out deduplicated segments from further processing
+        active_segments = [s for s in asset_segments if not (s.prefilter and s.prefilter.deduplicated)]
+
         prefilter_shortlist_ids = select_prefilter_shortlist_ids(
             asset=asset,
-            segments=asset_segments,
-            max_segments_per_asset=ai_config.max_segments_per_asset,
-            mode=ai_config.mode,
-        )
-        ai_target_ids = select_ai_target_segment_ids(
-            asset=asset,
-            segments=asset_segments,
-            analyzer=analyzer,
+            segments=active_segments,
             max_segments_per_asset=ai_config.max_segments_per_asset,
             mode=ai_config.mode,
         )
         total_prefilter_shortlisted += len(prefilter_shortlist_ids)
-        total_vlm_targets += len(ai_target_ids)
         ai_tasks: list[tuple[CandidateSegment, object, str]] = []
 
+        # Build evidence for all shortlisted segments
         for index, segment in enumerate(asset_segments):
             if segment.prefilter is not None:
                 segment.prefilter.shortlisted = segment.id in prefilter_shortlist_ids
+
+            evidence = None
+            if segment.id in prefilter_shortlist_ids:
+                evidence = build_segment_evidence(
+                    asset=asset,
+                    segment=segment,
+                    asset_segments=asset_segments,
+                    segment_index=index,
+                    story_prompt=project.story_prompt,
+                    artifacts_root=artifacts_root,
+                    extract_keyframes=analyzer.requires_keyframes,
+                    max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
+                    keyframe_max_width=ai_config.keyframe_max_width,
+                )
+                segment.evidence_bundle = evidence
+
+        # CLIP scoring pass (if enabled and available)
+        clip_scorer = None
+        if ai_config.clip_enabled and is_clip_available() and CLIPScorer is not None:
+            if status_callback is not None:
+                status_callback(f"  ✓ CLIP semantic scoring {len(prefilter_shortlist_ids)} shortlisted segments...")
+
+            try:
+                clip_scorer = CLIPScorer(
+                    model_name=ai_config.clip_model,
+                    pretrained=ai_config.clip_model_pretrained,
+                )
+                asset_clip_scored = 0
+                asset_clip_gated = 0
+
+                for segment in asset_segments:
+                    if segment.id in prefilter_shortlist_ids and segment.evidence_bundle is not None:
+                        # Score using contact sheet if available, otherwise first keyframe
+                        image_path = segment.evidence_bundle.contact_sheet_path
+                        if not image_path or not Path(image_path).exists():
+                            if segment.evidence_bundle.keyframe_paths:
+                                image_path = segment.evidence_bundle.keyframe_paths[0]
+
+                        if image_path and Path(image_path).exists():
+                            clip_score = clip_scorer.score(image_path)
+                            segment.prefilter.metrics_snapshot["clip_score"] = clip_score
+                            total_clip_scored += 1
+                            asset_clip_scored += 1
+
+                            if clip_score < ai_config.clip_min_score:
+                                segment.prefilter.clip_gated = True
+                                total_clip_gated += 1
+                                asset_clip_gated += 1
+
+                if asset_clip_gated > 0 and status_callback is not None:
+                    status_callback(f"    → Gated {asset_clip_gated}/{asset_clip_scored} by semantic threshold")
+            except Exception as e:
+                logger.error(f"CLIP scoring failed: {e}, disabling CLIP")
+                clip_scorer = None
+                if status_callback is not None:
+                    status_callback(f"    ⚠ CLIP scoring unavailable (disabling for this run)")
+
+        # Deduplication pass (after evidence building and CLIP scoring, before VLM targeting)
+        if is_deduplication_enabled():
+            shortlisted_segments = [s for s in active_segments if s.prefilter and s.prefilter.shortlisted]
+            if shortlisted_segments:
+                if status_callback is not None:
+                    status_callback(f"  ✓ Deduplicating {len(shortlisted_segments)} shortlisted segments...")
+
+                try:
+                    if clip_scorer is not None and CLIPDeduplicator is not None:
+                        # Use CLIP-based dedup
+                        deduplicator = CLIPDeduplicator(clip_scorer)
+                        deduplicator.deduplicate(shortlisted_segments)
+                    else:
+                        # Use histogram fallback (use frame signals accumulated from prefilter dedup pass)
+                        frame_signals_by_id = {
+                            segment_id: signals
+                            for segment_id, signals in all_frame_signals_by_id.items()
+                            if any(s.id == segment_id for s in active_segments)
+                        }
+                        deduplicator = HistogramDeduplicator(frame_signals_by_id, threshold=get_dedup_threshold())
+                        deduplicator.deduplicate(shortlisted_segments)
+
+                    # Count dedup results for summary
+                    dedup_groups = set(s.prefilter.dedup_group_id for s in shortlisted_segments if s.prefilter.dedup_group_id is not None)
+                    dedup_eliminated = sum(1 for s in shortlisted_segments if s.prefilter and s.prefilter.deduplicated)
+                    total_dedup_group_count += len(dedup_groups)
+                    total_dedup_eliminated_count += dedup_eliminated
+
+                    if dedup_eliminated > 0 and status_callback is not None:
+                        status_callback(f"    → Eliminated {dedup_eliminated} near-duplicate(s)")
+                except Exception as e:
+                    logger.error(f"Deduplication failed: {e}")
+                    if status_callback is not None:
+                        status_callback(f"    ⚠ Deduplication unavailable: {e}")
+
+        # Three-stage VLM target selection
+        # Stage 1: Filter out clip_gated segments
+        # Stage 2: Apply per-asset limit
+        # Stage 3: Apply global budget cap
+        ai_target_ids = select_vlm_targets_three_stage(
+            asset=asset,
+            segments=active_segments,
+            analyzer=analyzer,
+            prefilter_shortlist_ids=prefilter_shortlist_ids,
+            max_segments_per_asset=ai_config.max_segments_per_asset,
+            vlm_budget_pct=ai_config.vlm_budget_pct,
+            clip_enabled=ai_config.clip_enabled and clip_scorer is not None,
+        )
+        total_vlm_targets += len(ai_target_ids)
+
+        # Log VLM targeting decision
+        if status_callback is not None:
+            deterministic_count = len(prefilter_shortlist_ids) - len(ai_target_ids)
+            status_callback(f"  ✓ VLM targets: {len(ai_target_ids)} | Deterministic: {deterministic_count}")
+
+        # Build prefilter selection reasons and apply analysis
+        for segment in asset_segments:
+            if segment.prefilter is not None:
+                # Skip deduplicated segments — preserve their dedup-specific selection_reason
+                if segment.prefilter.deduplicated:
+                    continue
                 segment.prefilter.filtered_before_vlm = analyzer.requires_keyframes and segment.id not in ai_target_ids
                 segment.prefilter.selection_reason = describe_prefilter_selection(
                     score=segment.prefilter.score,
                     shortlisted=segment.prefilter.shortlisted,
                     filtered_before_vlm=segment.prefilter.filtered_before_vlm,
+                    clip_gated=segment.prefilter.clip_gated,
+                    vlm_budget_capped=segment.prefilter.vlm_budget_capped,
                 )
                 if segment.prefilter.filtered_before_vlm:
                     total_filtered_before_vlm += 1
-            evidence = build_segment_evidence(
-                asset=asset,
-                segment=segment,
-                asset_segments=asset_segments,
-                segment_index=index,
-                story_prompt=project.story_prompt,
-                artifacts_root=artifacts_root,
-                extract_keyframes=analyzer.requires_keyframes and segment.id in ai_target_ids,
-                max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
-                keyframe_max_width=ai_config.keyframe_max_width,
-            )
-            segment.evidence_bundle = evidence
+
+        # Build ai_tasks for VLM targets and apply deterministic understanding for others
+        for segment in asset_segments:
+            if segment.id not in prefilter_shortlist_ids:
+                continue
+
             if segment.id in ai_target_ids:
-                ai_tasks.append((segment, evidence, project.story_prompt))
+                if segment.evidence_bundle is not None:
+                    ai_tasks.append((segment, segment.evidence_bundle, project.story_prompt))
             else:
-                understanding = deterministic_analyzer.analyze(
-                    asset=asset,
-                    segment=segment,
-                    evidence=evidence,
-                    story_prompt=project.story_prompt,
-                )
-                if analyzer.requires_keyframes and ai_config.mode == "fast":
-                    understanding.risk_flags = sorted(set([*understanding.risk_flags, "ai_skipped_fast_mode"]))
-                    understanding.rationale = (
-                        f"{understanding.rationale} AI was skipped for this segment in fast mode because "
-                        "it was not in the per-asset shortlist."
+                # Segment is shortlisted but not selected for VLM (CLIP gated or budget capped)
+                if segment.evidence_bundle is not None:
+                    understanding = deterministic_analyzer.analyze(
+                        asset=asset,
+                        segment=segment,
+                        evidence=segment.evidence_bundle,
+                        story_prompt=project.story_prompt,
                     )
-                segment.ai_understanding = understanding
+                    if segment.prefilter.clip_gated:
+                        understanding.risk_flags = sorted(set([*understanding.risk_flags, "gated_by_clip"]))
+                    if segment.prefilter.vlm_budget_capped:
+                        understanding.risk_flags = sorted(set([*understanding.risk_flags, "excluded_by_budget_cap"]))
+                    segment.ai_understanding = understanding
 
         ai_results = analyze_asset_segments(
             analyzer=analyzer,
@@ -306,9 +504,19 @@ def analyze_assets(
     project.analysis_summary = {
         "prefilter_sample_count": total_prefilter_samples,
         "candidate_segment_count": len(candidate_segments),
+        "deduplicated_segment_count": total_deduplicated_segments if deduplication_enabled else 0,
+        "dedup_group_count": total_dedup_group_count if deduplication_enabled else 0,
+        "dedup_eliminated_count": total_dedup_eliminated_count if deduplication_enabled else 0,
         "prefilter_shortlisted_count": total_prefilter_shortlisted,
         "vlm_target_count": total_vlm_targets,
         "filtered_before_vlm_count": total_filtered_before_vlm,
+        "audio_signal_asset_count": total_audio_signal_assets,
+        "audio_silent_asset_count": total_assets - total_audio_signal_assets,
+        "clip_scored_count": total_clip_scored if (ai_config.clip_enabled and is_clip_available()) else 0,
+        "clip_gated_count": total_clip_gated if (ai_config.clip_enabled and is_clip_available()) else 0,
+        "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
+        "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
+        "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
     }
     ai_runtime_stats = get_ai_runtime_stats(analyzer)
     project.analysis_summary.update(
@@ -320,19 +528,34 @@ def analyze_assets(
         }
     )
     if status_callback is not None:
+        status_callback("")
+        status_callback("═══════════════════════════════════════════════════")
+        status_callback("Analysis Complete - Summary")
+        status_callback("═══════════════════════════════════════════════════")
+        status_callback(f"Assets processed: {total_assets}")
+        status_callback(f"Total candidate segments: {len(candidate_segments)}")
+        status_callback(f"Frames sampled: {total_prefilter_samples}")
+
+        if deduplication_enabled:
+            status_callback(f"Deduplication: {total_deduplicated_segments} near-duplicates eliminated")
+
+        status_callback(f"Prefilter shortlisted: {total_prefilter_shortlisted}/{len(candidate_segments)} segments")
+
+        if total_clip_scored > 0:
+            status_callback(f"CLIP semantic scoring: {total_clip_scored} segments scored, {total_clip_gated} gated")
+
+        status_callback(f"Audio coverage: {total_audio_signal_assets}/{total_assets} assets with audio")
+
+        status_callback(f"VLM analysis: {total_vlm_targets} segments selected for AI")
+        status_callback(f"Deterministic analysis: {total_filtered_before_vlm} segments (budget/gating/fast-mode)")
+
         status_callback(
-            "Prefilter sampled "
-            f"{total_prefilter_samples} frames and shortlisted {total_prefilter_shortlisted}/"
-            f"{len(candidate_segments)} segments before VLM analysis."
-        )
-        status_callback(f"VLM target segments: {total_vlm_targets}.")
-        status_callback(
-            "AI outcomes: "
+            f"AI results: "
             f"live={ai_runtime_stats.live_segment_count}, "
-            f"cache={ai_runtime_stats.cached_segment_count}, "
-            f"fallback={ai_runtime_stats.fallback_segment_count}, "
-            f"skipped={total_filtered_before_vlm}."
+            f"cached={ai_runtime_stats.cached_segment_count}, "
+            f"fallback={ai_runtime_stats.fallback_segment_count}"
         )
+        status_callback("═══════════════════════════════════════════════════")
 
     take_recommendations = build_take_recommendations(assets, candidate_segments)
     timeline = build_timeline(take_recommendations, candidate_segments, assets)
@@ -470,7 +693,8 @@ def synthesize_quality_metrics(
         prefilter_score = clamp(prefilter_snapshot.get("prefilter_score", 0.0))
         hook_strength = clamp((prefilter_score * 0.5) + (subject_clarity * 0.25) + (motion_energy * 0.25))
         story_alignment = clamp((prefilter_score * 0.45) + (visual_novelty * 0.25) + (subject_clarity * 0.2) + (duration_fit * 0.1))
-        speech_presence = 0.92 if analysis_mode == "speech" else 0.0
+        audio_energy = clamp(prefilter_snapshot.get("audio_energy", 0.0))
+        speech_ratio = clamp(prefilter_snapshot.get("speech_ratio", 0.0))
         return {
             "sharpness": round(sharpness, 4),
             "stability": round(stability, 4),
@@ -478,7 +702,8 @@ def synthesize_quality_metrics(
             "subject_clarity": round(subject_clarity, 4),
             "motion_energy": round(motion_energy, 4),
             "duration_fit": round(duration_fit, 4),
-            "speech_presence": round(speech_presence, 4),
+            "audio_energy": round(audio_energy, 4),
+            "speech_ratio": round(speech_ratio, 4),
             "hook_strength": round(hook_strength, 4),
             "story_alignment": round(story_alignment, 4),
         }
@@ -492,7 +717,6 @@ def synthesize_quality_metrics(
     subject_clarity = clamp(0.58 + seeded_value(asset.proxy_path, duration, start_sec) * 0.32)
     hook_strength = clamp(0.52 + seeded_value(asset.interchange_reel_name, end_sec, duration) * 0.38)
     story_alignment = clamp(0.55 + seeded_value(asset.source_path, start_sec, duration) * 0.35)
-    speech_presence = 0.92 if analysis_mode == "speech" else 0.0
 
     return {
         "sharpness": round(clamp(0.62 + seed * 0.28), 4),
@@ -501,7 +725,8 @@ def synthesize_quality_metrics(
         "subject_clarity": round(subject_clarity, 4),
         "motion_energy": round(motion_energy, 4),
         "duration_fit": round(duration_fit, 4),
-        "speech_presence": round(speech_presence, 4),
+        "audio_energy": 0.0,
+        "speech_ratio": 0.0,
         "hook_strength": round(hook_strength, 4),
         "story_alignment": round(story_alignment, 4),
     }
@@ -608,6 +833,52 @@ def select_ai_target_segment_ids(
     )
 
 
+def select_vlm_targets_three_stage(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    analyzer: VisionLanguageAnalyzer,
+    prefilter_shortlist_ids: set[str],
+    max_segments_per_asset: int,
+    vlm_budget_pct: int,
+    clip_enabled: bool = False,
+) -> set[str]:
+    """
+    Select VLM targets using three-stage gating:
+    1. Filter out CLIP-gated and deduplicated segments
+    2. Apply per-asset limit
+    3. Apply global budget cap (placeholder for global logic)
+    """
+    if not analyzer.requires_keyframes:
+        return set()
+
+    # Start with shortlisted segments
+    eligible = [s for s in segments if s.id in prefilter_shortlist_ids]
+
+    # Stage 1: Filter out CLIP-gated and deduplicated segments
+    eligible = [s for s in eligible if not (s.prefilter and (s.prefilter.clip_gated or s.prefilter.deduplicated))]
+
+    # Stage 2: Apply per-asset limit
+    ranked = sorted(
+        eligible,
+        key=lambda s: (s.prefilter.metrics_snapshot.get("clip_score", 0.0) + s.prefilter.score) / 2.0
+        if s.prefilter else 0.0,
+        reverse=True,
+    )
+    per_asset_limit = max(1, min(max_segments_per_asset, len(ranked)))
+    stage2_targets = ranked[:per_asset_limit]
+
+    # Stage 3: Apply global VLM budget cap (within this asset's portion)
+    # Note: This is simplified - full implementation would coordinate across all assets
+    if vlm_budget_pct < 100 and stage2_targets:
+        budget_count = max(1, int(len(stage2_targets) * vlm_budget_pct / 100.0))
+        for i, segment in enumerate(stage2_targets):
+            if i >= budget_count and segment.prefilter is not None:
+                segment.prefilter.vlm_budget_capped = True
+
+    return {s.id for s in stage2_targets if not (s.prefilter and s.prefilter.vlm_budget_capped)}
+
+
 def select_prefilter_shortlist_ids(
     *,
     asset: Asset,
@@ -631,9 +902,20 @@ def select_prefilter_shortlist_ids(
     return {segment.id for segment in ranked[:limit]}
 
 
-def describe_prefilter_selection(*, score: float, shortlisted: bool, filtered_before_vlm: bool) -> str:
+def describe_prefilter_selection(
+    *,
+    score: float,
+    shortlisted: bool,
+    filtered_before_vlm: bool,
+    clip_gated: bool = False,
+    vlm_budget_capped: bool = False,
+) -> str:
     score_label = f"{round(score * 100):d}/100"
     if filtered_before_vlm:
+        if clip_gated:
+            return f"Gated by CLIP semantic scoring at {score_label}."
+        if vlm_budget_capped:
+            return f"Excluded by global VLM budget cap at {score_label}."
         return f"Filtered before VLM analysis during vision prefiltering at {score_label}."
     if shortlisted:
         return f"Shortlisted by vision prefiltering at {score_label}."

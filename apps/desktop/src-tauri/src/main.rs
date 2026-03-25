@@ -74,6 +74,12 @@ struct AppSettings {
     ai_concurrency: String,
     #[serde(rename = "aiCacheEnabled")]
     ai_cache_enabled: bool,
+    #[serde(rename = "audioEnabled")]
+    audio_enabled: bool,
+    #[serde(rename = "deduplicationEnabled")]
+    deduplication_enabled: bool,
+    #[serde(rename = "dedupThreshold")]
+    dedup_threshold: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +383,9 @@ fn default_app_settings() -> AppSettings {
         ai_keyframe_max_width: "448".into(),
         ai_concurrency: "2".into(),
         ai_cache_enabled: true,
+        audio_enabled: true,
+        deduplication_enabled: true,
+        dedup_threshold: "0.85".into(),
     }
 }
 
@@ -426,6 +435,15 @@ fn read_app_settings(root: &Path) -> Result<AppSettings, String> {
     }
     if let Some(value) = env_map.get("TIMELINE_AI_CACHE") {
         settings.ai_cache_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_AUDIO_ENABLED") {
+        settings.audio_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_DEDUPLICATION_ENABLED") {
+        settings.deduplication_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_DEDUP_THRESHOLD") {
+        settings.dedup_threshold = value.clone();
     }
 
     Ok(settings)
@@ -503,6 +521,15 @@ fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)>
             "TIMELINE_AI_CACHE".into(),
             if settings.ai_cache_enabled { "true".into() } else { "false".into() },
         ),
+        (
+            "TIMELINE_AI_AUDIO_ENABLED".into(),
+            if settings.audio_enabled { "true".into() } else { "false".into() },
+        ),
+        (
+            "TIMELINE_DEDUPLICATION_ENABLED".into(),
+            if settings.deduplication_enabled { "true".into() } else { "false".into() },
+        ),
+        ("TIMELINE_DEDUP_THRESHOLD".into(), sanitize_single_line(&settings.dedup_threshold)),
     ]
 }
 
