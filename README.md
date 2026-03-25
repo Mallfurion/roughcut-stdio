@@ -15,6 +15,8 @@ The goal is to help editors skip raw footage scrubbing and move directly from me
 
 📖 **Read the full vision:** [docs/manifesto.md](docs/manifesto.md)
 
+![Roughcut Stdio desktop app](docs/images/app.png)
+
 ## Quick Start
 
 **macOS setup:**
@@ -32,8 +34,6 @@ npm run view
 2. Click "Process" (the analyzer screens the footage)
 3. Review shortlisted shots and their grades
 4. Click "Export" to save a DaVinci Resolve timeline
-
-![Roughcut Stdio desktop app](docs/images/app.png)
 
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
 
@@ -89,11 +89,11 @@ See [docs/architecture.md](docs/architecture.md) for detailed design decisions a
 
 ## AI Provider Options
 
-| Provider | Setup | Speed | Quality | Best For |
-| --- | --- | --- | --- | --- |
-| **Deterministic** | None | Fast | Basic | Testing, prototyping |
-| **MLX-VLM Local** | Auto-installed | Moderate | High | Local workflows, Apple Silicon Macs |
-| **LM Studio** | Download app | Varies | High | Trying different models, non-MLX systems |
+| Provider          | Setup          | Speed    | Quality | Best For                                 |
+| ----------------- | -------------- | -------- | ------- | ---------------------------------------- |
+| **Deterministic** | None           | Fast     | Basic   | Testing, prototyping                     |
+| **MLX-VLM Local** | Auto-installed | Moderate | High    | Local workflows, Apple Silicon Macs      |
+| **LM Studio**     | Download app   | Varies   | High    | Trying different models, non-MLX systems |
 
 See [docs/configuration.md](docs/configuration.md) for setup details and examples.
 
