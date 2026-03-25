@@ -308,6 +308,19 @@ fn export_timeline(target_path: String) -> Result<String, String> {
     Ok(target.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn clean_generated() -> Result<(), String> {
+    let root = workspace_root()?;
+    let generated_dir = root.join("generated");
+    
+    if generated_dir.exists() {
+        fs::remove_dir_all(&generated_dir)
+            .map_err(|error| format!("Failed to remove generated folder: {error}"))?;
+    }
+    
+    Ok(())
+}
+
 fn workspace_root() -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -741,6 +754,7 @@ pub fn run() {
         .manage(ProcessController::default())
         .invoke_handler(tauri::generate_handler![
             check_runtime_ready,
+            clean_generated,
             export_timeline,
             get_process_state,
             inspect_media_folder,

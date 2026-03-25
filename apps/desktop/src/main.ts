@@ -162,6 +162,7 @@ type AppState = {
   process: ProcessState;
   processLogsExpanded: boolean;
   expandedClipIds: string[];
+  allClipsExpanded: boolean;
   project: LoadedProject | null;
   exportPath: string;
   exportBusy: boolean;
@@ -185,7 +186,7 @@ function createDefaultSettings(): AppSettings {
     aiMaxKeyframes: "1",
     aiKeyframeMaxWidth: "448",
     aiConcurrency: "2",
-    aiCacheEnabled: true,
+    aiCacheEnabled: true
   };
 }
 
@@ -200,7 +201,7 @@ function createInitialProcessState(): ProcessState {
     eta: "00:00",
     logs: [],
     output_path: null,
-    error: null,
+    error: null
   };
 }
 
@@ -218,10 +219,11 @@ const appState: AppState = {
   process: createInitialProcessState(),
   processLogsExpanded: false,
   expandedClipIds: [],
+  allClipsExpanded: false,
   project: null,
   exportPath: "",
   exportBusy: false,
-  exportMessage: "",
+  exportMessage: ""
 };
 
 let processPollTimer: number | null = null;
@@ -344,7 +346,7 @@ async function refreshMediaSummary() {
 
   try {
     appState.mediaSummary = await invoke<MediaFolderSummary>("inspect_media_folder", {
-      path: appState.mediaDir,
+      path: appState.mediaDir
     });
     appState.mediaSummaryError = "";
   } catch (error) {
@@ -400,15 +402,18 @@ function stopProcessPolling() {
 }
 
 async function resetWorkflow() {
-  const confirmed = await confirm(
-    "Go back to step 1 and reset the current desktop workflow state? This clears the selected folder and in-app results view.",
-    {
-      title: "Reset workflow",
-      kind: "warning",
-    },
-  );
+  const confirmed = await confirm("Go back to step 1 and reset the current desktop workflow state? This clears the selected folder and in-app results view, and deletes the generated folder.", {
+    title: "Reset workflow",
+    kind: "warning"
+  });
   if (!confirmed) {
     return;
+  }
+
+  try {
+    await invoke("clean_generated");
+  } catch (error) {
+    pushProcessLog(`Failed to clean generated folder: ${stringifyError(error)}`);
   }
 
   stopProcessPolling();
@@ -505,9 +510,7 @@ function renderCurrentStep() {
 
 function renderChooseStep() {
   const canContinue = Boolean(appState.mediaDir.trim());
-  const videoCountPill = canContinue
-    ? `<span class="pill header-pill">videos: ${escapeHtml(appState.mediaSummary ? String(appState.mediaSummary.video_count) : "unknown")}</span>`
-    : "";
+  const videoCountPill = canContinue ? `<span class="pill header-pill">videos: ${escapeHtml(appState.mediaSummary ? String(appState.mediaSummary.video_count) : "unknown")}</span>` : "";
   return `
     <section class="card view-card">
       <div class="view-head">
@@ -523,11 +526,7 @@ function renderChooseStep() {
         ${escapeHtml(appState.mediaDir || "No media folder selected yet.")}
       </p>
 
-      ${
-        appState.mediaSummaryError
-          ? `<p class="status warn">${escapeHtml(appState.mediaSummaryError)}</p>`
-          : ""
-      }
+      ${appState.mediaSummaryError ? `<p class="status warn">${escapeHtml(appState.mediaSummaryError)}</p>` : ""}
 
       <div class="action-row">
         <button id="pick-media" class="button secondary">Choose media folder</button>
@@ -562,11 +561,7 @@ function renderSettingsDialog() {
           </button>
         </div>
 
-        ${
-          appState.settingsMessage
-            ? `<p class="status ${appState.settingsMessage.startsWith("Saved") ? "ok" : "warn"}">${escapeHtml(appState.settingsMessage)}</p>`
-            : ""
-        }
+        ${appState.settingsMessage ? `<p class="status ${appState.settingsMessage.startsWith("Saved") ? "ok" : "warn"}">${escapeHtml(appState.settingsMessage)}</p>` : ""}
 
         <div class="settings-grid">
           <section class="settings-section">
@@ -631,11 +626,7 @@ function renderSettingsDialog() {
                 </label>`
                   : ""
               }
-              ${
-                provider === "deterministic"
-                  ? `<p class="muted">Deterministic mode does not require model-specific configuration.</p>`
-                  : ""
-              }
+              ${provider === "deterministic" ? `<p class="muted">Deterministic mode does not require model-specific configuration.</p>` : ""}
             </div>
           </section>
 
@@ -682,9 +673,7 @@ function renderSettingsDialog() {
 }
 
 function renderProcessStep() {
-  const processPercent = appState.process.total
-    ? Math.max(0, Math.min(100, Math.round((appState.process.processed / appState.process.total) * 100)))
-    : 0;
+  const processPercent = appState.process.total ? Math.max(0, Math.min(100, Math.round((appState.process.processed / appState.process.total) * 100))) : 0;
   const canViewResults = hasGeneratedResults() && !appState.process.running;
 
   return `
@@ -732,11 +721,7 @@ function renderProcessStep() {
         </button>
       </div>
 
-      ${
-        appState.processLogsExpanded
-          ? `<pre id="process-log" class="log-box log-box-large">${escapeHtml(appState.process.logs.join("\n"))}</pre>`
-          : ""
-      }
+      ${appState.processLogsExpanded ? `<pre id="process-log" class="log-box log-box-large">${escapeHtml(appState.process.logs.join("\n"))}</pre>` : ""}
     </section>
   `;
 }
@@ -760,8 +745,7 @@ function renderResultsStep() {
 
   const clipViews = resolveClipViews(project);
   const analysisSummary = project.project.analysis_summary ?? {};
-  const vlmAnalyzedCount =
-    (analysisSummary.ai_live_segment_count ?? 0) + (analysisSummary.ai_cached_segment_count ?? 0);
+  const vlmAnalyzedCount = (analysisSummary.ai_live_segment_count ?? 0) + (analysisSummary.ai_cached_segment_count ?? 0);
 
   return `
     <section class="card view-card">
@@ -783,10 +767,17 @@ function renderResultsStep() {
       </p>
 
       <div class="review-summary">
-        ${metric("Project", project.project.name)}
-        ${metric("Clips", String(clipViews.length))}
-        ${metric("Sections", String(project.candidate_segments.length))}
-        ${metric("VLM analyzed", String(vlmAnalyzedCount))}
+        <div class="review-summary-metrics">
+          ${metric("Project", project.project.name)}
+          ${metric("Clips", String(clipViews.length))}
+          ${metric("Sections", String(project.candidate_segments.length))}
+          ${metric("VLM analyzed", String(vlmAnalyzedCount))}
+        </div>
+        <button id="toggle-all-clips" class="icon-button" title="${appState.allClipsExpanded ? "Collapse all" : "Expand all"}" aria-label="${appState.allClipsExpanded ? "Collapse all clips" : "Expand all clips"}">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            ${appState.allClipsExpanded ? '<path d="M19 13H5v-2h14v2Z" />' : '<path d="M4 14h6v6h2v-6h6v-2h-6V6h-2v6H4v2Z" />'}
+          </svg>
+        </button>
       </div>
 
       <div class="clip-grid">
@@ -828,7 +819,7 @@ function updateSettingsDraft(patch: Partial<AppSettings>) {
   }
   appState.settingsDraft = {
     ...appState.settingsDraft,
-    ...patch,
+    ...patch
   };
 }
 
@@ -847,7 +838,7 @@ function bindActions() {
         const selected = await open({
           directory: true,
           multiple: false,
-          title: "Choose the media folder for Roughcut Stdio",
+          title: "Choose the media folder for Roughcut Stdio"
         });
         console.log("[roughcut-stdio] media folder picker result:", selected);
         if (typeof selected === "string" && selected.trim()) {
@@ -880,7 +871,7 @@ function bindActions() {
         ...createInitialProcessState(),
         running: true,
         status: "starting",
-        logs: ["Starting process run..."],
+        logs: ["Starting process run..."]
       };
       render();
 
@@ -888,8 +879,8 @@ function bindActions() {
         await invoke("start_process", {
           request: {
             mediaDir: appState.mediaDir,
-            aiMode: appState.aiMode,
-          },
+            aiMode: appState.aiMode
+          }
         });
         ensureProcessPolling();
       } catch (error) {
@@ -909,7 +900,7 @@ function bindActions() {
       if (appState.settings) {
         appState.settings = {
           ...appState.settings,
-          aiMode: appState.aiMode,
+          aiMode: appState.aiMode
         };
       }
       render();
@@ -940,7 +931,7 @@ function bindActions() {
       try {
         const targetPath = await save({
           title: "Export DaVinci Resolve Timeline",
-          defaultPath: "roughcut-stdio.fcpxml",
+          defaultPath: "roughcut-stdio.fcpxml"
         });
         if (!targetPath) {
           appState.exportBusy = false;
@@ -948,7 +939,7 @@ function bindActions() {
           return;
         }
         const exported = await invoke<string>("export_timeline", {
-          targetPath,
+          targetPath
         });
         appState.exportPath = exported;
         appState.exportMessage = `Exported Resolve timeline to ${exported}`;
@@ -958,6 +949,13 @@ function bindActions() {
         appState.exportBusy = false;
         render();
       }
+    };
+  }
+
+  const toggleAllClipsButton = document.getElementById("toggle-all-clips");
+  if (toggleAllClipsButton) {
+    toggleAllClipsButton.onclick = () => {
+      toggleAllClips();
     };
   }
 
@@ -1000,7 +998,7 @@ function bindActions() {
   if (settingsProvider) {
     settingsProvider.onchange = () => {
       updateSettingsDraft({
-        aiProvider: settingsProvider.value as AIProvider,
+        aiProvider: settingsProvider.value as AIProvider
       });
       render();
     };
@@ -1010,7 +1008,7 @@ function bindActions() {
   if (settingsAIMode) {
     settingsAIMode.onchange = () => {
       updateSettingsDraft({
-        aiMode: settingsAIMode.value === "full" ? "full" : "fast",
+        aiMode: settingsAIMode.value === "full" ? "full" : "fast"
       });
     };
   }
@@ -1051,7 +1049,7 @@ function bindActions() {
       render();
       try {
         const saved = await invoke<AppSettings>("save_app_settings", {
-          settings: appState.settingsDraft,
+          settings: appState.settingsDraft
         });
         appState.settings = saved;
         appState.aiMode = saved.aiMode;
@@ -1070,10 +1068,7 @@ function bindActions() {
   syncProcessLogScroll();
 }
 
-function bindTextSetting(
-  id: string,
-  apply: (value: string) => void,
-) {
+function bindTextSetting(id: string, apply: (value: string) => void) {
   const element = document.getElementById(id) as HTMLInputElement | HTMLTextAreaElement | null;
   if (!element) {
     return;
@@ -1087,9 +1082,7 @@ function resolveClipViews(project: TimelineProject) {
   return project.assets
     .map((asset) => ({
       asset,
-      segments: project.candidate_segments
-        .filter((segment) => segment.asset_id === asset.id)
-        .sort((left, right) => left.start_sec - right.start_sec),
+      segments: project.candidate_segments.filter((segment) => segment.asset_id === asset.id).sort((left, right) => left.start_sec - right.start_sec)
     }))
     .filter((view) => view.segments.length > 0);
 }
@@ -1136,17 +1129,13 @@ function renderSegmentCard(segment: CandidateSegment) {
             <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
             <span class="pill section-pill">score ${formatScore(score)}</span>
             <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
-            <span class="pill section-pill">${escapeHtml(ai?.keep_label || "n/a")}</span>
-            <span class="pill section-pill">${formatConfidence(ai?.confidence)}</span>
+            ${formatKeepLabelWithColor(ai?.keep_label)}
+            ${formatConfidenceWithColor(ai?.confidence)}
           </div>
         </div>
       </div>
       <p class="section-summary">${escapeHtml(vlmText)}</p>
-      ${
-        rationale
-          ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>`
-          : ""
-      }
+      ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
       <div class="meta-list section-meta">
         ${renderOptionalMeta(ai?.shot_type)}
         ${renderOptionalMeta(ai?.camera_motion)}
@@ -1154,10 +1143,6 @@ function renderSegmentCard(segment: CandidateSegment) {
       </div>
     </article>
   `;
-}
-
-function formatDuration(start: number, end: number) {
-  return `${Math.max(0, end - start).toFixed(2)}s`;
 }
 
 function formatSegmentRange(start: number, end: number) {
@@ -1168,11 +1153,42 @@ function formatScore(value: number) {
   return `${Math.round(value * 100)}`;
 }
 
-function formatConfidence(value?: number) {
+function formatConfidenceWithColor(value?: number) {
   if (typeof value !== "number") {
-    return "0%";
+    return `<span class="pill section-pill" style="background-color: #ef4444; color: white;">0%</span>`;
   }
-  return `${Math.round(value * 100)}%`;
+  const confidence = Math.max(0, Math.min(1, value));
+  const percentage = Math.round(confidence * 100);
+
+  // Create gradient from red (hue 0) to green (hue 120)
+  const hue = confidence * 120;
+  // Use darker background (80% lightness) with white text for better contrast
+  const backgroundColor = `hsl(${hue}, 80%, 40%)`;
+
+  return `<span class="pill section-pill" style="background-color: ${backgroundColor}; color: white;">${percentage}%</span>`;
+}
+
+function formatKeepLabelWithColor(keepLabel?: string) {
+  if (!keepLabel || keepLabel === "n/a") {
+    return `<span class="pill section-pill" style="background-color: #6b7280; color: white;">${escapeHtml(keepLabel || "n/a")}</span>`;
+  }
+
+  // Light green for "keep", light red for "discard"
+  const color = keepLabel.toLowerCase() === "keep" ? "#c2f5d4" : "#ffbfbf";
+  return `<span class="pill section-pill" style="color: ${color};">${escapeHtml(keepLabel)}</span>`;
+}
+
+function toggleAllClips() {
+  appState.allClipsExpanded = !appState.allClipsExpanded;
+  if (appState.allClipsExpanded) {
+    const project = appState.project?.project;
+    if (project) {
+      appState.expandedClipIds = project.assets.map((asset) => asset.id);
+    }
+  } else {
+    appState.expandedClipIds = [];
+  }
+  render();
 }
 
 function renderOptionalMeta(value?: string) {
@@ -1182,20 +1198,8 @@ function renderOptionalMeta(value?: string) {
   return `<span>${escapeHtml(value)}</span>`;
 }
 
-function titleCase(input: string) {
-  if (!input) {
-    return "Idle";
-  }
-  return input.charAt(0).toUpperCase() + input.slice(1);
-}
-
 function escapeHtml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 function stringifyError(error: unknown) {
