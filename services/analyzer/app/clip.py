@@ -3,10 +3,22 @@ from __future__ import annotations
 import logging
 from typing import Optional
 from pathlib import Path
-from PIL import Image
-import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Lazy imports for optional CLIP dependencies
+Image = None
+np = None
+
+try:
+    from PIL import Image
+except ImportError:
+    pass
+
+try:
+    import numpy as np
+except ImportError:
+    pass
 
 
 def is_available() -> bool:

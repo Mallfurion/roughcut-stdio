@@ -85,7 +85,7 @@ class CLIPDeduplicator:
             if len(group_indices) > 1:
                 group_count += 1
                 # Select keeper (highest composite score)
-                keeper_idx = self._select_keeper(segments, group_indices)
+                keeper_idx = self._select_keeper(segments, group_indices, valid_indices)
 
                 for idx in group_indices:
                     segment = segments[valid_indices[idx]]
@@ -171,7 +171,7 @@ class CLIPDeduplicator:
 
         return clusters
 
-    def _select_keeper(self, segments: list[CandidateSegment], group_indices: list[int]) -> int:
+    def _select_keeper(self, segments: list[CandidateSegment], group_indices: list[int], valid_indices: list[int]) -> int:
         """
         Select the keeper segment from a dedup group.
 
@@ -180,15 +180,16 @@ class CLIPDeduplicator:
         Args:
             segments: All candidate segments
             group_indices: Indices into embeddings array (which map to segments via valid_indices)
+            valid_indices: Mapping from embeddings-space indices to segments-space indices
 
         Returns:
-            Index of the keeper in the group_indices list
+            Index of the keeper in the group_indices list (embeddings-space index)
         """
         best_idx = 0
         best_score = -1.0
 
         for idx in group_indices:
-            segment = segments[idx]
+            segment = segments[valid_indices[idx]]
             if segment.prefilter is None:
                 continue
 

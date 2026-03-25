@@ -158,13 +158,23 @@ def apply_deduplication_results(
     """
     Apply deduplication results to segment prefilter records.
 
-    Modifies segments in-place, setting deduplicated flag and dedup_group_id.
+    Modifies segments in-place, setting deduplicated flag, dedup_group_id, and selection_reason.
     """
     for segment in segments:
         if segment.prefilter is not None and segment.id in dedup_results:
             deduplicated, group_id = dedup_results[segment.id]
             segment.prefilter.deduplicated = deduplicated
             segment.prefilter.dedup_group_id = group_id
+
+            if deduplicated:
+                # Find the keeper segment (highest-scoring non-deduplicated segment in this group)
+                keeper = next(
+                    (s for s in segments
+                     if s.prefilter and s.prefilter.dedup_group_id == group_id and not s.prefilter.deduplicated),
+                    None
+                )
+                if keeper:
+                    segment.prefilter.selection_reason = f"Duplicate of segment {keeper.id} (histogram similarity)"
 
 
 def is_deduplication_enabled() -> bool:

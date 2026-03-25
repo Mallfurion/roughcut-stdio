@@ -20,8 +20,17 @@ from .ai import (
     get_ai_runtime_stats,
     load_ai_analysis_config,
 )
-from .clip import CLIPScorer, is_available as is_clip_available
-from .clip_dedup import CLIPDeduplicator
+
+# Lazy imports for optional CLIP dependencies
+CLIPScorer = None
+CLIPDeduplicator = None
+is_clip_available = lambda: False
+
+try:
+    from .clip import CLIPScorer, is_available as is_clip_available
+    from .clip_dedup import CLIPDeduplicator
+except ImportError:
+    pass
 from .deduplication import (
     HistogramDeduplicator,
     apply_deduplication_results,
@@ -201,8 +210,12 @@ def analyze_assets(
     total_clip_gated = 0
     deduplication_enabled = is_deduplication_enabled()
     dedup_threshold = get_dedup_threshold()
+    total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
+    total_dedup_eliminated_count = 0  # Accumulate deduplicated segment count
 
     total_assets = len(assets)
+    all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
+
     for asset_index, asset in enumerate(assets, start=1):
         if status_callback is not None:
             status_callback(f"[{asset_index}/{total_assets}] Analyzing: {asset.name}")
@@ -294,6 +307,7 @@ def analyze_assets(
                     )
                     matching_signals = [nearest]
                 frame_signals_by_id[segment.id] = matching_signals
+                all_frame_signals_by_id[segment.id] = matching_signals  # Accumulate for histogram dedup fallback
 
             dedup_results = deduplicate_segments(
                 segments=asset_segments,
@@ -340,7 +354,7 @@ def analyze_assets(
 
         # CLIP scoring pass (if enabled and available)
         clip_scorer = None
-        if ai_config.clip_enabled and is_clip_available():
+        if ai_config.clip_enabled and is_clip_available() and CLIPScorer is not None:
             if status_callback is not None:
                 status_callback(f"  ✓ CLIP semantic scoring {len(prefilter_shortlist_ids)} shortlisted segments...")
 
@@ -387,24 +401,25 @@ def analyze_assets(
                     status_callback(f"  ✓ Deduplicating {len(shortlisted_segments)} shortlisted segments...")
 
                 try:
-                    if clip_scorer is not None:
+                    if clip_scorer is not None and CLIPDeduplicator is not None:
                         # Use CLIP-based dedup
                         deduplicator = CLIPDeduplicator(clip_scorer)
                         deduplicator.deduplicate(shortlisted_segments)
                     else:
-                        # Use histogram fallback
-                        frame_signals_by_id = {}
-                        for segment in active_segments:
-                            if hasattr(segment, '_frame_signals'):
-                                frame_signals_by_id[segment.id] = segment._frame_signals
+                        # Use histogram fallback (use frame signals accumulated from prefilter dedup pass)
+                        frame_signals_by_id = {
+                            segment_id: signals
+                            for segment_id, signals in all_frame_signals_by_id.items()
+                            if any(s.id == segment_id for s in active_segments)
+                        }
                         deduplicator = HistogramDeduplicator(frame_signals_by_id, threshold=get_dedup_threshold())
                         deduplicator.deduplicate(shortlisted_segments)
 
                     # Count dedup results for summary
                     dedup_groups = set(s.prefilter.dedup_group_id for s in shortlisted_segments if s.prefilter.dedup_group_id is not None)
                     dedup_eliminated = sum(1 for s in shortlisted_segments if s.prefilter and s.prefilter.deduplicated)
-                    project.analysis_summary["clip_dedup_group_count" if clip_scorer else "histogram_dedup_group_count"] = len(dedup_groups)
-                    project.analysis_summary["clip_dedup_eliminated_count" if clip_scorer else "histogram_dedup_eliminated_count"] = dedup_eliminated
+                    total_dedup_group_count += len(dedup_groups)
+                    total_dedup_eliminated_count += dedup_eliminated
 
                     if dedup_eliminated > 0 and status_callback is not None:
                         status_callback(f"    → Eliminated {dedup_eliminated} near-duplicate(s)")
@@ -436,6 +451,9 @@ def analyze_assets(
         # Build prefilter selection reasons and apply analysis
         for segment in asset_segments:
             if segment.prefilter is not None:
+                # Skip deduplicated segments — preserve their dedup-specific selection_reason
+                if segment.prefilter.deduplicated:
+                    continue
                 segment.prefilter.filtered_before_vlm = analyzer.requires_keyframes and segment.id not in ai_target_ids
                 segment.prefilter.selection_reason = describe_prefilter_selection(
                     score=segment.prefilter.score,
@@ -487,6 +505,8 @@ def analyze_assets(
         "prefilter_sample_count": total_prefilter_samples,
         "candidate_segment_count": len(candidate_segments),
         "deduplicated_segment_count": total_deduplicated_segments if deduplication_enabled else 0,
+        "dedup_group_count": total_dedup_group_count if deduplication_enabled else 0,
+        "dedup_eliminated_count": total_dedup_eliminated_count if deduplication_enabled else 0,
         "prefilter_shortlisted_count": total_prefilter_shortlisted,
         "vlm_target_count": total_vlm_targets,
         "filtered_before_vlm_count": total_filtered_before_vlm,
