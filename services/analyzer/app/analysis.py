@@ -28,7 +28,13 @@ from .domain import (
     TimelineItem,
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
-from .prefilter import aggregate_segment_prefilter, build_prefilter_segments, sample_asset_signals
+from .prefilter import (
+    aggregate_segment_prefilter,
+    build_prefilter_segments,
+    sample_asset_signals,
+    sample_audio_signals,
+    sample_timestamps,
+)
 from .scoring import score_segment
 
 
@@ -177,18 +183,24 @@ def analyze_assets(
     total_prefilter_shortlisted = 0
     total_vlm_targets = 0
     total_filtered_before_vlm = 0
+    total_audio_signal_assets = 0
 
     total_assets = len(assets)
     for asset_index, asset in enumerate(assets, start=1):
         base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
         if not base_ranges:
             base_ranges = fallback_segments(asset.duration_sec)
-        prefilter_signals = sample_asset_signals(asset)
+        timestamps = sample_timestamps(asset.duration_sec)
+        prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+        audio_signals = sample_audio_signals(asset, timestamps)
         total_prefilter_samples += len(prefilter_signals)
+        if any(sig.source == "ffmpeg" for sig in audio_signals):
+            total_audio_signal_assets += 1
         segment_ranges = build_prefilter_segments(
             asset=asset,
             base_ranges=base_ranges,
             signals=prefilter_signals,
+            audio_signals=audio_signals,
             top_windows=2 if ai_config.mode == "fast" else 3,
         )
         if not segment_ranges:
@@ -202,6 +214,7 @@ def analyze_assets(
                 signals=prefilter_signals,
                 start_sec=start_sec,
                 end_sec=end_sec,
+                audio_signals=audio_signals,
             )
             metrics = synthesize_quality_metrics(
                 asset,
@@ -309,6 +322,8 @@ def analyze_assets(
         "prefilter_shortlisted_count": total_prefilter_shortlisted,
         "vlm_target_count": total_vlm_targets,
         "filtered_before_vlm_count": total_filtered_before_vlm,
+        "audio_signal_asset_count": total_audio_signal_assets,
+        "audio_silent_asset_count": total_assets - total_audio_signal_assets,
     }
     ai_runtime_stats = get_ai_runtime_stats(analyzer)
     project.analysis_summary.update(
@@ -324,6 +339,9 @@ def analyze_assets(
             "Prefilter sampled "
             f"{total_prefilter_samples} frames and shortlisted {total_prefilter_shortlisted}/"
             f"{len(candidate_segments)} segments before VLM analysis."
+        )
+        status_callback(
+            f"Audio signal: {total_audio_signal_assets}/{total_assets} assets had audio coverage."
         )
         status_callback(f"VLM target segments: {total_vlm_targets}.")
         status_callback(
@@ -470,7 +488,8 @@ def synthesize_quality_metrics(
         prefilter_score = clamp(prefilter_snapshot.get("prefilter_score", 0.0))
         hook_strength = clamp((prefilter_score * 0.5) + (subject_clarity * 0.25) + (motion_energy * 0.25))
         story_alignment = clamp((prefilter_score * 0.45) + (visual_novelty * 0.25) + (subject_clarity * 0.2) + (duration_fit * 0.1))
-        speech_presence = 0.92 if analysis_mode == "speech" else 0.0
+        audio_energy = clamp(prefilter_snapshot.get("audio_energy", 0.0))
+        speech_ratio = clamp(prefilter_snapshot.get("speech_ratio", 0.0))
         return {
             "sharpness": round(sharpness, 4),
             "stability": round(stability, 4),
@@ -478,7 +497,8 @@ def synthesize_quality_metrics(
             "subject_clarity": round(subject_clarity, 4),
             "motion_energy": round(motion_energy, 4),
             "duration_fit": round(duration_fit, 4),
-            "speech_presence": round(speech_presence, 4),
+            "audio_energy": round(audio_energy, 4),
+            "speech_ratio": round(speech_ratio, 4),
             "hook_strength": round(hook_strength, 4),
             "story_alignment": round(story_alignment, 4),
         }
@@ -492,7 +512,6 @@ def synthesize_quality_metrics(
     subject_clarity = clamp(0.58 + seeded_value(asset.proxy_path, duration, start_sec) * 0.32)
     hook_strength = clamp(0.52 + seeded_value(asset.interchange_reel_name, end_sec, duration) * 0.38)
     story_alignment = clamp(0.55 + seeded_value(asset.source_path, start_sec, duration) * 0.35)
-    speech_presence = 0.92 if analysis_mode == "speech" else 0.0
 
     return {
         "sharpness": round(clamp(0.62 + seed * 0.28), 4),
@@ -501,7 +520,8 @@ def synthesize_quality_metrics(
         "subject_clarity": round(subject_clarity, 4),
         "motion_energy": round(motion_energy, 4),
         "duration_fit": round(duration_fit, 4),
-        "speech_presence": round(speech_presence, 4),
+        "audio_energy": 0.0,
+        "speech_ratio": 0.0,
         "hook_strength": round(hook_strength, 4),
         "story_alignment": round(story_alignment, 4),
     }
