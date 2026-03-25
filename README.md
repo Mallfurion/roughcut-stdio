@@ -33,6 +33,8 @@ npm run view
 3. Review shortlisted shots and their grades
 4. Click "Export" to save a DaVinci Resolve timeline
 
+![Roughcut Stdio desktop app](docs/images/app.png)
+
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
 
 ## How It Works
