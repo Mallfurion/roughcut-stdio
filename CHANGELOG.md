@@ -2,6 +2,66 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-26
+
+### 🚀 Features
+
+#### Semantic Quality Filtering with CLIP
+
+- Add CLIP-based semantic scoring to measure editorial quality of shortlisted segments
+- Implement configurable quality gating via `TIMELINE_AI_CLIP_MIN_SCORE` (default 0.35)
+- Support custom CLIP models via `TIMELINE_AI_CLIP_MODEL` (default: ViT-B-32)
+- Gracefully degrade to histogram dedup when CLIP unavailable
+
+#### Intelligent Segment Deduplication
+
+- Implement CLIP embedding-based deduplication (cosine similarity ≥ 0.95)
+- Add histogram fallback dedup for non-CLIP environments (configurable threshold)
+- Deduplicate after prefilter scoring, before VLM analysis to eliminate redundant takes
+- Track dedup statistics: group count and eliminated segment count in analysis summary
+
+#### VLM Budget Controls
+
+- Add `TIMELINE_AI_VLM_BUDGET_PCT` setting to cap Vision Language Model analysis depth
+- Implement three-stage gating: dedup filter → CLIP quality gate → per-asset budget cap
+- Route budget-capped segments to fast deterministic analysis instead
+- Enable cost-proportional scaling for large projects
+
+#### Audio-Aware Prefiltering
+
+- Extract audio signals: RMS energy + silence detection (ffmpeg astats + silencedetect)
+- Identify audio peaks as candidate segment windows alongside visual peaks
+- Route segments as "speech" or "visual" mode for analysis
+- Improve handling of interview-heavy and dialogue-centric footage
+
+#### Enhanced UI & Configuration
+
+- Add desktop app controls for clipEnabled, clipMinScore, vlmBudgetPct
+- Document all configuration options in environment variable table
+
+### 🛠 Fixes & Improvements
+
+#### Pipeline Robustness
+
+- Fix hard imports of optional CLIP dependencies (PIL, numpy) that broke non-CLIP installs
+- Fix CLIPDeduplicator index bug that could silently pick wrong keeper when embeddings missing
+- Fix histogram fallback dedup no-op by properly accumulating and passing frame signals
+- Fix dedup reporting: preserve dedup-specific selection_reason instead of overwriting
+- Fix apply_deduplication_results() to properly set selection_reason for deduplicated segments
+
+#### Documentation & Observability
+
+- Add comprehensive analyzer-pipeline.md documenting all four analysis phases
+- Add architecture.md with design decisions and extensibility points
+- Add configuration.md with all environment variable defaults and examples
+- Include dedup group count and eliminated count in analysis_summary
+- Improve segment selection_reason clarity for all filtering paths
+
+### 📦 Other
+
+- Organize analyzer enhancements with OpenSpec structured changes tracking
+- All new features optional with graceful degradation (no breaking changes)
+
 ## [1.1.0] - 2026-03-25
 
 ### 🚀 Features
