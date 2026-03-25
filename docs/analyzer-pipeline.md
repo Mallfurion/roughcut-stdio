@@ -113,45 +113,77 @@ Each segment also receives a `PrefilterDecision` that records its prefilter scor
 
 **Output:** a `CandidateSegment` for each range, with quality metrics attached.
 
-### Step 2.6 — Segment Deduplication
+### Step 2.6 — Shortlist Selection
 
-After all candidate segments have been scored with the prefilter, the analyzer removes near-duplicate segments within each asset using histogram-based visual similarity.
+In **fast mode**, only the top `max_segments_per_asset` candidates by prefilter score proceed to the next stages. The rest are marked `filtered_before_vlm=true` and receive a deterministic understanding instead of a VLM call.
 
-The deduplication process:
+In **full mode**, all candidates proceed.
 
-1. Computes a 256-bin grayscale histogram from the sampled frame signals for each segment
-2. Compares histograms across candidate segments within the same asset using histogram intersection
-3. Groups segments whose similarity exceeds a configurable threshold (default: 0.85)
-4. Retains the highest-scoring candidate in each group and marks the rest as `deduplicated`
-5. Assigns a sequential `dedup_group_id` to each group for traceability
+**Output:** a set of segment IDs designated as the shortlist for evidence building and downstream analysis.
 
-Deduplicated segments do not proceed to the shortlist, do not receive keyframe extraction, and do not count toward `max_segments_per_asset` limits. However, they are retained in `generated/project.json` with their elimination reason recorded.
+### Step 2.7 — Evidence Building
 
-This step improves signal-to-noise ratio in the review workspace by preventing multiple variants of the same shot (e.g., three windows around a static 12-second wide shot with different start times) from reaching the VLM and final timeline.
-
-**Output:** `PrefilterDecision` records updated with `deduplicated` flag and `dedup_group_id` for each segment.
-
-### Step 2.7 — Shortlist Selection
-
-In **fast mode**, only the top `max_segments_per_asset` non-deduplicated candidates by prefilter score proceed to the next stages. The rest are marked `filtered_before_vlm=true` and receive a deterministic understanding instead of a VLM call.
-
-In **full mode**, all non-deduplicated candidates proceed.
-
-**Output:** a set of segment IDs designated for VLM targeting.
-
-### Step 2.8 — Evidence Building
-
-For each segment in the VLM target set, the analyzer extracts keyframes and prepares an evidence bundle.
+For each shortlisted segment, the analyzer extracts keyframes and prepares an evidence bundle.
 
 - 3 keyframes are extracted for segments under 8 seconds; 4 for longer segments
 - Keyframes are evenly spaced within the segment's time range
 - If more than one keyframe is extracted, they are stitched horizontally into a **contact sheet** using ffmpeg
-- The contact sheet (or the first keyframe if stitching is unavailable) becomes the primary visual input for the VLM
-- The evidence bundle also records the segment's context window: the start of the preceding segment and the end of the following segment, giving the model temporal context
+- The contact sheet (or the first keyframe if stitching is unavailable) becomes the primary visual input for downstream analysis
+- The evidence bundle also records the segment's context window: the start of the preceding segment and the end of the following segment, giving context for analysis
 
-**Output:** a `SegmentEvidence` record per segment, including keyframe paths, contact sheet path, transcript, and metrics.
+**Output:** a `SegmentEvidence` record per shortlisted segment, including keyframe paths, contact sheet path, transcript, and metrics.
 
-### Step 2.9 — AI Analysis
+### Step 2.8 — CLIP Semantic Scoring
+
+If `TIMELINE_AI_CLIP_ENABLED=true` and the `open-clip-torch` library is installed, the analyzer runs CLIP inference on each shortlisted segment's contact sheet to measure semantic alignment with editorial quality criteria.
+
+The scoring uses a fixed set of positive prompts (e.g., "cinematic shot with clear subject") and negative prompts (e.g., "blurry or out of focus footage") to produce a `clip_score` in [0, 1] per segment. Segments scoring below `TIMELINE_AI_CLIP_MIN_SCORE` (default 0.35) are marked as `clip_gated=true` and excluded from VLM targeting; they receive deterministic understanding instead.
+
+The CLIP score is also incorporated into the final scoring calculation as a semantic input when available.
+
+If `open-clip-torch` is not installed or an error occurs during model loading, CLIP scoring is silently disabled and the pipeline continues without interruption.
+
+**Output:** `clip_score` added to prefilter metrics snapshot; `clip_gated` flag set on `PrefilterDecision` for segments below threshold.
+
+### Step 2.9 — Segment Deduplication (CLIP or Histogram)
+
+After CLIP scoring completes, the analyzer removes near-duplicate segments across all assets using semantic similarity.
+
+If `TIMELINE_AI_CLIP_ENABLED=true` and CLIP scoring succeeded, the deduplication uses CLIP embeddings:
+1. Extracts CLIP embeddings for each shortlisted segment (reusing embeddings cached during scoring)
+2. Computes cosine similarity between all segment pairs
+3. Groups segments with similarity >= 0.95 into clusters
+4. Retains the highest-scoring segment in each group (by composite score: `(prefilter_score + clip_score) / 2.0`)
+5. Marks remaining segments in the group as `deduplicated=true` and assigns `dedup_group_id`
+
+If CLIP is disabled or unavailable, histogram-based deduplication is used instead:
+1. Computes 256-bin grayscale histograms from sampled frame signals
+2. Compares histograms using histogram intersection
+3. Groups segments whose similarity exceeds `TIMELINE_DEDUP_THRESHOLD` (default: 0.85)
+4. Retains the highest-scoring segment in each group (by prefilter score)
+5. Marks remaining segments as `deduplicated=true` and assigns `dedup_group_id`
+
+Deduplicated segments do not receive VLM targeting. They are retained in `generated/project.json` with their elimination reason recorded and may receive deterministic understanding.
+
+This step improves signal-to-noise ratio by preventing multiple variants of the same shot (e.g., different windows around a static moment, or semantically identical content) from reaching the final timeline.
+
+**Output:** `PrefilterDecision` records updated with `deduplicated` flag and `dedup_group_id`; dedup statistics added to analysis summary.
+
+### Step 2.10 — VLM Target Selection
+
+After deduplication, the analyzer selects which shortlisted segments will receive VLM analysis using a three-stage gate:
+
+1. **Stage 1: Dedup filter** — Exclude segments marked `deduplicated=true`
+2. **Stage 2: CLIP gate** — Exclude segments marked `clip_gated=true` (if CLIP is enabled)
+3. **Stage 3: Per-asset limit and budget cap** — Select the top `max_segments_per_asset` per asset; if `TIMELINE_AI_VLM_BUDGET_PCT` is below 100%, limit total VLM targets to that percentage of candidates and mark remaining eligible segments as `vlm_budget_capped=true`
+
+Excluded segments receive deterministic understanding instead of VLM analysis.
+
+This multi-stage approach keeps VLM cost proportional to project size while maintaining quality through deduplication and semantic filtering.
+
+**Output:** a set of segment IDs designated for VLM targeting; `vlm_budget_capped` flag set for segments excluded by the budget cap.
+
+### Step 2.11 — AI Analysis
 
 Each segment in the VLM target set is sent for analysis. The analyzer supports three providers:
 
@@ -227,7 +259,9 @@ The pipeline filters footage progressively:
 | Frame sampling | Frames that ffmpeg cannot extract (corrupt or missing) |
 | Deduplication | Near-duplicate segments within each asset (keep highest-scoring of similar group) |
 | Prefilter shortlist | Low-scoring segments that do not reach `max_segments_per_asset` in fast mode |
-| VLM targeting | Segments already filtered by shortlist — sent to deterministic path instead |
+| CLIP gate | Segments scoring below `TIMELINE_AI_CLIP_MIN_SCORE` (if CLIP enabled) — sent to deterministic path instead |
+| VLM budget cap | Segments excluded by global budget percentage limit (if set below 100%) — sent to deterministic path instead |
+| VLM targeting | Remaining segments: either in VLM target set or sent to deterministic understanding |
 | Take selection | All segments below the score threshold, except the highest scorer per asset as a fallback |
 
 Segments removed at any stage remain in `generated/project.json` with their reason for removal recorded. Nothing is silently discarded.
@@ -248,6 +282,15 @@ The pipeline behavior is controlled by environment variables, typically set in `
 | `TIMELINE_AI_CONCURRENCY` | `2` | Parallel VLM requests |
 | `TIMELINE_AI_CACHE` | `true` | Whether to cache VLM responses across runs |
 | `TIMELINE_AI_AUDIO_ENABLED` | `true` | Set to `false` to skip audio signal extraction and use silent fallback for all assets |
+| `TIMELINE_AI_CLIP_ENABLED` | `true` | Set to `false` to disable CLIP semantic scoring (requires `open-clip-torch` package for enabled mode) |
+| `TIMELINE_AI_CLIP_MIN_SCORE` | `0.35` | CLIP score threshold [0, 1]; segments below this are excluded from VLM targeting |
+| `TIMELINE_AI_VLM_BUDGET_PCT` | `100` | Percentage of shortlisted candidates sent to VLM (after CLIP gating); 100 = no budget constraint |
+| `TIMELINE_AI_CLIP_MODEL` | `ViT-B-32` | CLIP model name from `open-clip-torch` (advanced configuration) |
 | `TIMELINE_STORY_PROMPT` | — | Optional narrative goal passed to the VLM as context |
 | `TIMELINE_DEDUPLICATION_ENABLED` | `true` | Set to `false` to disable near-duplicate segment removal |
-| `TIMELINE_DEDUP_THRESHOLD` | `0.85` | Histogram similarity threshold for grouping near-duplicates (0–1); higher = stricter deduplication |
+| `TIMELINE_DEDUP_THRESHOLD` | `0.85` | Histogram similarity threshold for grouping near-duplicates (0–1); used only when CLIP is disabled or unavailable; higher = stricter deduplication |
+
+**Deduplication notes:**
+- When `TIMELINE_AI_CLIP_ENABLED=true` and CLIP is available, deduplication uses CLIP embedding cosine similarity (threshold: 0.95, hardcoded)
+- When CLIP is disabled or unavailable, deduplication falls back to histogram-based similarity using `TIMELINE_DEDUP_THRESHOLD`
+- Deduplication runs after evidence building and CLIP scoring, before VLM target selection

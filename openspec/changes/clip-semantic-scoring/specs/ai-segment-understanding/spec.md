@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: System SHALL provide practical local-runtime controls for AI analysis
-In addition to per-asset shortlist controls and fast mode, the analyzer SHALL enforce a global VLM budget cap that limits total VLM targets to a configured percentage of all candidates. This cap SHALL apply after deduplication and CLIP gating and SHALL be the final gate before VLM invocation.
+In addition to per-asset shortlist controls and fast mode, the analyzer SHALL enforce a global VLM budget cap that limits total VLM targets to a configured percentage of all candidates. This cap SHALL apply after CLIP gating (if enabled) or after shortlist selection (if CLIP is disabled), and SHALL be the final gate before VLM invocation.
 
 #### Scenario: Global budget cap is configured and binding
 - **WHEN** `TIMELINE_AI_VLM_BUDGET_PCT` is set and the number of eligible segments exceeds the budget

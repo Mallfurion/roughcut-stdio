@@ -53,6 +53,8 @@ type SegmentPrefilter = {
   selection_reason: string;
   deduplicated?: boolean;
   dedup_group_id?: number;
+  clip_gated?: boolean;
+  vlm_budget_capped?: boolean;
   metrics_snapshot?: Record<string, number>;
 };
 
@@ -154,6 +156,9 @@ type AppSettings = {
   audioEnabled: boolean;
   deduplicationEnabled: boolean;
   dedupThreshold: string;
+  clipEnabled: boolean;
+  clipMinScore: string;
+  vlmBudgetPct: string;
 };
 
 type AppState = {
@@ -197,7 +202,10 @@ function createDefaultSettings(): AppSettings {
     aiCacheEnabled: true,
     audioEnabled: true,
     deduplicationEnabled: true,
-    dedupThreshold: "0.85"
+    dedupThreshold: "0.85",
+    clipEnabled: true,
+    clipMinScore: "0.35",
+    vlmBudgetPct: "100"
   };
 }
 
@@ -664,21 +672,35 @@ function renderSettingsDialog() {
                 AI concurrency
                 <input id="settings-ai-concurrency" type="number" min="1" value="${escapeHtml(draft.aiConcurrency)}" />
               </label>
+              <label class="field">
+                Dedup threshold
+                <input id="settings-dedup-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.dedupThreshold)}" />
+              </label>
+              <label class="field">
+                CLIP min score
+                <input id="settings-clip-min-score" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.clipMinScore)}" />
+              </label>
+              <label class="field">
+                VLM budget %
+                <input id="settings-vlm-budget-pct" type="number" min="0" max="100" step="1" value="${escapeHtml(draft.vlmBudgetPct)}" />
+              </label>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.5rem;">
               <label class="checkbox-field">
                 <input id="settings-ai-cache" type="checkbox" ${draft.aiCacheEnabled ? "checked" : ""} />
                 <span>Enable AI cache</span>
               </label>
               <label class="checkbox-field">
                 <input id="settings-audio-enabled" type="checkbox" ${draft.audioEnabled ? "checked" : ""} />
-                <span>Enable audio signal extraction</span>
+                <span>Enable audio extraction</span>
               </label>
               <label class="checkbox-field">
                 <input id="settings-deduplication-enabled" type="checkbox" ${draft.deduplicationEnabled ? "checked" : ""} />
                 <span>Enable deduplication</span>
               </label>
-              <label class="field">
-                Dedup threshold
-                <input id="settings-dedup-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.dedupThreshold)}" />
+              <label class="checkbox-field">
+                <input id="settings-clip-enabled" type="checkbox" ${draft.clipEnabled ? "checked" : ""} />
+                <span>Enable CLIP semantic scoring</span>
               </label>
             </div>
           </section>
@@ -1077,6 +1099,16 @@ function bindActions() {
 
   bindTextSetting("settings-dedup-threshold", (value) => updateSettingsDraft({ dedupThreshold: value }));
 
+  const settingsClipEnabled = document.getElementById("settings-clip-enabled") as HTMLInputElement | null;
+  if (settingsClipEnabled) {
+    settingsClipEnabled.onchange = () => {
+      updateSettingsDraft({ clipEnabled: settingsClipEnabled.checked });
+    };
+  }
+
+  bindTextSetting("settings-clip-min-score", (value) => updateSettingsDraft({ clipMinScore: value }));
+  bindTextSetting("settings-vlm-budget-pct", (value) => updateSettingsDraft({ vlmBudgetPct: value }));
+
   const saveSettings = document.getElementById("save-settings");
   if (saveSettings) {
     saveSettings.onclick = async () => {
@@ -1161,6 +1193,9 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
 function renderSegmentCard(segment: CandidateSegment) {
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
+  const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
+  const clipGated = segment.prefilter?.clip_gated ?? false;
+  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
   const vlmText = ai?.summary || segment.description;
   const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
   const isDeduplicated = segment.prefilter?.deduplicated ?? false;
@@ -1172,10 +1207,13 @@ function renderSegmentCard(segment: CandidateSegment) {
         <div>
           <div class="pill-row">
             <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
-            <span class="pill section-pill">score ${formatScore(score)}</span>
+            <span class="pill section-pill">prefilter ${formatScore(score)}</span>
+            ${clipScore !== undefined ? `<span class="pill section-pill" title="CLIP semantic score">CLIP ${formatScore(clipScore)}</span>` : ""}
             <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
             ${isDeduplicated ? `<span class="pill pill-dedup">Duplicate (Group ${dedupGroupId})</span>` : ""}
             ${!isDeduplicated && dedupGroupId !== undefined ? `<span class="pill pill-dedup-kept">Kept (Group ${dedupGroupId})</span>` : ""}
+            ${clipGated ? `<span class="pill" style="background-color: #f97316; color: white;">CLIP Gated</span>` : ""}
+            ${vlmBudgetCapped ? `<span class="pill" style="background-color: #d946ef; color: white;">Budget Capped</span>` : ""}
             ${formatKeepLabelWithColor(ai?.keep_label)}
             ${formatConfidenceWithColor(ai?.confidence)}
           </div>
@@ -1292,8 +1330,10 @@ function renderAudioMetrics(metrics: Record<string, number> | undefined) {
   `;
 }
 
-function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+function escapeHtml(value: string | undefined | null) {
+  if (!value) return "";
+  const str = String(value);
+  return str.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 function stringifyError(error: unknown) {

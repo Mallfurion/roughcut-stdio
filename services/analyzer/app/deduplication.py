@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import logging
 from typing import Protocol
 
 from .domain import CandidateSegment
 from .prefilter import FrameSignal
+
+logger = logging.getLogger(__name__)
 
 
 class SimilarityComputer(Protocol):
@@ -175,3 +178,89 @@ def get_dedup_threshold() -> float:
         return float(os.environ.get("TIMELINE_DEDUP_THRESHOLD", "0.85"))
     except ValueError:
         return 0.85
+
+
+class HistogramDeduplicator:
+    """
+    Deduplicate candidate segments using histogram-based visual similarity.
+
+    Segments with histogram intersection >= threshold are grouped as near-duplicates.
+    The highest-scoring segment is kept as the representative; others are marked as deduplicated.
+    """
+
+    def __init__(self, frame_signals_by_id: dict[str, list[FrameSignal]], threshold: float = 0.85):
+        """
+        Initialize deduplicator with frame signals.
+
+        Args:
+            frame_signals_by_id: Dict mapping segment ID to list of FrameSignal objects
+            threshold: Histogram intersection threshold for dedup grouping (default 0.85)
+        """
+        self.similarity_computer = HistogramSimilarity(frame_signals_by_id)
+        self.threshold = threshold
+
+    def deduplicate(self, segments: list[CandidateSegment]) -> list[CandidateSegment]:
+        """
+        Deduplicate segments using histogram similarity.
+
+        Groups segments by visual similarity and marks duplicates.
+        Modifies segments in-place: sets deduplicated and dedup_group_id.
+
+        Args:
+            segments: Shortlisted candidate segments (across all assets)
+
+        Returns:
+            Modified segments list with dedup fields set
+        """
+        if len(segments) < 2:
+            logger.debug(f"Skipping histogram dedup: only {len(segments)} segment(s)")
+            return segments
+
+        # Use existing dedup logic but adapted for cross-asset operation
+        dedup_results = {}
+        processed = set()
+        dedup_group_id = 0
+
+        # Sort by prefilter score descending (keeper is highest-scoring)
+        sorted_segments = sorted(
+            segments,
+            key=lambda s: s.prefilter.score if s.prefilter else 0,
+            reverse=True
+        )
+
+        for segment in sorted_segments:
+            if segment.id in processed:
+                continue
+
+            # This segment is the highest-scoring in its group, keep it
+            dedup_results[segment.id] = (False, dedup_group_id)
+            processed.add(segment.id)
+
+            # Find all similar segments and mark as deduplicated
+            for other in segments:
+                if other.id in processed:
+                    continue
+
+                similarity = self.similarity_computer.compute_similarity(segment, other)
+                if similarity >= self.threshold:
+                    dedup_results[other.id] = (True, dedup_group_id)
+                    processed.add(other.id)
+
+            dedup_group_id += 1
+
+        # Apply results
+        dedup_count = 0
+        for seg in segments:
+            if seg.id in dedup_results:
+                deduplicated, group_id = dedup_results[seg.id]
+                seg.prefilter.deduplicated = deduplicated
+                seg.prefilter.dedup_group_id = group_id
+                if deduplicated:
+                    dedup_count += 1
+                    # Find keeper to update selection reason
+                    keeper = next((s for s in segments if s.prefilter.dedup_group_id == group_id and not s.prefilter.deduplicated), None)
+                    if keeper:
+                        seg.prefilter.selection_reason = f"Duplicate of segment {keeper.id} (histogram similarity)"
+
+        logger.info(f"Histogram dedup: {dedup_group_id} groups formed, {dedup_count} duplicates marked")
+        return segments

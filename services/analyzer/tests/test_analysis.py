@@ -91,13 +91,14 @@ class AnalysisPipelineTests(unittest.TestCase):
         silent_segments = [segment for segment in project.candidate_segments if segment.asset_id == "asset-1"]
         speech_segments = [segment for segment in project.candidate_segments if segment.asset_id == "asset-2"]
         best_takes = [take for take in project.take_recommendations if take.is_best_take]
+        shortlisted_segments = [segment for segment in project.candidate_segments if segment.prefilter and segment.prefilter.shortlisted]
 
         self.assertTrue(all(segment.analysis_mode == "visual" for segment in silent_segments))
         self.assertTrue(any(segment.analysis_mode == "speech" for segment in speech_segments))
-        self.assertTrue(all(segment.evidence_bundle is not None for segment in project.candidate_segments))
+        self.assertTrue(all(segment.evidence_bundle is not None for segment in shortlisted_segments))
         self.assertTrue(all(segment.prefilter is not None for segment in project.candidate_segments))
-        self.assertTrue(all(segment.ai_understanding is not None for segment in project.candidate_segments))
-        self.assertTrue(all(segment.ai_understanding.provider for segment in project.candidate_segments if segment.ai_understanding))
+        self.assertTrue(all(segment.ai_understanding is not None for segment in shortlisted_segments))
+        self.assertTrue(all(segment.ai_understanding.provider for segment in shortlisted_segments if segment.ai_understanding))
         self.assertGreaterEqual(len(best_takes), 2)
         self.assertGreaterEqual(len(project.timeline.items), 2)
         self.assertGreater(project.project.analysis_summary.get("prefilter_sample_count", 0), 0)

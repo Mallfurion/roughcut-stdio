@@ -60,6 +60,8 @@ class PrefilterDecision:
     metrics_snapshot: dict[str, float]
     deduplicated: bool = False
     dedup_group_id: int | None = None
+    clip_gated: bool = False
+    vlm_budget_capped: bool = False
 
 
 @dataclass(slots=True)

@@ -1,8 +1,5 @@
-# segment-deduplication Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change segment-deduplication. Update Purpose after archive.
-## Requirements
 ### Requirement: System SHALL detect and suppress near-duplicate candidate segments within each asset
 After CLIP scoring completes and before VLM target selection, the analyzer SHALL compare shortlisted segments (across all assets) for visual similarity and eliminate all but the highest-scoring representative from each group of near-duplicates. When CLIP is enabled, similarity is measured by CLIP embedding cosine similarity; otherwise, histogram intersection is used.
 
@@ -24,15 +21,6 @@ After CLIP scoring completes and before VLM target selection, the analyzer SHALL
 #### Scenario: Single shortlisted segment per group
 - **WHEN** only one segment exists in a dedup group or shortlist is too small to form groups
 - **THEN** deduplication pass completes with no eliminations for that group
-
-### Requirement: System SHALL preserve deduplicated candidates in generated project state
-Eliminated candidates SHALL remain in `generated/project.json` with their full prefilter record. Nothing SHALL be silently discarded.
-
-#### Scenario: Segment is eliminated by deduplication
-- **WHEN** a candidate segment is marked `deduplicated=True`
-- **THEN** it SHALL appear in `generated/project.json` with `prefilter.deduplicated=True`, a valid `prefilter.dedup_group_id`, and an updated `prefilter.selection_reason` naming the retained candidate
-- **THEN** it SHALL NOT appear in the prefilter shortlist
-- **THEN** it SHALL NOT receive keyframe extraction or VLM targeting
 
 ### Requirement: System SHALL support a configurable similarity threshold
 Similarity thresholds for both CLIP and histogram dedup are adjustable without code changes.
@@ -61,6 +49,8 @@ When `TIMELINE_AI_CLIP_ENABLED=true` is set and `open-clip-torch` is installed, 
 - **WHEN** `TIMELINE_AI_CLIP_ENABLED=true` but `open-clip-torch` is not importable
 - **THEN** the deduplication pass SHALL fall back to histogram intersection silently
 - **THEN** no error SHALL be raised for the missing package during deduplication
+
+## ADDED Requirements
 
 ### Requirement: System SHALL compute similarity from CLIP embeddings when available
 When CLIP is enabled and scoring has completed, the deduplication pass SHALL derive segment embeddings from shortlisted segments' contact sheets (or first keyframe if contact sheet unavailable). Embeddings are computed once during CLIP scoring and cached for reuse by dedup.
@@ -106,4 +96,3 @@ Deduplication SHALL never block the pipeline or prevent a deterministic result. 
 #### Scenario: Deterministic result always available
 - **WHEN** analysis completes with deduplication enabled
 - **THEN** all segments have valid `deduplicated` and `dedup_group_id` values (from either CLIP or histogram)
-
