@@ -205,7 +205,7 @@ This file is the source of truth for the review workspace and export stage. The 
 The pipeline filters footage progressively:
 
 | Stage | What is removed |
-|---|---|
+| --- | --- |
 | Frame sampling | Frames that ffmpeg cannot extract (corrupt or missing) |
 | Prefilter shortlist | Low-scoring segments that do not reach `max_segments_per_asset` in fast mode |
 | VLM targeting | Segments already filtered by shortlist — sent to deterministic path instead |
@@ -220,7 +220,7 @@ Segments removed at any stage remain in `generated/project.json` with their reas
 The pipeline behavior is controlled by environment variables, typically set in `.env.local`:
 
 | Variable | Default | Effect |
-|---|---|---|
+| --- | --- | --- |
 | `TIMELINE_MEDIA_DIR` | `./media` | Root directory to scan for video files |
 | `TIMELINE_AI_PROVIDER` | `deterministic` | AI provider: `deterministic`, `lmstudio`, `mlx-vlm-local` |
 | `TIMELINE_AI_MODE` | `fast` | `fast` limits VLM targets per asset; `full` sends all shortlisted segments |
@@ -228,4 +228,5 @@ The pipeline behavior is controlled by environment variables, typically set in `
 | `TIMELINE_AI_MAX_KEYFRAMES` | `3` | Keyframes extracted per segment for VLM input |
 | `TIMELINE_AI_CONCURRENCY` | `2` | Parallel VLM requests |
 | `TIMELINE_AI_CACHE` | `true` | Whether to cache VLM responses across runs |
+| `TIMELINE_AI_AUDIO_ENABLED` | `true` | Set to `false` to skip audio signal extraction and use silent fallback for all assets |
 | `TIMELINE_STORY_PROMPT` | — | Optional narrative goal passed to the VLM as context |

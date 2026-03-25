@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import unittest
+import unittest.mock
 
 from services.analyzer.app.domain import Asset
 from services.analyzer.app.prefilter import (
@@ -122,6 +124,15 @@ class AudioSignalTests(unittest.TestCase):
         asset = self._make_asset(has_speech=True)
         signals = sample_audio_signals(asset, [])
         self.assertEqual(signals, [])
+
+    def test_sample_audio_signals_disabled_via_env(self) -> None:
+        asset = self._make_asset(has_speech=True)
+        timestamps = sample_timestamps(asset.duration_sec)
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_AI_AUDIO_ENABLED": "false"}):
+            signals = sample_audio_signals(asset, timestamps)
+        self.assertEqual(len(signals), len(timestamps))
+        self.assertTrue(all(sig.source == "fallback" for sig in signals))
+        self.assertTrue(all(sig.rms_energy == 0.0 for sig in signals))
 
     def test_fallback_audio_signals_shape(self) -> None:
         timestamps = [1.0, 3.0, 5.0]
