@@ -1,18 +1,18 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Timeline Cutter",
+  "productName": "Roughcut Stdio",
   "version": "0.1.0",
-  "identifier": "com.timelinecutter.desktop",
+  "identifier": "com.roughcutstdio.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev --workspace @timeline-cutter/desktop",
-    "beforeBuildCommand": "npm run build --workspace @timeline-cutter/desktop",
+    "beforeDevCommand": "npm run dev --workspace @roughcut-stdio/desktop",
+    "beforeBuildCommand": "npm run build --workspace @roughcut-stdio/desktop",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "Timeline Cutter",
+        "title": "Roughcut Stdio",
         "width": 1440,
         "height": 960,
         "resizable": true

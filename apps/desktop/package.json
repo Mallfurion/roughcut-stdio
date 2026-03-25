@@ -1,5 +1,5 @@
 {
-  "name": "@timeline-cutter/desktop",
+  "name": "@roughcut-stdio/desktop",
   "private": true,
   "version": "0.1.0",
   "type": "module",

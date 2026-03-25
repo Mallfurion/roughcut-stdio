@@ -1,6 +1,6 @@
-# Timeline Cutter
+# Roughcut Stdio
 
-Timeline Cutter is now a desktop-first local Mac app for screening footage, surfacing the strongest visual segments, and exporting a Resolve-ready timeline.
+Roughcut Stdio is now a desktop-first local Mac app for screening footage, surfacing the strongest visual segments, and exporting a Resolve-ready timeline.
 
 ## Quick Start
 

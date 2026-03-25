@@ -145,8 +145,8 @@ type AppState = {
   exportMessage: string;
 };
 
-const MEDIA_STORAGE_KEY = "timeline-cutter.desktop.media-dir.v1";
-const AI_MODE_STORAGE_KEY = "timeline-cutter.desktop.ai-mode.v1";
+const MEDIA_STORAGE_KEY = "roughcut-stdio.desktop.media-dir.v1";
+const AI_MODE_STORAGE_KEY = "roughcut-stdio.desktop.ai-mode.v1";
 
 function loadStoredAIMode(): AIMode {
   const value = localStorage.getItem(AI_MODE_STORAGE_KEY);
@@ -610,9 +610,9 @@ function bindActions() {
         const selected = await open({
           directory: true,
           multiple: false,
-          title: "Choose the media folder for Timeline Cutter",
+          title: "Choose the media folder for Roughcut Stdio",
         });
-        console.log("[timeline-cutter] media folder picker result:", selected);
+        console.log("[roughcut-stdio] media folder picker result:", selected);
         if (typeof selected === "string" && selected.trim()) {
           appState.mediaDir = selected;
           persistMediaDir();
@@ -698,7 +698,7 @@ function bindActions() {
       try {
         const targetPath = await save({
           title: "Export DaVinci Resolve Timeline",
-          defaultPath: "timeline-cutter.fcpxml",
+          defaultPath: "roughcut-stdio.fcpxml",
         });
         if (!targetPath) {
           appState.exportBusy = false;

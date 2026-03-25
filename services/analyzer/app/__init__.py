@@ -1,2 +1,1 @@
-"""Timeline Cutter analyzer package."""
-
+"""Roughcut Stdio analyzer package."""

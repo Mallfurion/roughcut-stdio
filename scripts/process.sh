@@ -25,7 +25,7 @@ TMP_OUTPUT_JSON="${ROOT_DIR}/generated/project.json.tmp"
 LOG_FILE="${ROOT_DIR}/generated/process.log"
 SUMMARY_FILE="${ROOT_DIR}/generated/process-summary.txt"
 VLM_DEBUG_FILE="${ROOT_DIR}/generated/analysis/vlm-debug.jsonl"
-PROJECT_NAME="${TIMELINE_PROJECT_NAME:-Timeline Cutter Project}"
+PROJECT_NAME="${TIMELINE_PROJECT_NAME:-Roughcut Stdio Project}"
 STORY_PROMPT="${TIMELINE_STORY_PROMPT:-Build a coherent rough cut from the strongest visual and spoken beats.}"
 
 if [ ! -e "$MEDIA_DIR" ]; then

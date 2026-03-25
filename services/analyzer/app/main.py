@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from .service import export_project_fcpxml, load_project, runtime_capabilities, scan_and_analyze_media_root
 
 
-app = FastAPI(title="Timeline Cutter Analyzer")
+app = FastAPI(title="Roughcut Stdio Analyzer")
 
 ROOT = Path(__file__).resolve().parents[3]
 SAMPLE_PROJECT = ROOT / "fixtures" / "sample-project.json"
@@ -36,7 +36,7 @@ def get_sample_fcpxml() -> PlainTextResponse:
     return PlainTextResponse(
         export_project_fcpxml(SAMPLE_PROJECT),
         media_type="application/xml",
-        headers={"Content-Disposition": 'attachment; filename="timeline-cutter-sample.fcpxml"'},
+        headers={"Content-Disposition": 'attachment; filename="roughcut-stdio-sample.fcpxml"'},
     )
 
 

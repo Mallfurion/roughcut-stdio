@@ -1,7 +1,7 @@
 [project]
-name = "timeline-cutter-analyzer"
+name = "roughcut-stdio-analyzer"
 version = "0.1.0"
-description = "Analysis and export core for Timeline Cutter."
+description = "Analysis and export core for Roughcut Stdio."
 requires-python = ">=3.12"
 dependencies = []
 

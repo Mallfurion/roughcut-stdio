@@ -58,7 +58,7 @@ def export_fcpxml(project_data: ProjectData) -> str:
         )
 
     library = ET.Element("library")
-    event = ET.SubElement(library, "event", {"name": "Timeline Cutter"})
+    event = ET.SubElement(library, "event", {"name": "Roughcut Stdio"})
     project = ET.SubElement(event, "project", {"name": project_data.project.name})
 
     total_timeline_duration = sum(

@@ -1,7 +1,7 @@
 [package]
-name = "timeline-cutter-desktop"
+name = "roughcut-stdio-desktop"
 version = "0.1.0"
-description = "Desktop interface for Timeline Cutter"
+description = "Desktop interface for Roughcut Stdio"
 authors = ["OpenAI"]
 edition = "2021"
 

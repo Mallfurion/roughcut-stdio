@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "name": "timeline-cutter",
+  "name": "roughcut-stdio",
   "private": true,
   "workspaces": [
     "apps/desktop"
@@ -11,8 +11,8 @@
     "process": "bash ./scripts/process.sh",
     "view": "npm run dev:desktop",
     "export": "bash ./scripts/export.sh",
-    "dev:desktop": "npm run tauri:dev --workspace @timeline-cutter/desktop",
-    "build:desktop": "npm run tauri:build --workspace @timeline-cutter/desktop",
+    "dev:desktop": "npm run tauri:dev --workspace @roughcut-stdio/desktop",
+    "build:desktop": "npm run tauri:build --workspace @roughcut-stdio/desktop",
     "build:web": "echo 'Web app has been replaced by the desktop app. Use npm run build:desktop.'",
     "test:python": "python3 -m unittest discover services/analyzer/tests -v"
   }

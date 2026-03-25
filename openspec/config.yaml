@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  Project: Timeline Cutter
+  Project: Roughcut Stdio
 
   Product:
   - Local-first AI-assisted footage screening and rough-cut tool.
