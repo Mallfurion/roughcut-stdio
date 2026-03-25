@@ -35,6 +35,8 @@ type QualityMetrics = {
   speech_presence: number;
   hook_strength: number;
   story_alignment: number;
+  audio_energy?: number;
+  speech_ratio?: number;
 };
 
 type SegmentEvidence = {
@@ -49,6 +51,9 @@ type SegmentPrefilter = {
   shortlisted: boolean;
   filtered_before_vlm: boolean;
   selection_reason: string;
+  deduplicated?: boolean;
+  dedup_group_id?: number;
+  metrics_snapshot?: Record<string, number>;
 };
 
 type SegmentUnderstanding = {
@@ -1089,6 +1094,9 @@ function resolveClipViews(project: TimelineProject) {
 
 function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
   const expanded = appState.expandedClipIds.includes(view.asset.id);
+  const dedupCount = view.segments.filter((s) => s.prefilter?.deduplicated).length;
+  const activCount = view.segments.length - dedupCount;
+
   return `
     <article class="clip-card">
       <button class="clip-toggle" data-clip-id="${escapeHtml(view.asset.id)}" aria-expanded="${expanded ? "true" : "false"}">
@@ -1099,6 +1107,7 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
           </div>
           <div class="clip-toggle-meta">
             <span class="pill">${view.segments.length} sections</span>
+            ${dedupCount > 0 ? `<span class="pill pill-dedup-info">${activCount} active, ${dedupCount} dup</span>` : ""}
             <span class="clip-chevron">${expanded ? "−" : "+"}</span>
           </div>
         </div>
@@ -1120,15 +1129,19 @@ function renderSegmentCard(segment: CandidateSegment) {
   const score = segment.prefilter?.score ?? 0;
   const vlmText = ai?.summary || segment.description;
   const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
+  const isDeduplicated = segment.prefilter?.deduplicated ?? false;
+  const dedupGroupId = segment.prefilter?.dedup_group_id;
 
   return `
-    <article class="section-card">
+    <article class="section-card${isDeduplicated ? " section-card--deduplicated" : ""}">
       <div class="section-head">
         <div>
           <div class="pill-row">
             <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
             <span class="pill section-pill">score ${formatScore(score)}</span>
             <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
+            ${isDeduplicated ? `<span class="pill pill-dedup">Duplicate (Group ${dedupGroupId})</span>` : ""}
+            ${!isDeduplicated && dedupGroupId !== undefined ? `<span class="pill pill-dedup-kept">Kept (Group ${dedupGroupId})</span>` : ""}
             ${formatKeepLabelWithColor(ai?.keep_label)}
             ${formatConfidenceWithColor(ai?.confidence)}
           </div>
@@ -1136,6 +1149,7 @@ function renderSegmentCard(segment: CandidateSegment) {
       </div>
       <p class="section-summary">${escapeHtml(vlmText)}</p>
       ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
+      ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
       <div class="meta-list section-meta">
         ${renderOptionalMeta(ai?.shot_type)}
         ${renderOptionalMeta(ai?.camera_motion)}
@@ -1196,6 +1210,52 @@ function renderOptionalMeta(value?: string) {
     return "";
   }
   return `<span>${escapeHtml(value)}</span>`;
+}
+
+function renderAudioMetrics(metrics: Record<string, number> | undefined) {
+  const audioEnergy = metrics?.audio_energy ?? 0;
+  const speechRatio = metrics?.speech_ratio ?? 0;
+
+  if (audioEnergy === 0 && speechRatio === 0) {
+    return "";
+  }
+
+  const audioEnergyPercent = Math.round(audioEnergy * 100);
+  const speechRatioPercent = Math.round(speechRatio * 100);
+  const isSilent = audioEnergy < 0.01;
+
+  return `
+    <div class="audio-metrics">
+      <div class="audio-metric">
+        <span class="audio-icon">🔊</span>
+        <div class="audio-metric-content">
+          <span class="audio-label">Energy</span>
+          <div class="audio-bar">
+            <div class="audio-bar-fill" style="width: ${audioEnergyPercent}%"></div>
+          </div>
+          <span class="audio-value">${audioEnergyPercent}%</span>
+        </div>
+      </div>
+      <div class="audio-metric">
+        <span class="audio-icon">🎤</span>
+        <div class="audio-metric-content">
+          <span class="audio-label">Speech</span>
+          <div class="audio-bar">
+            <div class="audio-bar-fill" style="width: ${speechRatioPercent}%"></div>
+          </div>
+          <span class="audio-value">${speechRatioPercent}%</span>
+        </div>
+      </div>
+      ${
+        isSilent
+          ? `<div class="audio-metric audio-metric-silent">
+               <span class="audio-icon">🔇</span>
+               <span class="audio-label">Silent</span>
+             </div>`
+          : ""
+      }
+    </div>
+  `;
 }
 
 function escapeHtml(value: string) {

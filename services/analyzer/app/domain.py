@@ -58,6 +58,8 @@ class PrefilterDecision:
     sampled_frame_timestamps_sec: list[float]
     top_frame_timestamps_sec: list[float]
     metrics_snapshot: dict[str, float]
+    deduplicated: bool = False
+    dedup_group_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -163,7 +165,18 @@ class ProjectData:
                     description=segment.get("description", ""),
                     quality_metrics=segment.get("quality_metrics", {}),
                     prefilter=(
-                        PrefilterDecision(**segment["prefilter"])
+                        PrefilterDecision(
+                            score=segment["prefilter"].get("score", 0.0),
+                            shortlisted=segment["prefilter"].get("shortlisted", False),
+                            filtered_before_vlm=segment["prefilter"].get("filtered_before_vlm", False),
+                            selection_reason=segment["prefilter"].get("selection_reason", ""),
+                            sampled_frame_count=segment["prefilter"].get("sampled_frame_count", 0),
+                            sampled_frame_timestamps_sec=segment["prefilter"].get("sampled_frame_timestamps_sec", []),
+                            top_frame_timestamps_sec=segment["prefilter"].get("top_frame_timestamps_sec", []),
+                            metrics_snapshot=segment["prefilter"].get("metrics_snapshot", {}),
+                            deduplicated=segment["prefilter"].get("deduplicated", False),
+                            dedup_group_id=segment["prefilter"].get("dedup_group_id", None),
+                        )
                         if segment.get("prefilter") is not None
                         else None
                     ),

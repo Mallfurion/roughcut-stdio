@@ -113,15 +113,33 @@ Each segment also receives a `PrefilterDecision` that records its prefilter scor
 
 **Output:** a `CandidateSegment` for each range, with quality metrics attached.
 
-### Step 2.6 — Shortlist Selection
+### Step 2.6 — Segment Deduplication
 
-In **fast mode**, only the top `max_segments_per_asset` candidates by prefilter score proceed to the next stages. The rest are marked `filtered_before_vlm=true` and receive a deterministic understanding instead of a VLM call.
+After all candidate segments have been scored with the prefilter, the analyzer removes near-duplicate segments within each asset using histogram-based visual similarity.
 
-In **full mode**, all candidates proceed.
+The deduplication process:
+
+1. Computes a 256-bin grayscale histogram from the sampled frame signals for each segment
+2. Compares histograms across candidate segments within the same asset using histogram intersection
+3. Groups segments whose similarity exceeds a configurable threshold (default: 0.85)
+4. Retains the highest-scoring candidate in each group and marks the rest as `deduplicated`
+5. Assigns a sequential `dedup_group_id` to each group for traceability
+
+Deduplicated segments do not proceed to the shortlist, do not receive keyframe extraction, and do not count toward `max_segments_per_asset` limits. However, they are retained in `generated/project.json` with their elimination reason recorded.
+
+This step improves signal-to-noise ratio in the review workspace by preventing multiple variants of the same shot (e.g., three windows around a static 12-second wide shot with different start times) from reaching the VLM and final timeline.
+
+**Output:** `PrefilterDecision` records updated with `deduplicated` flag and `dedup_group_id` for each segment.
+
+### Step 2.7 — Shortlist Selection
+
+In **fast mode**, only the top `max_segments_per_asset` non-deduplicated candidates by prefilter score proceed to the next stages. The rest are marked `filtered_before_vlm=true` and receive a deterministic understanding instead of a VLM call.
+
+In **full mode**, all non-deduplicated candidates proceed.
 
 **Output:** a set of segment IDs designated for VLM targeting.
 
-### Step 2.7 — Evidence Building
+### Step 2.8 — Evidence Building
 
 For each segment in the VLM target set, the analyzer extracts keyframes and prepares an evidence bundle.
 
@@ -133,7 +151,7 @@ For each segment in the VLM target set, the analyzer extracts keyframes and prep
 
 **Output:** a `SegmentEvidence` record per segment, including keyframe paths, contact sheet path, transcript, and metrics.
 
-### Step 2.8 — AI Analysis
+### Step 2.9 — AI Analysis
 
 Each segment in the VLM target set is sent for analysis. The analyzer supports three providers:
 
@@ -207,6 +225,7 @@ The pipeline filters footage progressively:
 | Stage | What is removed |
 | --- | --- |
 | Frame sampling | Frames that ffmpeg cannot extract (corrupt or missing) |
+| Deduplication | Near-duplicate segments within each asset (keep highest-scoring of similar group) |
 | Prefilter shortlist | Low-scoring segments that do not reach `max_segments_per_asset` in fast mode |
 | VLM targeting | Segments already filtered by shortlist — sent to deterministic path instead |
 | Take selection | All segments below the score threshold, except the highest scorer per asset as a fallback |
@@ -230,3 +249,5 @@ The pipeline behavior is controlled by environment variables, typically set in `
 | `TIMELINE_AI_CACHE` | `true` | Whether to cache VLM responses across runs |
 | `TIMELINE_AI_AUDIO_ENABLED` | `true` | Set to `false` to skip audio signal extraction and use silent fallback for all assets |
 | `TIMELINE_STORY_PROMPT` | — | Optional narrative goal passed to the VLM as context |
+| `TIMELINE_DEDUPLICATION_ENABLED` | `true` | Set to `false` to disable near-duplicate segment removal |
+| `TIMELINE_DEDUP_THRESHOLD` | `0.85` | Histogram similarity threshold for grouping near-duplicates (0–1); higher = stricter deduplication |

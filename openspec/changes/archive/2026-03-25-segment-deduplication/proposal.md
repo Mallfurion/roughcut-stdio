@@ -13,8 +13,34 @@ The first implementation should have no new model dependencies. Grayscale frame 
 - For each duplicate group, retain the single highest-scoring candidate and mark the rest as `deduplicated`. Store the group membership and the reason for elimination in each eliminated segment's `prefilter` record.
 - Deduplicated segments do not reach the shortlist, do not receive keyframe extraction, and do not count against `max_segments_per_asset`.
 - Add an optional `TIMELINE_DEDUP_THRESHOLD` environment variable to adjust the similarity threshold for workflows with more or less visual variation between clips.
+- Add `TIMELINE_DEDUPLICATION_ENABLED` environment variable to toggle the deduplication feature on or off (default: true, enabled).
 - Add CLIP-based embedding similarity as a future-compatible extension point: when `TIMELINE_AI_CLIP_ENABLED=true` is set and the `open-clip-torch` package is available, use CLIP keyframe embeddings instead of histogram comparison for richer semantic deduplication. The histogram path remains the default.
 - Extend process reporting to show per-asset deduplication statistics: total candidates generated, candidates deduplicated, and candidates forwarded to the shortlist stage.
+
+## Implementation Details
+
+### Histogram-Based Similarity
+
+- Compute grayscale histograms with **256 bins** (standard 8-bit grayscale range 0-255)
+- Sample **3-5 representative frames per segment** (start, middle, end, plus intermediate frames for longer segments) from the low-resolution frames already extracted during `sample_asset_signals()`
+- **Average the histograms** of sampled frames to produce a single normalized histogram per segment
+- Calculate similarity using **histogram intersection**: `similarity = sum(min(hist1[i], hist2[i]) for i in bins) / segment_hist_sum`, normalized to 0-1 range
+
+### Deduplication Logic
+
+- Run deduplication **after prefilter scoring, before shortlist selection and VLM targeting**
+- Group candidates within the same asset whose similarity exceeds `TIMELINE_DEDUP_THRESHOLD` (default 0.85)
+- **Retain the highest-scoring candidate** in each similarity group; deduplication does not override scoring decisions
+- Assign each group a **sequential integer ID per asset** (e.g., `dedup_group_id: 0, 1, 2, ...`)
+- Store group membership in **both eliminated and kept candidates**: eliminated segments get `deduplicated=true`, and all members get `dedup_group_id` for traceability
+- Apply no minimum segment length threshold—histogram comparison works uniformly on any segment duration
+
+### Extensibility
+
+- Design similarity computation as an abstraction layer with interface `SimilarityComputer`:
+  - `HistogramSimilarity` as the default implementation
+  - `CLIPSimilarity` as the future CLIP-backed implementation (instantiated when `TIMELINE_AI_CLIP_ENABLED=true` and `open-clip-torch` is available)
+- Keep histogram and CLIP code paths swappable without changes to the main deduplication pipeline
 
 ## Capabilities
 

@@ -4,46 +4,41 @@
 TBD - created by archiving change vision-prefilter-pipeline. Update Purpose after archive.
 ## Requirements
 ### Requirement: System SHALL screen footage with low-cost visual signals before VLM analysis
-The analyzer SHALL perform a pre-VLM screening pass over each asset using low-cost visual signals derived from sampled frames or short windows. This screening pass SHALL operate before any multimodal model request is made for that asset.
-
-#### Scenario: Asset enters screening
-- **WHEN** an asset is processed
-- **THEN** the analyzer SHALL compute prefilter signals before deciding which segments reach the VLM stage
-
-#### Scenario: VLM is disabled or unavailable
-- **WHEN** the configured AI provider is deterministic or unavailable
-- **THEN** the prefilter stage SHALL still run and produce shortlist-ready screening output
+_No change to this requirement. Audio signal extraction runs alongside the visual prefilter stage and does not alter the VLM gating behavior defined here._
 
 ### Requirement: System SHALL score sampled visual evidence using cheap, inspectable features
-The prefilter stage SHALL score sampled frame or window evidence using lightweight features such as sharpness, blur, motion, stability, distinctiveness, composition proxies, and optionally additional cheap learned features when available.
+The prefilter stage SHALL score sampled frame and audio window evidence using lightweight features. In addition to the existing visual features (sharpness, blur, motion, stability, distinctiveness, composition proxies), the prefilter SHALL include `audio_energy` and `speech_ratio` in the per-segment metrics snapshot when audio signal data is available.
 
-#### Scenario: Basic runtime only
-- **WHEN** the runtime has only the standard local media toolchain available
-- **THEN** the analyzer SHALL still compute a valid screening score using deterministic visual features
+#### Scenario: Asset has both visual and audio signal data
+- **WHEN** the runtime produces both `FrameSignal` and `AudioSignal` records for an asset
+- **THEN** the prefilter metrics snapshot SHALL include both visual features and `audio_energy` / `speech_ratio`
+- **THEN** both signal types SHALL be aggregated independently and stored in the same per-segment metrics snapshot
 
-#### Scenario: Optional cheap learned scorer is available
-- **WHEN** an optional lightweight scorer such as CLIP-style or aesthetic-style scoring is enabled and available
-- **THEN** the analyzer MAY incorporate that signal into prefilter scoring without making it a hard dependency
+#### Scenario: Asset has visual signal data only
+- **WHEN** the asset has no audio stream or audio extraction fails
+- **THEN** the prefilter metrics snapshot SHALL include visual features as before
+- **THEN** `audio_energy` SHALL be `0.0` and `speech_ratio` SHALL be `0.0` in the snapshot
 
 ### Requirement: System SHALL build shortlist candidate regions from screening structure
-The analyzer SHALL construct shortlist candidate regions from scene boundaries plus visual score structure such as motion changes, score peaks, or deduplicated near-identical runs instead of relying only on fallback fixed windows.
+The prefilter pipeline SHALL include a deduplication step as a named stage between prefilter scoring and shortlist selection. The shortlist SHALL be selected from the deduplicated candidate set, not the full candidate set.
 
-#### Scenario: Strong score region exists inside a longer clip
-- **WHEN** a longer asset contains a concentrated visually strong region
-- **THEN** the analyzer SHALL be able to produce a shortlist candidate focused on that region instead of only broad fallback windows
+#### Scenario: Deduplication eliminates candidates before shortlist selection
+- **WHEN** the deduplication pass marks one or more candidates as `deduplicated=True`
+- **THEN** those candidates SHALL be excluded from the shortlist selection pool
+- **THEN** `max_segments_per_asset` SHALL be applied to the remaining non-deduplicated candidates only
 
-#### Scenario: Repetitive or near-identical coverage dominates a clip
-- **WHEN** long runs of visually repetitive footage are detected
-- **THEN** the analyzer SHALL suppress or collapse those runs during shortlist construction
+#### Scenario: All candidates for an asset are distinct
+- **WHEN** no candidates are eliminated by deduplication
+- **THEN** shortlist selection SHALL proceed over the full candidate set as before
 
 ### Requirement: System SHALL persist prefilter outputs for inspection and reuse
-The generated project state SHALL record enough prefilter information to explain which footage was shortlisted and why, including the evidence used to decide whether a segment reached the VLM stage.
+In addition to shortlist status and filtering reason, the generated project state SHALL record deduplication decisions for every candidate segment that was eliminated.
 
-#### Scenario: Segment reaches the shortlist
-- **WHEN** a candidate region is shortlisted for downstream refinement
-- **THEN** the generated project SHALL indicate that the segment was selected by the prefilter stage
+#### Scenario: Segment is eliminated by deduplication
+- **WHEN** a candidate is marked deduplicated
+- **THEN** its `PrefilterDecision` SHALL record `deduplicated=True`, the `dedup_group_id` of the retained representative, and a human-readable `selection_reason`
 
-#### Scenario: Segment does not reach the shortlist
-- **WHEN** a candidate region is screened out before VLM analysis
-- **THEN** the generated project SHALL preserve the reason or status indicating that it was filtered before VLM analysis
+#### Scenario: Segment survives deduplication
+- **WHEN** a candidate is the retained representative of a duplicate group
+- **THEN** its `PrefilterDecision` SHALL have `deduplicated=False` and no `dedup_group_id`
 

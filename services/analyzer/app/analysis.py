@@ -17,6 +17,12 @@ from .ai import (
     get_ai_runtime_stats,
     load_ai_analysis_config,
 )
+from .deduplication import (
+    apply_deduplication_results,
+    deduplicate_segments,
+    get_dedup_threshold,
+    is_deduplication_enabled,
+)
 from .domain import (
     Asset,
     CandidateSegment,
@@ -184,6 +190,9 @@ def analyze_assets(
     total_vlm_targets = 0
     total_filtered_before_vlm = 0
     total_audio_signal_assets = 0
+    total_deduplicated_segments = 0
+    deduplication_enabled = is_deduplication_enabled()
+    dedup_threshold = get_dedup_threshold()
 
     total_assets = len(assets)
     for asset_index, asset in enumerate(assets, start=1):
@@ -246,15 +255,46 @@ def analyze_assets(
                 )
             )
 
+        # Deduplication pass: runs after prefilter scoring and before shortlist selection
+        if deduplication_enabled and len(asset_segments) > 1:
+            # Build frame signals per segment based on time window
+            frame_signals_by_id = {}
+            for segment in asset_segments:
+                matching_signals = [
+                    signal
+                    for signal in prefilter_signals
+                    if segment.start_sec <= signal.timestamp_sec <= segment.end_sec
+                ]
+                # If no signals fall within segment, use the nearest signal for context
+                if not matching_signals and prefilter_signals:
+                    center = (segment.start_sec + segment.end_sec) / 2.0
+                    nearest = min(
+                        prefilter_signals,
+                        key=lambda signal: abs(signal.timestamp_sec - center),
+                    )
+                    matching_signals = [nearest]
+                frame_signals_by_id[segment.id] = matching_signals
+
+            dedup_results = deduplicate_segments(
+                segments=asset_segments,
+                frame_signals_by_id=frame_signals_by_id,
+                similarity_threshold=dedup_threshold,
+            )
+            apply_deduplication_results(asset_segments, dedup_results)
+            total_deduplicated_segments += sum(1 for deduplicated, _ in dedup_results.values() if deduplicated)
+
+        # Filter out deduplicated segments from further processing
+        active_segments = [s for s in asset_segments if not (s.prefilter and s.prefilter.deduplicated)]
+
         prefilter_shortlist_ids = select_prefilter_shortlist_ids(
             asset=asset,
-            segments=asset_segments,
+            segments=active_segments,
             max_segments_per_asset=ai_config.max_segments_per_asset,
             mode=ai_config.mode,
         )
         ai_target_ids = select_ai_target_segment_ids(
             asset=asset,
-            segments=asset_segments,
+            segments=active_segments,
             analyzer=analyzer,
             max_segments_per_asset=ai_config.max_segments_per_asset,
             mode=ai_config.mode,
@@ -319,6 +359,7 @@ def analyze_assets(
     project.analysis_summary = {
         "prefilter_sample_count": total_prefilter_samples,
         "candidate_segment_count": len(candidate_segments),
+        "deduplicated_segment_count": total_deduplicated_segments if deduplication_enabled else 0,
         "prefilter_shortlisted_count": total_prefilter_shortlisted,
         "vlm_target_count": total_vlm_targets,
         "filtered_before_vlm_count": total_filtered_before_vlm,
@@ -335,6 +376,10 @@ def analyze_assets(
         }
     )
     if status_callback is not None:
+        if deduplication_enabled and total_deduplicated_segments > 0:
+            status_callback(
+                f"Deduplication: {total_deduplicated_segments} near-duplicate segments eliminated."
+            )
         status_callback(
             "Prefilter sampled "
             f"{total_prefilter_samples} frames and shortlisted {total_prefilter_shortlisted}/"
