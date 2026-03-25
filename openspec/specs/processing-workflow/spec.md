@@ -4,16 +4,15 @@
 TBD - created by archiving change init-deterministic-pass. Update Purpose after archive.
 ## Requirements
 ### Requirement: Repository SHALL expose an npm-first workflow
-The repository workflow SHALL support preparing and validating the configured AI backend through the npm-first commands.
+The repository workflow SHALL continue to support preparing and validating the configured AI backend through npm-first commands for development and debugging, but the primary product workflow SHALL move to desktop-managed orchestration.
 
-#### Scenario: Setup prepares MLX local backend
-- **WHEN** `npm run setup` is executed with `TIMELINE_AI_PROVIDER=mlx-vlm-local`
-- **THEN** setup SHALL install the required MLX runtime dependencies and prepare the configured local model cache unless explicitly skipped by configuration
+#### Scenario: Desktop app performs setup
+- **WHEN** the desktop app prepares the local environment
+- **THEN** it SHALL use the same underlying setup capabilities as the repository workflow without requiring the user to run npm commands manually
 
-#### Scenario: AI health check validates MLX local backend
-- **WHEN** `npm run check:ai` is executed with `TIMELINE_AI_PROVIDER=mlx-vlm-local`
-- **THEN** it SHALL verify backend readiness, including model availability and a minimal runtime check
-- **THEN** it SHALL exit non-zero when the configured backend is not ready
+#### Scenario: Desktop app starts a process run
+- **WHEN** the desktop app launches a process run
+- **THEN** the analyzer SHALL execute under desktop orchestration rather than requiring terminal-first interaction
 
 ### Requirement: Process SHALL honor configured media roots and write generated artifacts
 The process step SHALL read footage from `TIMELINE_MEDIA_DIR` when set and SHALL otherwise fall back to the repository `media/` path. The process step SHALL write generated state under `generated/`, including a project JSON document and processing diagnostics.
@@ -28,9 +27,9 @@ The process step SHALL read footage from `TIMELINE_MEDIA_DIR` when set and SHALL
 - **THEN** the repository SHALL contain `generated/process.log`
 
 ### Requirement: Process SHALL report operational status during long runs
-The process workflow SHALL report which effective backend is used and whether AI results came from live inference, cache reuse, or fallback.
+The process workflow SHALL report which effective backend is used and whether AI results came from live inference, cache reuse, or fallback, and that reporting SHALL be consumable by the desktop application as structured run-state.
 
-#### Scenario: Process runs with MLX local backend
-- **WHEN** `process` executes with `TIMELINE_AI_PROVIDER=mlx-vlm-local`
-- **THEN** process logs and summaries SHALL identify the effective backend, model identity, and direct-runtime result counters
+#### Scenario: Desktop app consumes process status
+- **WHEN** a process run is started from the desktop app
+- **THEN** the analyzer SHALL provide status information that the desktop app can present as a progress view instead of relying only on human-oriented terminal output
 
