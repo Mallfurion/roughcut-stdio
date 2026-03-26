@@ -11,6 +11,7 @@
     "process": "bash ./scripts/process.sh",
     "view": "npm run dev:desktop",
     "export": "bash ./scripts/export.sh",
+    "check:openspec-graph": "python3 ./scripts/check_openspec_graph.py",
     "clean:generated": "bash ./scripts/clean_generated.sh",
     "dev:desktop": "npm run tauri:dev --workspace @roughcut-stdio/desktop",
     "build:desktop": "npm run tauri:build --workspace @roughcut-stdio/desktop",

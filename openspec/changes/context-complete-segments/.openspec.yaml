@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-03-26
+
+x-roughcut:
+  kind: umbrella
+  phase: 0
+  depends_on: []

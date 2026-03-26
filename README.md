@@ -103,6 +103,7 @@ See [docs/configuration.md](docs/configuration.md) for setup details and example
 npm run dev:desktop    # Launch app in dev mode
 npm run build:desktop  # Build production app
 npm run process        # Run analyzer directly
+npm run check:openspec-graph  # Validate chained OpenSpec change metadata
 npm run test:python    # Run Python tests
 ```
 

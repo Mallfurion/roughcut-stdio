@@ -1,0 +1,9 @@
+schema: spec-driven
+created: 2026-03-26
+
+x-roughcut:
+  kind: implementation
+  parent: context-complete-segments
+  phase: 4
+  depends_on:
+    - semantic-boundary-validation

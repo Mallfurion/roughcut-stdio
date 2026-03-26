@@ -1,0 +1,9 @@
+schema: spec-driven
+created: 2026-03-26
+
+x-roughcut:
+  kind: implementation
+  parent: context-complete-segments
+  phase: 2
+  depends_on:
+    - deterministic-boundary-refinement
