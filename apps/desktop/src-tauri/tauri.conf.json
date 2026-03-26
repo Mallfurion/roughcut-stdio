@@ -19,7 +19,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "/Users/florin/Projects/personal/roughcut-stdio/generated/analysis/**"
+          ]
+        }
+      }
     }
   },
   "bundle": {

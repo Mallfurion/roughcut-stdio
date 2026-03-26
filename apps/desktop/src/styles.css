@@ -619,6 +619,22 @@ h2 {
   font-weight: 600;
 }
 
+.segment-visual {
+  margin-top: 14px;
+  border-radius: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.segment-visual-image {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  object-position: center;
+}
+
 .section-summary--hero {
   margin-top: 14px;
   font-size: 1.55rem;

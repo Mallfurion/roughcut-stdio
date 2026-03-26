@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { buildSegmentReviewModel } from "./review-model.ts";
@@ -45,6 +45,7 @@ type SegmentEvidence = {
   keyframe_timestamps_sec: number[];
   context_window_start_sec: number;
   context_window_end_sec: number;
+  contact_sheet_path?: string;
 };
 
 type SegmentPrefilter = {
@@ -1237,6 +1238,7 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
   const evidence = segment.evidence_bundle;
   const blockedBadge = resolveBlockedBadge(segment);
   const providerLabel = formatProviderLabel(ai?.provider);
+  const imageSrc = resolveSegmentImageSrc(evidence);
   const quietFacts = [
     score > 0 ? `Prefilter ${formatScore(score)}` : "",
     clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
@@ -1246,7 +1248,6 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
     ai?.keep_label && ai.keep_label !== "n/a" ? `VLM ${ai.keep_label}` : "",
     !isDeduplicated && dedupGroupId !== undefined ? `Dedup keeper G${dedupGroupId}` : "",
   ].filter(Boolean);
-  const secondaryRationale = ai?.rationale && ai.rationale !== review.decisionSummary ? ai.rationale : "";
   const tonalMeta = [ai?.shot_type, ai?.camera_motion, ai?.mood].filter(Boolean);
 
   return `
@@ -1254,13 +1255,21 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
       <div class="section-head section-head--compact">
         <div class="pill-row pill-row--primary">
           <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
+          <span class="pill section-pill">${escapeHtml(formatSegmentDuration(segment.start_sec, segment.end_sec))}</span>
           <span class="pill section-pill section-outcome-pill section-outcome-pill--${escapeHtml(review.outcome)}">${escapeHtml(review.outcomeLabel)}</span>
           ${providerLabel ? `<span class="pill section-pill">${escapeHtml(providerLabel)}</span>` : ""}
           ${blockedBadge ? `<span class="pill section-pill ${blockedBadge.className}">${escapeHtml(blockedBadge.label)}</span>` : ""}
         </div>
       </div>
+      ${
+        imageSrc
+          ? `
+      <div class="segment-visual">
+        <img class="segment-visual-image" src="${escapeHtml(imageSrc)}" alt="${escapeHtml(vlmText || "Segment visual summary")}" />
+      </div>`
+          : ""
+      }
       <p class="section-summary section-summary--hero">${escapeHtml(vlmText)}</p>
-      ${review.decisionSummary ? `<p class="section-recommendation">${escapeHtml(review.decisionSummary)}</p>` : ""}
       <div class="score-panel">
         <div class="score-hero">
           <span class="score-hero-label">Overall score</span>
@@ -1280,7 +1289,6 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
           : ""
       }
       ${review.analysisPathSummary ? `<p class="muted section-analysis-path">${escapeHtml(review.analysisPathSummary)}</p>` : ""}
-      ${secondaryRationale ? `<p class="muted section-rationale">${escapeHtml(secondaryRationale)}</p>` : ""}
       <div class="meta-list section-meta">
         ${tonalMeta.map(renderOptionalMeta).join("")}
         ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
@@ -1306,6 +1314,10 @@ function renderScoreBar(label: string, value: string) {
 
 function formatSegmentRange(start: number, end: number) {
   return `${start.toFixed(2)}s - ${end.toFixed(2)}s`;
+}
+
+function formatSegmentDuration(start: number, end: number) {
+  return `${(end - start).toFixed(2)}s`;
 }
 
 function formatScore(value: number) {
@@ -1381,6 +1393,17 @@ function formatProviderLabel(provider?: string) {
     return "LM Studio";
   }
   return provider;
+}
+
+function resolveSegmentImageSrc(evidence?: SegmentEvidence) {
+  if (!evidence) {
+    return "";
+  }
+  const sourcePath = evidence.contact_sheet_path || evidence.keyframe_paths[0] || "";
+  if (!sourcePath) {
+    return "";
+  }
+  return convertFileSrc(sourcePath);
 }
 
 function escapeHtml(value: string | undefined | null) {
