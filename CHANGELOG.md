@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-03-26
+
+### 🛠 Fixes & Improvements
+- Add segmentation settings to the desktop app.
+- Default segmentation refinement and semantic validation to enabled.
+
 ## [1.3.0] - 2026-03-26
 
 ### 🚀 Features
