@@ -117,6 +117,8 @@ class AIAnalysisConfig:
     vlm_budget_pct: int = 100
     clip_model: str = "ViT-B-32"
     clip_model_pretrained: str = "laion2b_s34b_b79k"
+    boundary_refinement_enabled: bool = False
+    boundary_refinement_legacy_fallback: bool = True
 
 
 @dataclass(slots=True)
@@ -942,6 +944,8 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     max_segments_default = 1 if mode == "fast" else 99
     max_keyframes_default = 1 if mode == "fast" else 4
     max_width_default = 448 if mode == "fast" else 960
+    boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", False)
+    boundary_refinement_legacy_fallback = parse_bool_env("TIMELINE_SEGMENT_LEGACY_FALLBACK", True)
 
     # CLIP configuration
     clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.35").strip()
@@ -966,6 +970,8 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
         vlm_budget_pct=vlm_budget_pct,
         clip_model=os.environ.get("TIMELINE_AI_CLIP_MODEL", "ViT-B-32").strip() or "ViT-B-32",
         clip_model_pretrained=os.environ.get("TIMELINE_AI_CLIP_MODEL_PRETRAINED", "laion2b_s34b_b79k").strip() or "laion2b_s34b_b79k",
+        boundary_refinement_enabled=boundary_refinement_enabled,
+        boundary_refinement_legacy_fallback=boundary_refinement_legacy_fallback,
     )
 
 

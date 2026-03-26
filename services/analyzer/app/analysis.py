@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from hashlib import md5
 import importlib
 import importlib.util
@@ -52,7 +53,9 @@ from .domain import (
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .prefilter import (
+    SeedRegion,
     aggregate_segment_prefilter,
+    build_prefilter_seed_regions,
     build_prefilter_segments,
     sample_asset_signals,
     sample_audio_signals,
@@ -71,6 +74,9 @@ class TranscriptProvider(Protocol):
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         ...
 
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list["TranscriptSpan"]:
+        ...
+
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int, Asset], None]
@@ -79,9 +85,30 @@ TAKE_SELECTION_MIN_SCORE = 0.68
 TAKE_SELECTION_ALT_GAP = 0.08
 
 
+@dataclass(slots=True)
+class TranscriptSpan:
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass(slots=True)
+class RefinedSegmentCandidate:
+    start_sec: float
+    end_sec: float
+    boundary_strategy: str
+    boundary_confidence: float
+    seed_region_ids: list[str]
+    seed_region_sources: list[str]
+    seed_region_ranges_sec: list[list[float]]
+
+
 class NoOpTranscriptProvider:
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         return ""
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        return []
 
 
 class PySceneDetectAdapter:
@@ -112,29 +139,261 @@ class FasterWhisperAdapter:
     def __init__(self, model_size: str = "small") -> None:
         self.model_size = model_size
         self._model = None
-        self._cache: dict[str, list[tuple[float, float, str]]] = {}
+        self._cache: dict[str, list[TranscriptSpan]] = {}
 
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         spec = importlib.util.find_spec("faster_whisper")
         if spec is None:
             return ""
 
+        lines = [
+            span.text
+            for span in self.spans(asset, start_sec, end_sec)
+            if span.text
+        ]
+        return " ".join(lines).strip()
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        if importlib.util.find_spec("faster_whisper") is None:
+            return []
+        self._ensure_cached(asset)
+        return [
+            TranscriptSpan(
+                start_sec=span.start_sec,
+                end_sec=span.end_sec,
+                text=span.text,
+            )
+            for span in self._cache.get(asset.proxy_path, [])
+            if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text
+        ]
+
+    def _ensure_cached(self, asset: Asset) -> None:
         if self._model is None:
             module = importlib.import_module("faster_whisper")
             self._model = module.WhisperModel(self.model_size)
 
-        if asset.proxy_path not in self._cache:
-            segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
-            self._cache[asset.proxy_path] = [
-                (float(segment.start), float(segment.end), segment.text.strip()) for segment in segments
-            ]
+        if asset.proxy_path in self._cache:
+            return
 
-        lines = [
-            text
-            for segment_start, segment_end, text in self._cache[asset.proxy_path]
-            if segment_end >= start_sec and segment_start <= end_sec and text
+        segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
+        self._cache[asset.proxy_path] = [
+            TranscriptSpan(
+                start_sec=float(segment.start),
+                end_sec=float(segment.end),
+                text=segment.text.strip(),
+            )
+            for segment in segments
+            if segment.text.strip()
         ]
-        return " ".join(lines).strip()
+
+
+def transcript_spans_for_range(
+    transcriber: TranscriptProvider,
+    asset: Asset,
+    start_sec: float,
+    end_sec: float,
+) -> list[TranscriptSpan]:
+    spans_getter = getattr(transcriber, "spans", None)
+    if callable(spans_getter):
+        spans = spans_getter(asset, start_sec, end_sec)
+        return [
+            TranscriptSpan(
+                start_sec=float(getattr(span, "start_sec", 0.0)),
+                end_sec=float(getattr(span, "end_sec", 0.0)),
+                text=str(getattr(span, "text", "")),
+            )
+            for span in spans
+            if float(getattr(span, "end_sec", 0.0)) > float(getattr(span, "start_sec", 0.0))
+        ]
+    return []
+
+
+def refine_seed_regions(
+    *,
+    asset: Asset,
+    seed_regions: list[SeedRegion],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    audio_signals,
+) -> list[RefinedSegmentCandidate]:
+    if not seed_regions:
+        return []
+
+    refined: list[RefinedSegmentCandidate] = []
+    for seed in seed_regions:
+        candidate = (
+            _refine_seed_with_transcript(asset, seed, transcript_spans)
+            or _refine_seed_with_audio(asset, seed, audio_signals)
+            or _refine_seed_with_scene(asset, seed, base_ranges)
+            or _refine_seed_with_duration(asset, seed)
+        )
+        refined.append(candidate)
+    return _dedupe_refined_candidates(refined)
+
+
+def _refine_seed_with_transcript(
+    asset: Asset,
+    seed: SeedRegion,
+    transcript_spans: list[TranscriptSpan],
+) -> RefinedSegmentCandidate | None:
+    if not transcript_spans:
+        return None
+    margin = 0.75
+    expanded_start = max(0.0, seed.start_sec - margin)
+    expanded_end = min(asset.duration_sec, seed.end_sec + margin)
+    matching = [
+        span
+        for span in transcript_spans
+        if span.end_sec >= expanded_start and span.start_sec <= expanded_end
+    ]
+    if not matching:
+        return None
+    start_sec = max(0.0, min(span.start_sec for span in matching))
+    end_sec = min(asset.duration_sec, max(span.end_sec for span in matching))
+    if end_sec - start_sec < 1.0:
+        return None
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy="transcript-snap",
+        boundary_confidence=0.9,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_audio(
+    asset: Asset,
+    seed: SeedRegion,
+    audio_signals,
+) -> RefinedSegmentCandidate | None:
+    if not audio_signals:
+        return None
+    energetic = [sig for sig in audio_signals if not sig.is_silent and sig.rms_energy >= 0.05]
+    if not energetic:
+        return None
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    nearest_idx = min(range(len(audio_signals)), key=lambda idx: abs(audio_signals[idx].timestamp_sec - center))
+    if audio_signals[nearest_idx].is_silent or audio_signals[nearest_idx].rms_energy < 0.05:
+        nearest_idx = min(range(len(energetic)), key=lambda idx: abs(energetic[idx].timestamp_sec - center))
+        center_signal = energetic[nearest_idx]
+        nearest_idx = next(
+            idx for idx, signal in enumerate(audio_signals)
+            if signal.timestamp_sec == center_signal.timestamp_sec and signal.rms_energy == center_signal.rms_energy
+        )
+
+    left_idx = nearest_idx
+    while left_idx > 0 and not audio_signals[left_idx - 1].is_silent and audio_signals[left_idx - 1].rms_energy >= 0.05:
+        left_idx -= 1
+    right_idx = nearest_idx
+    while right_idx < len(audio_signals) - 1 and not audio_signals[right_idx + 1].is_silent and audio_signals[right_idx + 1].rms_energy >= 0.05:
+        right_idx += 1
+
+    step = _average_signal_step(audio_signals)
+    start_sec = max(0.0, audio_signals[left_idx].timestamp_sec - step / 2.0)
+    end_sec = min(asset.duration_sec, audio_signals[right_idx].timestamp_sec + step / 2.0)
+    if end_sec - start_sec < 1.0:
+        return None
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy="audio-snap",
+        boundary_confidence=0.74,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_scene(
+    asset: Asset,
+    seed: SeedRegion,
+    base_ranges: list[tuple[float, float]],
+) -> RefinedSegmentCandidate | None:
+    if not base_ranges:
+        return None
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    containing = [item for item in base_ranges if item[0] <= center <= item[1]]
+    if containing:
+        scene_start, scene_end = containing[0]
+    else:
+        scene_start, scene_end = max(
+            base_ranges,
+            key=lambda item: min(item[1], seed.end_sec) - max(item[0], seed.start_sec),
+        )
+    if scene_end - scene_start > 8.0:
+        return _refine_seed_with_duration(asset, seed, strategy="scene-duration")
+    return RefinedSegmentCandidate(
+        start_sec=round(max(0.0, scene_start), 3),
+        end_sec=round(min(asset.duration_sec, scene_end), 3),
+        boundary_strategy="scene-snap",
+        boundary_confidence=0.62,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_duration(
+    asset: Asset,
+    seed: SeedRegion,
+    *,
+    strategy: str = "duration-rule",
+) -> RefinedSegmentCandidate:
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    duration = max(1.5, min(6.0, seed.end_sec - seed.start_sec))
+    half = duration / 2.0
+    start_sec = max(0.0, center - half)
+    end_sec = min(asset.duration_sec, center + half)
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy=strategy,
+        boundary_confidence=0.48,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _average_signal_step(signals) -> float:
+    if len(signals) < 2:
+        return 1.0
+    deltas = [
+        later.timestamp_sec - earlier.timestamp_sec
+        for earlier, later in zip(signals, signals[1:])
+        if later.timestamp_sec > earlier.timestamp_sec
+    ]
+    if not deltas:
+        return 1.0
+    return sum(deltas) / len(deltas)
+
+
+def _dedupe_refined_candidates(candidates: list[RefinedSegmentCandidate]) -> list[RefinedSegmentCandidate]:
+    if not candidates:
+        return []
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item.boundary_confidence, -(item.end_sec - item.start_sec)),
+        reverse=True,
+    )
+    kept: list[RefinedSegmentCandidate] = []
+    for candidate in ordered:
+        if any(_range_overlap_ratio((candidate.start_sec, candidate.end_sec), (existing.start_sec, existing.end_sec)) >= 0.9 for existing in kept):
+            continue
+        kept.append(candidate)
+    return sorted(kept, key=lambda item: item.start_sec)
+
+
+def _range_overlap_ratio(a: tuple[float, float], b: tuple[float, float]) -> float:
+    start = max(a[0], b[0])
+    end = min(a[1], b[1])
+    if end <= start:
+        return 0.0
+    overlap = end - start
+    shorter = min(a[1] - a[0], b[1] - b[0])
+    return overlap / shorter if shorter > 0 else 0.0
 
 
 def inspect_runtime_capabilities() -> dict[str, bool]:
@@ -247,18 +506,68 @@ def analyze_assets(
         if status_callback is not None:
             audio_status = f"audio detected" if has_audio else "silent/no audio"
             status_callback(f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})")
-        segment_ranges = build_prefilter_segments(
-            asset=asset,
-            base_ranges=base_ranges,
-            signals=prefilter_signals,
-            audio_signals=audio_signals,
-            top_windows=2 if ai_config.mode == "fast" else 3,
-        )
-        if not segment_ranges:
-            segment_ranges = fallback_segments(asset.duration_sec)
+        top_windows = 2 if ai_config.mode == "fast" else 3
+        refined_candidates: list[RefinedSegmentCandidate] = []
+        if ai_config.boundary_refinement_enabled:
+            seed_regions = build_prefilter_seed_regions(
+                asset=asset,
+                base_ranges=base_ranges,
+                signals=prefilter_signals,
+                audio_signals=audio_signals,
+                top_windows=top_windows,
+            )
+            transcript_spans = (
+                transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
+                if asset.has_speech else []
+            )
+            refined_candidates = refine_seed_regions(
+                asset=asset,
+                seed_regions=seed_regions,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
+                audio_signals=audio_signals,
+            )
+
+        if refined_candidates:
+            segment_inputs = [
+                (
+                    candidate.start_sec,
+                    candidate.end_sec,
+                    candidate.boundary_strategy,
+                    candidate.boundary_confidence,
+                    candidate.seed_region_ids,
+                    candidate.seed_region_sources,
+                    candidate.seed_region_ranges_sec,
+                )
+                for candidate in refined_candidates
+            ]
+        else:
+            segment_ranges = build_prefilter_segments(
+                asset=asset,
+                base_ranges=base_ranges,
+                signals=prefilter_signals,
+                audio_signals=audio_signals,
+                top_windows=top_windows,
+            )
+            if not segment_ranges and ai_config.boundary_refinement_enabled and not ai_config.boundary_refinement_legacy_fallback:
+                segment_ranges = []
+            if not segment_ranges:
+                segment_ranges = fallback_segments(asset.duration_sec)
+            segment_inputs = [
+                (start_sec, end_sec, "legacy", 0.0, [], [], [])
+                for start_sec, end_sec in segment_ranges
+            ]
 
         asset_segments: list[CandidateSegment] = []
-        for index, (start_sec, end_sec) in enumerate(segment_ranges, start=1):
+        for index, (
+            start_sec,
+            end_sec,
+            boundary_strategy,
+            boundary_confidence,
+            seed_region_ids,
+            seed_region_sources,
+            seed_region_ranges_sec,
+        ) in enumerate(segment_inputs, start=1):
             excerpt = transcriber.excerpt(asset, start_sec, end_sec).strip() if asset.has_speech else ""
             analysis_mode = "speech" if excerpt else "visual"
             prefilter_snapshot = aggregate_segment_prefilter(
@@ -293,6 +602,11 @@ def analyze_assets(
                         sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
                         top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
                         metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
+                        boundary_strategy=boundary_strategy,
+                        boundary_confidence=boundary_confidence,
+                        seed_region_ids=list(seed_region_ids),
+                        seed_region_sources=list(seed_region_sources),
+                        seed_region_ranges_sec=list(seed_region_ranges_sec),
                     ),
                 )
             )
@@ -604,6 +918,8 @@ def build_take_recommendations(
 
     for asset in assets:
         asset_segments = [segment for segment in candidate_segments if segment.asset_id == asset.id]
+        if not asset_segments:
+            continue
         ranked_segment_data = sorted(
             ((segment, score_segment(asset, segment)) for segment in asset_segments),
             key=lambda item: item[1].total,

@@ -200,7 +200,7 @@ class ScoreSegmentTests(unittest.TestCase):
         limiting = limiting_factor_labels(asset, backup, winner)
 
         self.assertIn("visual novelty", limiting)
-        self.assertIn("story alignment", limiting)
+        self.assertIn("motion energy", limiting)
 
 
 if __name__ == "__main__":

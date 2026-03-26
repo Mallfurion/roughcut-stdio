@@ -62,6 +62,11 @@ class PrefilterDecision:
     dedup_group_id: int | None = None
     clip_gated: bool = False
     vlm_budget_capped: bool = False
+    boundary_strategy: str = "legacy"
+    boundary_confidence: float = 0.0
+    seed_region_ids: list[str] = field(default_factory=list)
+    seed_region_sources: list[str] = field(default_factory=list)
+    seed_region_ranges_sec: list[list[float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -203,6 +208,11 @@ class ProjectData:
                             dedup_group_id=segment["prefilter"].get("dedup_group_id", None),
                             clip_gated=segment["prefilter"].get("clip_gated", False),
                             vlm_budget_capped=segment["prefilter"].get("vlm_budget_capped", False),
+                            boundary_strategy=segment["prefilter"].get("boundary_strategy", "legacy"),
+                            boundary_confidence=segment["prefilter"].get("boundary_confidence", 0.0),
+                            seed_region_ids=segment["prefilter"].get("seed_region_ids", []),
+                            seed_region_sources=segment["prefilter"].get("seed_region_sources", []),
+                            seed_region_ranges_sec=segment["prefilter"].get("seed_region_ranges_sec", []),
                         )
                         if segment.get("prefilter") is not None
                         else None

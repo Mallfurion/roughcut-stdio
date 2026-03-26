@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import unittest
+import unittest.mock
 
 from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
 from services.analyzer.app.analysis import (
+    NoOpTranscriptProvider,
+    TranscriptSpan,
     analyze_assets,
     build_segment_review_state,
     build_take_recommendations,
@@ -14,6 +18,7 @@ from services.analyzer.app.analysis import (
     select_prefilter_shortlist_ids,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision, ProjectMeta
+from services.analyzer.app.prefilter import AudioSignal
 from services.analyzer.app.service import load_project
 
 
@@ -34,6 +39,21 @@ class StaticTranscriptProvider:
         if asset.has_speech and start_sec < 6:
             return "This is the line that turns the sequence."
         return ""
+
+
+class TimedTranscriptProvider:
+    def __init__(self, spans: list[TranscriptSpan]) -> None:
+        self._spans = spans
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        return [
+            span
+            for span in self._spans
+            if span.end_sec >= start_sec and span.start_sec <= end_sec
+        ]
+
+    def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
+        return " ".join(span.text for span in self.spans(asset, start_sec, end_sec)).strip()
 
 
 class ExpensiveAnalyzerStub:
@@ -397,6 +417,216 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertTrue(segments["segment-best"].review_state.model_analyzed)
         self.assertTrue(segments["segment-clip-gated"].review_state.deterministic_fallback)
         self.assertIn("budget capped", segments["segment-budget-capped"].review_state.analysis_path_summary)
+
+    def test_boundary_refinement_uses_transcript_spans_when_enabled(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Interview",
+            source_path="/tmp/interview.mov",
+            proxy_path="/tmp/interview.mov",
+            duration_sec=20.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C111",
+        )
+        transcript_provider = TimedTranscriptProvider(
+            [
+                TranscriptSpan(1.0, 2.5, "How do you start?"),
+                TranscriptSpan(2.6, 4.8, "You begin with the strongest frame."),
+            ]
+        )
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="test-project",
+                    name="Test Project",
+                    story_prompt="Build a rough cut",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 10.0)]),
+                transcript_provider=transcript_provider,
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        transcript_segments = [
+            segment for segment in project.candidate_segments
+            if segment.prefilter and segment.prefilter.boundary_strategy == "transcript-snap"
+        ]
+        self.assertTrue(transcript_segments)
+        self.assertTrue(any(segment.start_sec <= 1.0 and segment.end_sec >= 4.8 for segment in transcript_segments))
+        self.assertTrue(all(segment.prefilter.seed_region_ids for segment in transcript_segments if segment.prefilter))
+
+    def test_boundary_refinement_uses_audio_when_transcript_missing(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Reaction",
+            source_path="/tmp/reaction.mov",
+            proxy_path="/tmp/reaction.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C112",
+        )
+        audio_signals = [
+            AudioSignal(timestamp_sec=1.0, rms_energy=0.0, peak_loudness=0.0, is_silent=True, source="ffmpeg"),
+            AudioSignal(timestamp_sec=3.0, rms_energy=0.4, peak_loudness=0.5, is_silent=False, source="ffmpeg"),
+            AudioSignal(timestamp_sec=5.0, rms_energy=0.45, peak_loudness=0.6, is_silent=False, source="ffmpeg"),
+            AudioSignal(timestamp_sec=7.0, rms_energy=0.0, peak_loudness=0.0, is_silent=True, source="ffmpeg"),
+        ]
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.sample_audio_signals",
+                return_value=audio_signals,
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                    transcript_provider=NoOpTranscriptProvider(),
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        audio_segments = [
+            segment for segment in project.candidate_segments
+            if segment.prefilter and segment.prefilter.boundary_strategy == "audio-snap"
+        ]
+        self.assertTrue(audio_segments)
+        self.assertTrue(any(segment.start_sec <= 2.0 and segment.end_sec >= 6.0 for segment in audio_segments))
+
+    def test_boundary_refinement_falls_back_without_transcript_or_audio(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Silent Visual",
+            source_path="/tmp/visual.mov",
+            proxy_path="/tmp/visual.mov",
+            duration_sec=16.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C113",
+        )
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="test-project",
+                    name="Test Project",
+                    story_prompt="Build a rough cut",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 16.0)]),
+                transcript_provider=NoOpTranscriptProvider(),
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        self.assertTrue(project.candidate_segments)
+        strategies = {
+            segment.prefilter.boundary_strategy
+            for segment in project.candidate_segments
+            if segment.prefilter is not None
+        }
+        self.assertTrue(strategies.issubset({"scene-duration", "scene-snap", "duration-rule"}))
+
+    def test_boundary_refinement_changes_output_vs_legacy_path(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Interview",
+            source_path="/tmp/interview.mov",
+            proxy_path="/tmp/interview.mov",
+            duration_sec=20.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C114",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.5, "A complete answer.")])
+        legacy_project = ProjectMeta(
+            id="test-project-legacy",
+            name="Test Project",
+            story_prompt="Build a rough cut",
+            status="draft",
+            media_roots=["/tmp"],
+        )
+        refined_project = ProjectMeta(
+            id="test-project-refined",
+            name="Test Project",
+            story_prompt="Build a rough cut",
+            status="draft",
+            media_roots=["/tmp"],
+        )
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            legacy = analyze_assets(
+                project=legacy_project,
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 20.0)]),
+                transcript_provider=transcript_provider,
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            refined = analyze_assets(
+                project=refined_project,
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 20.0)]),
+                transcript_provider=transcript_provider,
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        legacy_ranges = {(segment.start_sec, segment.end_sec) for segment in legacy.candidate_segments}
+        refined_ranges = {(segment.start_sec, segment.end_sec) for segment in refined.candidate_segments}
+        self.assertNotEqual(legacy_ranges, refined_ranges)
+        self.assertTrue(any(segment.prefilter.boundary_strategy != "legacy" for segment in refined.candidate_segments if segment.prefilter))
+
+    def test_boundary_provenance_round_trips_through_project_data(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Interview",
+            source_path="/tmp/interview.mov",
+            proxy_path="/tmp/interview.mov",
+            duration_sec=20.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C115",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.0, "A complete answer.")])
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="test-project",
+                    name="Test Project",
+                    story_prompt="Build a rough cut",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 20.0)]),
+                transcript_provider=transcript_provider,
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        from services.analyzer.app.domain import ProjectData
+
+        restored = ProjectData.from_dict(project.to_dict())
+        restored_segment = restored.candidate_segments[0]
+        self.assertIsNotNone(restored_segment.prefilter)
+        self.assertIn(restored_segment.prefilter.boundary_strategy, {"transcript-snap", "scene-duration", "scene-snap", "duration-rule"})
+        self.assertIsInstance(restored_segment.prefilter.seed_region_ids, list)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,15 @@ class AudioSignal:
     source: str
 
 
+@dataclass(slots=True)
+class SeedRegion:
+    id: str
+    source: str
+    start_sec: float
+    end_sec: float
+    score_hint: float = 0.0
+
+
 def sample_asset_signals(
     asset: Asset,
     *,
@@ -77,28 +86,82 @@ def build_prefilter_segments(
     audio_signals: list[AudioSignal] | None = None,
     top_windows: int = 2,
 ) -> list[tuple[float, float]]:
+    seed_regions = build_prefilter_seed_regions(
+        asset=asset,
+        base_ranges=base_ranges,
+        signals=signals,
+        audio_signals=audio_signals,
+        top_windows=top_windows,
+    )
+    return [(region.start_sec, region.end_sec) for region in seed_regions]
+
+
+def build_prefilter_seed_regions(
+    *,
+    asset: Asset,
+    base_ranges: list[tuple[float, float]],
+    signals: list[FrameSignal],
+    audio_signals: list[AudioSignal] | None = None,
+    top_windows: int = 2,
+) -> list[SeedRegion]:
     ranges = normalized_ranges(base_ranges, asset.duration_sec)
+    seed_regions: list[SeedRegion] = [
+        SeedRegion(
+            id=f"{asset.id}-seed-scene-{index:02d}",
+            source="scene",
+            start_sec=start_sec,
+            end_sec=end_sec,
+            score_hint=0.55,
+        )
+        for index, (start_sec, end_sec) in enumerate(ranges, start=1)
+    ]
     if not signals:
-        return ranges
+        return _dedupe_seed_regions(seed_regions, asset.duration_sec)
 
     peak_windows = windows_from_peak_signals(
         asset=asset,
         signals=signals,
         limit=top_windows,
     )
+    for index, (start_sec, end_sec) in enumerate(peak_windows, start=1):
+        seed_regions.append(
+            SeedRegion(
+                id=f"{asset.id}-seed-visual-{index:02d}",
+                source="visual-peak",
+                start_sec=start_sec,
+                end_sec=end_sec,
+                score_hint=0.72,
+            )
+        )
 
-    audio_peak_windows: list[tuple[float, float]] = []
     if audio_signals:
         audio_peak_windows = windows_from_peak_audio_signals(
             asset=asset,
             audio_signals=audio_signals,
             limit=top_windows,
         )
+        for index, (start_sec, end_sec) in enumerate(audio_peak_windows, start=1):
+            seed_regions.append(
+                SeedRegion(
+                    id=f"{asset.id}-seed-audio-{index:02d}",
+                    source="audio-peak",
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    score_hint=0.68,
+                )
+            )
 
-    combined = ranges + peak_windows + audio_peak_windows
-    if not combined:
-        return ranges
-    return dedupe_ranges(combined, asset.duration_sec)
+    if not seed_regions:
+        seed_regions = [
+            SeedRegion(
+                id=f"{asset.id}-seed-fallback-01",
+                source="fallback",
+                start_sec=0.0,
+                end_sec=round(max(asset.duration_sec, 1.0), 3),
+                score_hint=0.3,
+            )
+        ]
+    return _dedupe_seed_regions(seed_regions, asset.duration_sec)
 
 
 def aggregate_segment_prefilter(
@@ -249,6 +312,40 @@ def dedupe_ranges(ranges: list[tuple[float, float]], duration_sec: float) -> lis
             continue
         kept.append((round(candidate[0], 3), round(candidate[1], 3)))
     return sorted(kept, key=lambda item: item[0])
+
+
+def _dedupe_seed_regions(seed_regions: list[SeedRegion], duration_sec: float) -> list[SeedRegion]:
+    if not seed_regions:
+        return []
+
+    ordered = sorted(
+        (
+            SeedRegion(
+                id=region.id,
+                source=region.source,
+                start_sec=max(0.0, region.start_sec),
+                end_sec=min(duration_sec, region.end_sec),
+                score_hint=region.score_hint,
+            )
+            for region in seed_regions
+            if region.end_sec > region.start_sec
+        ),
+        key=lambda region: ((region.end_sec - region.start_sec), region.start_sec),
+    )
+    kept: list[SeedRegion] = []
+    for candidate in ordered:
+        if any(overlap_ratio((candidate.start_sec, candidate.end_sec), (existing.start_sec, existing.end_sec)) >= 0.9 for existing in kept):
+            continue
+        kept.append(
+            SeedRegion(
+                id=candidate.id,
+                source=candidate.source,
+                start_sec=round(candidate.start_sec, 3),
+                end_sec=round(candidate.end_sec, 3),
+                score_hint=round(candidate.score_hint, 4),
+            )
+        )
+    return sorted(kept, key=lambda region: region.start_sec)
 
 
 def overlap_ratio(a: tuple[float, float], b: tuple[float, float]) -> float:
