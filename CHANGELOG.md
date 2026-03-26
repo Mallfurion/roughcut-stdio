@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-03-26
+
+### 🚀 Features
+- Refine segment selection with deterministic boundary refinement and narrative-unit assembly.
+- Align the desktop review workspace with recommendation ranking, score breakdowns, and segment imagery.
+- Add analyzer process benchmarking artifacts and run-history tracking.
+
+### 🛠 Fixes & Improvements
+- Update processing workflow documentation and supporting docs for the new review and benchmarking flow.
+
+### 📦 Other
+- Archive the implemented OpenSpec change proposals for segment refinement work.
+- Merge pull request #2 from `feature/segment-refinement`.
+
 ## [1.2.0] - 2026-03-26
 
 ### 🚀 Features
