@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-03-26
+
+### 🚀 Features
+- Stabilize semantic boundary calibration with transcript-turn-aware scoring, repeatable segmentation evaluation, stricter local split handling, and better semantic boundary diagnostics.
+
+### 🛠 Fixes & Improvements
+- Update analyzer and desktop configuration/docs for the new evaluation and semantic-boundary behavior.
+
+### 📦 Other
+- Archive the completed OpenSpec changes for segmentation evaluation, transcript-turn structure, and semantic-boundary calibration.
+
 ## [1.4.0] - 2026-03-26
 
 ### 🚀 Features
