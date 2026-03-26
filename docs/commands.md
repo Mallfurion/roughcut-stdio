@@ -125,7 +125,7 @@ Set `TIMELINE_AI_PROVIDER=deterministic` to skip VLM calls, then run:
 TIMELINE_AI_PROVIDER=deterministic npm run process
 ```
 
-This runs the full pipeline without multimodal model calls. If you also want the new segmentation behavior enabled during debugging, add `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true`.
+This runs the full pipeline without multimodal model calls. The current segmentation stack is on by default; add `TIMELINE_SEGMENT_SEMANTIC_VALIDATION=false` if you want to isolate deterministic boundary behavior.
 
 ### Debug CLIP deduplication
 

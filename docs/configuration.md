@@ -49,9 +49,9 @@ The analyzer is configured through environment variables loaded from `.env` and 
 
 ## Segment Boundary Refinement
 
-- `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` — Enable deterministic seed-region refinement before scoring (default: `false`)
+- `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` — Enable deterministic seed-region refinement before scoring (default: `true`)
 - `TIMELINE_SEGMENT_LEGACY_FALLBACK` — Keep legacy candidate behavior available when refinement yields nothing (default: `true`)
-- `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` — Enable optional semantic boundary validation for ambiguous segments (default: `false`)
+- `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` — Enable optional semantic boundary validation for ambiguous segments (default: `true`)
 - `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` — Ambiguity threshold used to select validation candidates [0–1] (default: `0.7`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` — Percentage of eligible ambiguous segments that may be semantically validated (default: `100`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` — Hard cap on semantically validated segments per run (default: `2`)
@@ -73,7 +73,7 @@ TIMELINE_AI_PROVIDER=deterministic
 
 This mode analyzes footage using frame-level visual signals (sharpness, contrast, motion energy, distinctiveness) without running any neural network models. Good for quick testing or systems without GPU/MLX support.
 
-If you want the current deterministic segmentation stack without any VLM calls, enable boundary refinement while keeping semantic validation off:
+If you want the current deterministic segmentation stack without any VLM calls, keep the default boundary refinement on and disable semantic validation explicitly:
 
 ```bash
 TIMELINE_AI_PROVIDER=deterministic

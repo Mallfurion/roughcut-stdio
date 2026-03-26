@@ -86,7 +86,7 @@ Seed regions are intermediate structures. They are not yet the final candidate s
 
 ### Step 2.5 - Deterministic Boundary Refinement
 
-If `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true`, each seed region is deterministically refined into a bounded segment before scoring.
+Deterministic seed-region refinement is enabled by default. Each seed region is refined into a bounded segment before scoring.
 
 Depending on available evidence, the analyzer may:
 
@@ -126,7 +126,7 @@ For each final candidate range, the analyzer creates a `CandidateSegment`. This 
 
 ### Step 2.8 - Optional Semantic Boundary Validation
 
-If `TIMELINE_SEGMENT_SEMANTIC_VALIDATION=true`, only ambiguous segments are eligible for a semantic boundary-validation pass.
+Semantic boundary validation is enabled by default, but only ambiguous segments are eligible for a boundary-validation pass.
 
 Eligibility is based on boundary confidence and assembly strategy. Validation is bounded by:
 
@@ -279,9 +279,9 @@ The main behavior switches are:
 | `TIMELINE_AI_CLIP_ENABLED` | `true` | Enable CLIP scoring and CLIP-based dedup |
 | `TIMELINE_AI_CLIP_MIN_SCORE` | `0.35` | CLIP gate threshold for VLM targeting |
 | `TIMELINE_AI_VLM_BUDGET_PCT` | `100` | Percent of shortlisted segments that may reach VLM analysis |
-| `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` | `false` | Enable deterministic seed refinement before scoring |
+| `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` | `true` | Enable deterministic seed refinement before scoring |
 | `TIMELINE_SEGMENT_LEGACY_FALLBACK` | `true` | Keep legacy fallback available if refinement yields nothing |
-| `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` | `false` | Enable semantic boundary validation for ambiguous segments |
+| `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` | `true` | Enable semantic boundary validation for ambiguous segments |
 | `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` | `0.7` | Minimum ambiguity needed to be validation-eligible |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` | `100` | Percent of eligible ambiguous segments that may be validated |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` | `2` | Hard cap on validated segments per run |

@@ -117,9 +117,9 @@ class AIAnalysisConfig:
     vlm_budget_pct: int = 100
     clip_model: str = "ViT-B-32"
     clip_model_pretrained: str = "laion2b_s34b_b79k"
-    boundary_refinement_enabled: bool = False
+    boundary_refinement_enabled: bool = True
     boundary_refinement_legacy_fallback: bool = True
-    semantic_boundary_validation_enabled: bool = False
+    semantic_boundary_validation_enabled: bool = True
     semantic_boundary_ambiguity_threshold: float = 0.7
     semantic_boundary_validation_budget_pct: int = 100
     semantic_boundary_validation_max_segments: int = 2
@@ -949,9 +949,9 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     max_segments_default = 1 if mode == "fast" else 99
     max_keyframes_default = 1 if mode == "fast" else 4
     max_width_default = 448 if mode == "fast" else 960
-    boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", False)
+    boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", True)
     boundary_refinement_legacy_fallback = parse_bool_env("TIMELINE_SEGMENT_LEGACY_FALLBACK", True)
-    semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", False)
+    semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", True)
     semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.7)
     semantic_boundary_ambiguity_threshold = max(0.0, min(1.0, semantic_boundary_ambiguity_threshold))
     semantic_boundary_validation_budget_pct = parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT", 100)
