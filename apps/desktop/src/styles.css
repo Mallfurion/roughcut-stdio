@@ -523,6 +523,19 @@ h2 {
   padding: 20px;
 }
 
+.section-outcome--best {
+  border-color: rgba(95, 209, 166, 0.26);
+  box-shadow: inset 0 0 0 1px rgba(95, 209, 166, 0.08);
+}
+
+.section-outcome--alternate {
+  border-color: rgba(255, 202, 107, 0.18);
+}
+
+.section-outcome--backup {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
 .section-card--deduplicated {
   opacity: 0.65;
   background: rgba(255, 202, 107, 0.04);
@@ -553,10 +566,29 @@ h2 {
 }
 
 .section-summary {
-  margin: 16px 0 12px;
+  margin: 14px 0 10px;
   font-size: 1.18rem;
   line-height: 1.45;
   font-weight: 600;
+}
+
+.section-recommendation,
+.section-analysis-path,
+.section-evidence,
+.section-rationale {
+  line-height: 1.5;
+}
+
+.section-recommendation {
+  margin: 14px 0 6px;
+  font-size: 0.98rem;
+  color: #effbf6;
+}
+
+.section-analysis-path,
+.section-evidence {
+  margin: 6px 0 0;
+  font-size: 0.9rem;
 }
 
 .section-meta {
@@ -566,9 +598,40 @@ h2 {
 }
 
 .section-rationale {
-  margin-top: 10px;
+  margin-top: 8px;
   font-size: 0.98rem;
-  line-height: 1.5;
+}
+
+.score-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 14px;
+}
+
+.score-metric {
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.score-metric span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.73rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.score-metric strong {
+  font-size: 1.05rem;
+}
+
+.score-metric--prominent {
+  border-color: rgba(95, 209, 166, 0.22);
+  background: rgba(95, 209, 166, 0.08);
 }
 
 .audio-metrics {
@@ -667,5 +730,9 @@ h2 {
   .stepper-layout,
   .view-head {
     display: grid;
+  }
+
+  .score-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

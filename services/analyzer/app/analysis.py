@@ -45,6 +45,7 @@ from .domain import (
     PrefilterDecision,
     ProjectData,
     ProjectMeta,
+    SegmentReviewState,
     TakeRecommendation,
     Timeline,
     TimelineItem,
@@ -58,6 +59,7 @@ from .prefilter import (
     sample_timestamps,
 )
 from .scoring import score_segment
+from .scoring import limiting_factor_labels, top_score_driver_labels
 
 
 class SceneDetector(Protocol):
@@ -72,6 +74,9 @@ class TranscriptProvider(Protocol):
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int, Asset], None]
+
+TAKE_SELECTION_MIN_SCORE = 0.68
+TAKE_SELECTION_ALT_GAP = 0.08
 
 
 class NoOpTranscriptProvider:
@@ -509,6 +514,9 @@ def analyze_assets(
             progress_callback(asset_index, total_assets, asset)
     per_asset_analysis_duration = time.monotonic() - per_asset_analysis_started_at
 
+    for segment in candidate_segments:
+        segment.review_state = build_segment_review_state(segment)
+
     take_selection_started_at = time.monotonic()
     take_recommendations = build_take_recommendations(assets, candidate_segments)
     take_selection_duration = time.monotonic() - take_selection_started_at
@@ -592,32 +600,58 @@ def build_take_recommendations(
     assets: list[Asset],
     candidate_segments: list[CandidateSegment],
 ) -> list[TakeRecommendation]:
-    asset_by_id = {asset.id: asset for asset in assets}
     takes: list[TakeRecommendation] = []
 
     for asset in assets:
         asset_segments = [segment for segment in candidate_segments if segment.asset_id == asset.id]
-        ranked_segments = sorted(
-            asset_segments,
-            key=lambda segment: score_segment(asset_by_id[segment.asset_id], segment).total,
+        ranked_segment_data = sorted(
+            ((segment, score_segment(asset, segment)) for segment in asset_segments),
+            key=lambda item: item[1].total,
             reverse=True,
         )
+        ranked_segments = [segment for segment, _breakdown in ranked_segment_data]
+        breakdown_by_segment_id = {segment.id: breakdown for segment, breakdown in ranked_segment_data}
         selected_segments = select_segments_for_asset(asset, ranked_segments)
+        selected_ids = {selected.id for selected in selected_segments}
+        winner_segment = ranked_segments[0]
+        winner_score = breakdown_by_segment_id[winner_segment.id].total
+        rank_by_segment_id = {segment.id: index for index, segment in enumerate(ranked_segments, start=1)}
 
         for index, segment in enumerate(asset_segments, start=1):
-            breakdown = score_segment(asset, segment)
-            is_best_take = segment.id in {selected.id for selected in selected_segments}
+            breakdown = breakdown_by_segment_id[segment.id]
+            is_best_take = segment.id in selected_ids
+            outcome = recommendation_outcome(segment, winner_segment, selected_ids)
+            drivers = top_score_driver_labels(asset, segment)
+            limiting_factors = (
+                []
+                if segment.id == winner_segment.id
+                else limiting_factor_labels(asset, segment, winner_segment)
+            )
             takes.append(
                 TakeRecommendation(
                     id=f"{asset.id}-take-{index:02d}",
                     candidate_segment_id=segment.id,
-                    title=make_take_title(asset, segment, breakdown.analysis_mode, is_best_take),
+                    title=make_take_title(asset, segment, breakdown.analysis_mode, outcome),
                     is_best_take=is_best_take,
-                    selection_reason=make_selection_reason(asset, segment, breakdown.total, is_best_take),
+                    selection_reason=make_selection_reason(
+                        asset=asset,
+                        segment=segment,
+                        total_score=breakdown.total,
+                        outcome=outcome,
+                        winner_score=winner_score,
+                        within_asset_rank=rank_by_segment_id[segment.id],
+                        driver_labels=drivers,
+                        limiting_labels=limiting_factors,
+                    ),
                     score_technical=breakdown.technical,
                     score_semantic=breakdown.semantic,
                     score_story=breakdown.story,
                     score_total=breakdown.total,
+                    outcome=outcome,
+                    within_asset_rank=rank_by_segment_id[segment.id],
+                    score_gap_to_winner=round(max(0.0, winner_score - breakdown.total), 4),
+                    score_driver_labels=drivers,
+                    limiting_factor_labels=limiting_factors,
                 )
             )
 
@@ -783,31 +817,152 @@ def visual_role(metrics: dict[str, float]) -> str:
     return "transition-ready"
 
 
-def make_take_title(asset: Asset, segment: CandidateSegment, analysis_mode: str, is_best_take: bool) -> str:
-    title_prefix = "Best" if is_best_take else "Candidate"
+def make_take_title(asset: Asset, segment: CandidateSegment, analysis_mode: str, outcome: str) -> str:
+    title_prefix = "Best" if outcome == "best" else "Alternate" if outcome == "alternate" else "Candidate"
     role = "Dialogue" if analysis_mode == "speech" else "Visual"
     return f"{title_prefix} {role}: {asset.name}"
 
 
+def recommendation_outcome(
+    segment: CandidateSegment,
+    winner_segment: CandidateSegment,
+    selected_ids: set[str],
+) -> str:
+    if segment.id == winner_segment.id:
+        return "best"
+    if segment.id in selected_ids:
+        return "alternate"
+    return "backup"
+
+
 def make_selection_reason(
+    *,
     asset: Asset,
     segment: CandidateSegment,
     total_score: float,
-    is_best_take: bool,
+    outcome: str,
+    winner_score: float,
+    within_asset_rank: int,
+    driver_labels: list[str],
+    limiting_labels: list[str],
 ) -> str:
-    if is_best_take and segment.analysis_mode == "speech":
+    score = round(total_score * 100)
+    score_gap = round(max(0.0, (winner_score - total_score) * 100))
+    drivers = human_join(driver_labels[:3])
+    limiting = human_join(limiting_labels[:2])
+
+    if outcome == "best":
+        return f"Won this clip at {score}/100 on {drivers}."
+
+    if outcome == "alternate":
         return (
-            f"Selected because {asset.name} contributes a spoken narrative beat with a {round(total_score * 100):d}/100 composite score."
+            f"Kept as an alternate {score_gap} point{'s' if score_gap != 1 else ''} behind the winner "
+            f"because it still cleared the selection gap on {drivers}."
         )
 
-    if is_best_take:
+    if total_score < TAKE_SELECTION_MIN_SCORE:
         return (
-            f"Selected because {asset.name} works as silent b-roll with strong visual novelty and pacing at {round(total_score * 100):d}/100."
+            f"Usable, but below the {round(TAKE_SELECTION_MIN_SCORE * 100):d}/100 selection threshold. "
+            f"Strongest factors were {drivers}."
+        )
+
+    if asset.duration_sec >= 18 and total_score < winner_score - TAKE_SELECTION_ALT_GAP:
+        return (
+            f"Usable, but {score_gap} points behind the winner and outside the alternate gap, "
+            f"mainly on {limiting or drivers}."
         )
 
     return (
-        f"Kept as a backup candidate; the segment is usable but less distinctive for the story than the higher-ranked alternative in this clip."
+        f"Usable, but ranked #{within_asset_rank} behind the selected take for this clip, "
+        f"mainly on {limiting or drivers}."
     )
+
+
+def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
+    prefilter = segment.prefilter
+    evidence = segment.evidence_bundle
+    understanding = segment.ai_understanding
+    clip_score = None
+    if prefilter is not None:
+        clip_score = prefilter.metrics_snapshot.get("clip_score")
+
+    model_analyzed = bool(understanding and understanding.provider != "deterministic")
+    deterministic_fallback = bool(understanding and understanding.provider == "deterministic")
+    evidence_keyframe_count = len(evidence.keyframe_timestamps_sec) if evidence is not None else 0
+    blocked_reason = review_blocked_reason(segment)
+
+    return SegmentReviewState(
+        shortlisted=bool(prefilter and prefilter.shortlisted),
+        filtered_before_vlm=bool(prefilter and prefilter.filtered_before_vlm),
+        clip_scored=clip_score is not None,
+        clip_score=round(clip_score, 4) if clip_score is not None else None,
+        clip_gated=bool(prefilter and prefilter.clip_gated),
+        deduplicated=bool(prefilter and prefilter.deduplicated),
+        dedup_group_id=prefilter.dedup_group_id if prefilter is not None else None,
+        vlm_budget_capped=bool(prefilter and prefilter.vlm_budget_capped),
+        model_analyzed=model_analyzed,
+        deterministic_fallback=deterministic_fallback,
+        evidence_keyframe_count=evidence_keyframe_count,
+        analysis_path_summary=describe_analysis_path(segment, evidence_keyframe_count),
+        blocked_reason=blocked_reason,
+    )
+
+
+def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: int) -> str:
+    prefilter = segment.prefilter
+    understanding = segment.ai_understanding
+    steps: list[str] = []
+
+    if prefilter and prefilter.shortlisted:
+        steps.append("shortlisted")
+    else:
+        steps.append("screened locally only")
+
+    clip_score = prefilter.metrics_snapshot.get("clip_score") if prefilter is not None else None
+    if clip_score is not None:
+        steps.append(f"CLIP {round(clip_score * 100):d}")
+    if prefilter and prefilter.deduplicated:
+        steps.append(f"deduped in group {prefilter.dedup_group_id}")
+    if prefilter and prefilter.clip_gated:
+        steps.append("CLIP gated")
+    if prefilter and prefilter.vlm_budget_capped:
+        steps.append("budget capped")
+    if evidence_keyframe_count > 0:
+        steps.append(f"{evidence_keyframe_count} keyframe{'s' if evidence_keyframe_count != 1 else ''}")
+
+    if understanding is not None:
+        if understanding.provider == "deterministic":
+            steps.append("deterministic fallback")
+        else:
+            steps.append(f"VLM {understanding.provider}")
+
+    return " -> ".join(steps)
+
+
+def review_blocked_reason(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    if prefilter.deduplicated:
+        return "duplicate"
+    if prefilter.clip_gated:
+        return "clip_gate"
+    if prefilter.vlm_budget_capped:
+        return "budget_cap"
+    if prefilter.filtered_before_vlm:
+        return "shortlist_filter"
+    return ""
+
+
+def human_join(items: list[str]) -> str:
+    values = [item for item in items if item]
+    if not values:
+        return "overall balance"
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
 def select_segments_for_asset(asset: Asset, segments: list[CandidateSegment]) -> list[CandidateSegment]:
@@ -818,9 +973,9 @@ def select_segments_for_asset(asset: Asset, segments: list[CandidateSegment]) ->
     primary_score = score_segment(asset, segments[0]).total
     for segment in segments:
         breakdown = score_segment(asset, segment)
-        if breakdown.total < 0.68:
+        if breakdown.total < TAKE_SELECTION_MIN_SCORE:
             continue
-        if selected and breakdown.total < primary_score - 0.08:
+        if selected and breakdown.total < primary_score - TAKE_SELECTION_ALT_GAP:
             continue
         selected.append(segment)
         if len(selected) >= (2 if asset.duration_sec >= 18 else 1):

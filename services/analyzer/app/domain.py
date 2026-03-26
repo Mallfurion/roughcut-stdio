@@ -87,6 +87,23 @@ class SegmentUnderstanding:
 
 
 @dataclass(slots=True)
+class SegmentReviewState:
+    shortlisted: bool
+    filtered_before_vlm: bool
+    clip_scored: bool
+    clip_score: float | None = None
+    clip_gated: bool = False
+    deduplicated: bool = False
+    dedup_group_id: int | None = None
+    vlm_budget_capped: bool = False
+    model_analyzed: bool = False
+    deterministic_fallback: bool = False
+    evidence_keyframe_count: int = 0
+    analysis_path_summary: str = ""
+    blocked_reason: str = ""
+
+
+@dataclass(slots=True)
 class CandidateSegment:
     id: str
     asset_id: str
@@ -99,6 +116,7 @@ class CandidateSegment:
     prefilter: PrefilterDecision | None = None
     evidence_bundle: SegmentEvidence | None = None
     ai_understanding: SegmentUnderstanding | None = None
+    review_state: SegmentReviewState | None = None
 
 
 @dataclass(slots=True)
@@ -112,6 +130,11 @@ class TakeRecommendation:
     score_semantic: float
     score_story: float
     score_total: float
+    outcome: str = "backup"
+    within_asset_rank: int = 0
+    score_gap_to_winner: float = 0.0
+    score_driver_labels: list[str] = field(default_factory=list)
+    limiting_factor_labels: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -178,6 +201,8 @@ class ProjectData:
                             metrics_snapshot=segment["prefilter"].get("metrics_snapshot", {}),
                             deduplicated=segment["prefilter"].get("deduplicated", False),
                             dedup_group_id=segment["prefilter"].get("dedup_group_id", None),
+                            clip_gated=segment["prefilter"].get("clip_gated", False),
+                            vlm_budget_capped=segment["prefilter"].get("vlm_budget_capped", False),
                         )
                         if segment.get("prefilter") is not None
                         else None
@@ -190,6 +215,11 @@ class ProjectData:
                     ai_understanding=(
                         SegmentUnderstanding(**segment["ai_understanding"])
                         if segment.get("ai_understanding") is not None
+                        else None
+                    ),
+                    review_state=(
+                        SegmentReviewState(**segment["review_state"])
+                        if segment.get("review_state") is not None
                         else None
                     ),
                 )

@@ -1,0 +1,404 @@
+{
+  "project": {
+    "id": "project-review-states",
+    "name": "Review State Fixture",
+    "story_prompt": "Build a rough cut from the strongest beats.",
+    "status": "draft"
+  },
+  "assets": [
+    {
+      "id": "asset-review",
+      "name": "Review Fixture Clip",
+      "source_path": "/tmp/review-source.mov",
+      "proxy_path": "/tmp/review-proxy.mov",
+      "duration_sec": 30.0,
+      "fps": 24.0,
+      "width": 1920,
+      "height": 1080,
+      "has_speech": true,
+      "interchange_reel_name": "A900_C001"
+    }
+  ],
+  "candidate_segments": [
+    {
+      "id": "segment-best",
+      "asset_id": "asset-review",
+      "start_sec": 0.0,
+      "end_sec": 5.0,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "This line clearly turns the story.",
+      "description": "Winning speech segment.",
+      "quality_metrics": {
+        "sharpness": 0.81,
+        "stability": 0.79,
+        "visual_novelty": 0.58,
+        "subject_clarity": 0.88,
+        "motion_energy": 0.28,
+        "duration_fit": 0.91,
+        "audio_energy": 0.83,
+        "speech_ratio": 0.95,
+        "hook_strength": 0.93,
+        "story_alignment": 0.96
+      },
+      "prefilter": {
+        "score": 0.9,
+        "shortlisted": true,
+        "filtered_before_vlm": false,
+        "selection_reason": "Reached VLM target set.",
+        "sampled_frame_count": 3,
+        "sampled_frame_timestamps_sec": [1.0, 2.5, 4.0],
+        "top_frame_timestamps_sec": [2.5],
+        "metrics_snapshot": {
+          "clip_score": 0.71
+        }
+      },
+      "evidence_bundle": {
+        "media_path": "/tmp/review-proxy.mov",
+        "transcript_excerpt": "This line clearly turns the story.",
+        "story_prompt": "Build a rough cut from the strongest beats.",
+        "analysis_mode": "speech",
+        "keyframe_timestamps_sec": [1.0, 2.5, 4.0],
+        "keyframe_paths": [],
+        "context_window_start_sec": 0.0,
+        "context_window_end_sec": 10.0,
+        "metrics_snapshot": {
+          "story_alignment": 0.96
+        },
+        "contact_sheet_path": ""
+      },
+      "ai_understanding": {
+        "provider": "lmstudio",
+        "provider_model": "qwen",
+        "schema_version": "segment-understanding-v1",
+        "summary": "Clear narrative beat.",
+        "subjects": ["vendor"],
+        "actions": ["speaks"],
+        "shot_type": "medium",
+        "camera_motion": "static",
+        "mood": "active",
+        "story_roles": ["turn"],
+        "quality_findings": ["clear subject"],
+        "keep_label": "keep",
+        "confidence": 0.88,
+        "rationale": "Strong beat.",
+        "risk_flags": [],
+        "visual_distinctiveness": 0.74,
+        "clarity": 0.87,
+        "story_relevance": 0.94
+      }
+    },
+    {
+      "id": "segment-alternate",
+      "asset_id": "asset-review",
+      "start_sec": 5.0,
+      "end_sec": 10.0,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "Useful follow-up line.",
+      "description": "Alternate speech segment.",
+      "quality_metrics": {
+        "sharpness": 0.79,
+        "stability": 0.77,
+        "visual_novelty": 0.54,
+        "subject_clarity": 0.84,
+        "motion_energy": 0.24,
+        "duration_fit": 0.88,
+        "audio_energy": 0.79,
+        "speech_ratio": 0.89,
+        "hook_strength": 0.87,
+        "story_alignment": 0.9
+      },
+      "prefilter": {
+        "score": 0.86,
+        "shortlisted": true,
+        "filtered_before_vlm": false,
+        "selection_reason": "Reached VLM target set.",
+        "sampled_frame_count": 3,
+        "sampled_frame_timestamps_sec": [6.0, 7.5, 9.0],
+        "top_frame_timestamps_sec": [7.5],
+        "metrics_snapshot": {
+          "clip_score": 0.66
+        }
+      },
+      "evidence_bundle": {
+        "media_path": "/tmp/review-proxy.mov",
+        "transcript_excerpt": "Useful follow-up line.",
+        "story_prompt": "Build a rough cut from the strongest beats.",
+        "analysis_mode": "speech",
+        "keyframe_timestamps_sec": [6.0, 7.5, 9.0],
+        "keyframe_paths": [],
+        "context_window_start_sec": 0.0,
+        "context_window_end_sec": 15.0,
+        "metrics_snapshot": {
+          "story_alignment": 0.9
+        },
+        "contact_sheet_path": ""
+      },
+      "ai_understanding": {
+        "provider": "mlx-vlm-local",
+        "provider_model": "qwen",
+        "schema_version": "segment-understanding-v1",
+        "summary": "Useful alternate beat.",
+        "subjects": ["vendor"],
+        "actions": ["continues speaking"],
+        "shot_type": "medium",
+        "camera_motion": "static",
+        "mood": "active",
+        "story_roles": ["development"],
+        "quality_findings": ["usable"],
+        "keep_label": "maybe",
+        "confidence": 0.74,
+        "rationale": "Solid alternate.",
+        "risk_flags": [],
+        "visual_distinctiveness": 0.62,
+        "clarity": 0.8,
+        "story_relevance": 0.82
+      }
+    },
+    {
+      "id": "segment-clip-gated",
+      "asset_id": "asset-review",
+      "start_sec": 10.0,
+      "end_sec": 15.0,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "Weak line.",
+      "description": "CLIP-gated backup segment.",
+      "quality_metrics": {
+        "sharpness": 0.71,
+        "stability": 0.68,
+        "visual_novelty": 0.39,
+        "subject_clarity": 0.7,
+        "motion_energy": 0.2,
+        "duration_fit": 0.78,
+        "audio_energy": 0.48,
+        "speech_ratio": 0.61,
+        "hook_strength": 0.55,
+        "story_alignment": 0.57
+      },
+      "prefilter": {
+        "score": 0.63,
+        "shortlisted": true,
+        "filtered_before_vlm": true,
+        "selection_reason": "Stopped before VLM after CLIP gate.",
+        "sampled_frame_count": 2,
+        "sampled_frame_timestamps_sec": [11.0, 14.0],
+        "top_frame_timestamps_sec": [11.0],
+        "metrics_snapshot": {
+          "clip_score": 0.21
+        },
+        "clip_gated": true
+      },
+      "evidence_bundle": {
+        "media_path": "/tmp/review-proxy.mov",
+        "transcript_excerpt": "Weak line.",
+        "story_prompt": "Build a rough cut from the strongest beats.",
+        "analysis_mode": "speech",
+        "keyframe_timestamps_sec": [11.0],
+        "keyframe_paths": [],
+        "context_window_start_sec": 5.0,
+        "context_window_end_sec": 20.0,
+        "metrics_snapshot": {
+          "story_alignment": 0.57
+        },
+        "contact_sheet_path": ""
+      },
+      "ai_understanding": {
+        "provider": "deterministic",
+        "provider_model": "deterministic",
+        "schema_version": "segment-understanding-v1",
+        "summary": "Deterministic fallback summary.",
+        "subjects": [],
+        "actions": [],
+        "shot_type": "medium",
+        "camera_motion": "static",
+        "mood": "flat",
+        "story_roles": [],
+        "quality_findings": [],
+        "keep_label": "reject",
+        "confidence": 0.41,
+        "rationale": "Gated by CLIP.",
+        "risk_flags": ["gated_by_clip"],
+        "visual_distinctiveness": 0.31,
+        "clarity": 0.54,
+        "story_relevance": 0.4
+      }
+    },
+    {
+      "id": "segment-deduped",
+      "asset_id": "asset-review",
+      "start_sec": 15.0,
+      "end_sec": 20.0,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "Duplicate line.",
+      "description": "Deduplicated backup segment.",
+      "quality_metrics": {
+        "sharpness": 0.75,
+        "stability": 0.73,
+        "visual_novelty": 0.46,
+        "subject_clarity": 0.76,
+        "motion_energy": 0.22,
+        "duration_fit": 0.8,
+        "audio_energy": 0.66,
+        "speech_ratio": 0.7,
+        "hook_strength": 0.65,
+        "story_alignment": 0.67
+      },
+      "prefilter": {
+        "score": 0.74,
+        "shortlisted": true,
+        "filtered_before_vlm": true,
+        "selection_reason": "Duplicate of segment-best.",
+        "sampled_frame_count": 2,
+        "sampled_frame_timestamps_sec": [16.0, 18.0],
+        "top_frame_timestamps_sec": [16.0],
+        "metrics_snapshot": {
+          "clip_score": 0.58
+        },
+        "deduplicated": true,
+        "dedup_group_id": 1
+      }
+    },
+    {
+      "id": "segment-budget-capped",
+      "asset_id": "asset-review",
+      "start_sec": 20.0,
+      "end_sec": 25.0,
+      "analysis_mode": "speech",
+      "transcript_excerpt": "Budget capped line.",
+      "description": "Budget-capped backup segment.",
+      "quality_metrics": {
+        "sharpness": 0.73,
+        "stability": 0.7,
+        "visual_novelty": 0.44,
+        "subject_clarity": 0.72,
+        "motion_energy": 0.19,
+        "duration_fit": 0.77,
+        "audio_energy": 0.57,
+        "speech_ratio": 0.66,
+        "hook_strength": 0.61,
+        "story_alignment": 0.64
+      },
+      "prefilter": {
+        "score": 0.7,
+        "shortlisted": true,
+        "filtered_before_vlm": true,
+        "selection_reason": "Excluded by budget cap.",
+        "sampled_frame_count": 2,
+        "sampled_frame_timestamps_sec": [21.0, 23.5],
+        "top_frame_timestamps_sec": [21.0],
+        "metrics_snapshot": {
+          "clip_score": 0.52
+        },
+        "vlm_budget_capped": true
+      },
+      "evidence_bundle": {
+        "media_path": "/tmp/review-proxy.mov",
+        "transcript_excerpt": "Budget capped line.",
+        "story_prompt": "Build a rough cut from the strongest beats.",
+        "analysis_mode": "speech",
+        "keyframe_timestamps_sec": [21.0, 23.5],
+        "keyframe_paths": [],
+        "context_window_start_sec": 15.0,
+        "context_window_end_sec": 25.0,
+        "metrics_snapshot": {
+          "story_alignment": 0.64
+        },
+        "contact_sheet_path": ""
+      },
+      "ai_understanding": {
+        "provider": "deterministic",
+        "provider_model": "deterministic",
+        "schema_version": "segment-understanding-v1",
+        "summary": "Budget capped fallback summary.",
+        "subjects": [],
+        "actions": [],
+        "shot_type": "medium",
+        "camera_motion": "static",
+        "mood": "flat",
+        "story_roles": [],
+        "quality_findings": [],
+        "keep_label": "maybe",
+        "confidence": 0.5,
+        "rationale": "Skipped due to budget cap.",
+        "risk_flags": ["excluded_by_budget_cap"],
+        "visual_distinctiveness": 0.39,
+        "clarity": 0.58,
+        "story_relevance": 0.48
+      }
+    }
+  ],
+  "take_recommendations": [
+    {
+      "id": "take-01",
+      "candidate_segment_id": "segment-best",
+      "title": "Best Dialogue",
+      "is_best_take": true,
+      "selection_reason": "",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-02",
+      "candidate_segment_id": "segment-alternate",
+      "title": "Alternate Dialogue",
+      "is_best_take": true,
+      "selection_reason": "",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-03",
+      "candidate_segment_id": "segment-clip-gated",
+      "title": "Backup Dialogue",
+      "is_best_take": false,
+      "selection_reason": "",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-04",
+      "candidate_segment_id": "segment-deduped",
+      "title": "Duplicate Dialogue",
+      "is_best_take": false,
+      "selection_reason": "",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    },
+    {
+      "id": "take-05",
+      "candidate_segment_id": "segment-budget-capped",
+      "title": "Budget Capped Dialogue",
+      "is_best_take": false,
+      "selection_reason": "",
+      "score_technical": 0.0,
+      "score_semantic": 0.0,
+      "score_story": 0.0,
+      "score_total": 0.0
+    }
+  ],
+  "timeline": {
+    "id": "timeline-main",
+    "version": 1,
+    "story_summary": "Fixture timeline.",
+    "items": [
+      {
+        "id": "item-1",
+        "take_recommendation_id": "take-01",
+        "order_index": 0,
+        "trim_in_sec": 0.0,
+        "trim_out_sec": 5.0,
+        "label": "Fixture opener",
+        "notes": "",
+        "source_asset_path": "/tmp/review-source.mov",
+        "source_reel": "A900_C001"
+      }
+    ]
+  }
+}

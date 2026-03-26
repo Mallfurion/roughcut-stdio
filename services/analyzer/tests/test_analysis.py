@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
 from services.analyzer.app.analysis import (
     analyze_assets,
+    build_segment_review_state,
+    build_take_recommendations,
     fallback_segments,
     inspect_runtime_capabilities,
     select_ai_target_segment_ids,
     select_prefilter_shortlist_ids,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision, ProjectMeta
+from services.analyzer.app.service import load_project
+
+
+ROOT = Path(__file__).resolve().parents[3]
+REVIEW_FIXTURE = ROOT / "fixtures" / "review-states-project.json"
 
 
 class StaticSceneDetector:
@@ -209,6 +217,186 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(len(target_ids), 2)
         self.assertIn("segment-2", target_ids)
         self.assertIn("segment-3", target_ids)
+
+    def test_take_recommendations_include_review_metadata(self) -> None:
+        asset = Asset(
+            id="asset-review",
+            name="Review Clip",
+            source_path="/tmp/review.mov",
+            proxy_path="/tmp/review-proxy.mov",
+            duration_sec=24.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A005_C010",
+        )
+        segments = [
+            CandidateSegment(
+                id="seg-best",
+                asset_id=asset.id,
+                start_sec=0.0,
+                end_sec=5.0,
+                analysis_mode="speech",
+                transcript_excerpt="A clear turning line.",
+                description="Winner",
+                quality_metrics={
+                    "sharpness": 0.8,
+                    "stability": 0.78,
+                    "visual_novelty": 0.58,
+                    "subject_clarity": 0.87,
+                    "motion_energy": 0.31,
+                    "duration_fit": 0.9,
+                    "audio_energy": 0.83,
+                    "speech_ratio": 0.94,
+                    "hook_strength": 0.92,
+                    "story_alignment": 0.95,
+                },
+            ),
+            CandidateSegment(
+                id="seg-alt",
+                asset_id=asset.id,
+                start_sec=5.0,
+                end_sec=10.0,
+                analysis_mode="speech",
+                transcript_excerpt="Useful supporting line.",
+                description="Alternate",
+                quality_metrics={
+                    "sharpness": 0.78,
+                    "stability": 0.76,
+                    "visual_novelty": 0.52,
+                    "subject_clarity": 0.82,
+                    "motion_energy": 0.29,
+                    "duration_fit": 0.87,
+                    "audio_energy": 0.79,
+                    "speech_ratio": 0.88,
+                    "hook_strength": 0.86,
+                    "story_alignment": 0.89,
+                },
+            ),
+            CandidateSegment(
+                id="seg-backup",
+                asset_id=asset.id,
+                start_sec=10.0,
+                end_sec=15.0,
+                analysis_mode="speech",
+                transcript_excerpt="Lower value line.",
+                description="Backup",
+                quality_metrics={
+                    "sharpness": 0.72,
+                    "stability": 0.69,
+                    "visual_novelty": 0.41,
+                    "subject_clarity": 0.71,
+                    "motion_energy": 0.23,
+                    "duration_fit": 0.78,
+                    "audio_energy": 0.51,
+                    "speech_ratio": 0.62,
+                    "hook_strength": 0.56,
+                    "story_alignment": 0.58,
+                },
+            ),
+        ]
+
+        takes = build_take_recommendations([asset], segments)
+        take_by_segment_id = {take.candidate_segment_id: take for take in takes}
+
+        self.assertEqual(take_by_segment_id["seg-best"].outcome, "best")
+        self.assertEqual(take_by_segment_id["seg-best"].within_asset_rank, 1)
+        self.assertEqual(take_by_segment_id["seg-alt"].outcome, "alternate")
+        self.assertGreater(take_by_segment_id["seg-alt"].score_gap_to_winner, 0.0)
+        self.assertEqual(take_by_segment_id["seg-backup"].outcome, "backup")
+        self.assertIn("threshold", take_by_segment_id["seg-backup"].selection_reason)
+        self.assertTrue(take_by_segment_id["seg-best"].score_driver_labels)
+
+    def test_segment_review_state_distinguishes_blocked_and_model_paths(self) -> None:
+        segment = CandidateSegment(
+            id="seg-review-state",
+            asset_id="asset-1",
+            start_sec=3.0,
+            end_sec=8.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Review state segment",
+            quality_metrics={"visual_novelty": 0.7},
+            prefilter=PrefilterDecision(
+                score=0.77,
+                shortlisted=True,
+                filtered_before_vlm=True,
+                selection_reason="Shortlisted but gated.",
+                sampled_frame_count=2,
+                sampled_frame_timestamps_sec=[4.0, 6.0],
+                top_frame_timestamps_sec=[6.0],
+                metrics_snapshot={"clip_score": 0.21},
+                clip_gated=True,
+                vlm_budget_capped=False,
+            ),
+            evidence_bundle=None,
+            ai_understanding=DeterministicVisionLanguageAnalyzer().analyze(
+                asset=Asset(
+                    id="asset-1",
+                    name="Asset One",
+                    source_path="/tmp/a.mov",
+                    proxy_path="/tmp/a-proxy.mov",
+                    duration_sec=10.0,
+                    fps=24.0,
+                    width=1920,
+                    height=1080,
+                    has_speech=False,
+                    interchange_reel_name="A001_C001",
+                ),
+                segment=CandidateSegment(
+                    id="temp",
+                    asset_id="asset-1",
+                    start_sec=3.0,
+                    end_sec=8.0,
+                    analysis_mode="visual",
+                    transcript_excerpt="",
+                    description="Temp",
+                    quality_metrics={"visual_novelty": 0.7},
+                ),
+                evidence=type(
+                    "Evidence",
+                    (),
+                    {
+                        "media_path": "",
+                        "transcript_excerpt": "",
+                        "story_prompt": "Build a cut",
+                        "analysis_mode": "visual",
+                        "keyframe_timestamps_sec": [4.0, 6.0],
+                        "keyframe_paths": [],
+                        "context_window_start_sec": 0.0,
+                        "context_window_end_sec": 10.0,
+                        "metrics_snapshot": {"visual_novelty": 0.7},
+                        "contact_sheet_path": "",
+                    },
+                )(),
+                story_prompt="Build a cut",
+            ),
+        )
+
+        review_state = build_segment_review_state(segment)
+
+        self.assertTrue(review_state.shortlisted)
+        self.assertTrue(review_state.clip_scored)
+        self.assertTrue(review_state.clip_gated)
+        self.assertTrue(review_state.deterministic_fallback)
+        self.assertFalse(review_state.model_analyzed)
+        self.assertEqual(review_state.blocked_reason, "clip_gate")
+        self.assertIn("CLIP gated", review_state.analysis_path_summary)
+
+    def test_load_project_enriches_review_fixture_with_mixed_segment_states(self) -> None:
+        project = load_project(REVIEW_FIXTURE)
+        segments = {segment.id: segment for segment in project.candidate_segments}
+        takes = {take.candidate_segment_id: take for take in project.take_recommendations}
+
+        self.assertEqual(takes["segment-best"].outcome, "best")
+        self.assertEqual(takes["segment-alternate"].outcome, "alternate")
+        self.assertEqual(takes["segment-clip-gated"].outcome, "backup")
+        self.assertEqual(segments["segment-deduped"].review_state.blocked_reason, "duplicate")
+        self.assertEqual(segments["segment-budget-capped"].review_state.blocked_reason, "budget_cap")
+        self.assertTrue(segments["segment-best"].review_state.model_analyzed)
+        self.assertTrue(segments["segment-clip-gated"].review_state.deterministic_fallback)
+        self.assertIn("budget capped", segments["segment-budget-capped"].review_state.analysis_path_summary)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { buildSegmentReviewModel } from "./review-model.ts";
 import "./styles.css";
 
 type Step = "choose" | "process" | "results";
@@ -71,6 +72,22 @@ type SegmentUnderstanding = {
   risk_flags: string[];
 };
 
+type SegmentReviewState = {
+  shortlisted: boolean;
+  filtered_before_vlm: boolean;
+  clip_scored: boolean;
+  clip_score?: number | null;
+  clip_gated?: boolean;
+  deduplicated?: boolean;
+  dedup_group_id?: number | null;
+  vlm_budget_capped?: boolean;
+  model_analyzed?: boolean;
+  deterministic_fallback?: boolean;
+  evidence_keyframe_count?: number;
+  analysis_path_summary?: string;
+  blocked_reason?: string;
+};
+
 type Asset = {
   id: string;
   name: string;
@@ -92,6 +109,7 @@ type CandidateSegment = {
   evidence_bundle?: SegmentEvidence;
   prefilter?: SegmentPrefilter;
   ai_understanding?: SegmentUnderstanding;
+  review_state?: SegmentReviewState;
 };
 
 type TakeRecommendation = {
@@ -100,7 +118,15 @@ type TakeRecommendation = {
   title: string;
   is_best_take: boolean;
   selection_reason: string;
+  score_technical?: number;
+  score_semantic?: number;
+  score_story?: number;
   score_total: number;
+  outcome?: string;
+  within_asset_rank?: number;
+  score_gap_to_winner?: number;
+  score_driver_labels?: string[];
+  limiting_factor_labels?: string[];
 };
 
 type TimelineItem = {
@@ -1150,17 +1176,26 @@ function bindTextSetting(id: string, apply: (value: string) => void) {
 }
 
 function resolveClipViews(project: TimelineProject) {
+  const takeBySegmentId = new Map(
+    project.take_recommendations.map((take) => [take.candidate_segment_id, take]),
+  );
   return project.assets
     .map((asset) => ({
       asset,
-      segments: project.candidate_segments.filter((segment) => segment.asset_id === asset.id).sort((left, right) => left.start_sec - right.start_sec)
+      segments: project.candidate_segments
+        .filter((segment) => segment.asset_id === asset.id)
+        .sort((left, right) => left.start_sec - right.start_sec)
+        .map((segment) => ({
+          segment,
+          recommendation: takeBySegmentId.get(segment.id),
+        })),
     }))
     .filter((view) => view.segments.length > 0);
 }
 
-function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
+function renderClipCard(view: { asset: Asset; segments: { segment: CandidateSegment; recommendation?: TakeRecommendation }[] }) {
   const expanded = appState.expandedClipIds.includes(view.asset.id);
-  const dedupCount = view.segments.filter((s) => s.prefilter?.deduplicated).length;
+  const dedupCount = view.segments.filter(({ segment }) => segment.prefilter?.deduplicated).length;
   const activCount = view.segments.length - dedupCount;
 
   return `
@@ -1190,7 +1225,8 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
   `;
 }
 
-function renderSegmentCard(segment: CandidateSegment) {
+function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: TakeRecommendation }) {
+  const { segment, recommendation } = view;
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
   const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
@@ -1200,13 +1236,18 @@ function renderSegmentCard(segment: CandidateSegment) {
   const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
   const isDeduplicated = segment.prefilter?.deduplicated ?? false;
   const dedupGroupId = segment.prefilter?.dedup_group_id;
+  const review = buildSegmentReviewModel(segment, recommendation);
+  const evidence = segment.evidence_bundle;
 
   return `
-    <article class="section-card${isDeduplicated ? " section-card--deduplicated" : ""}">
+    <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}">
       <div class="section-head">
         <div>
           <div class="pill-row">
             <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
+            <span class="pill section-pill section-outcome">${escapeHtml(review.outcomeLabel)}</span>
+            ${review.rankLabel ? `<span class="pill section-pill">${escapeHtml(review.rankLabel)}</span>` : ""}
+            ${review.scoreGapLabel ? `<span class="pill section-pill">${escapeHtml(review.scoreGapLabel)}</span>` : ""}
             <span class="pill section-pill">prefilter ${formatScore(score)}</span>
             ${clipScore !== undefined ? `<span class="pill section-pill" title="CLIP semantic score">CLIP ${formatScore(clipScore)}</span>` : ""}
             <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
@@ -1219,6 +1260,19 @@ function renderSegmentCard(segment: CandidateSegment) {
           </div>
         </div>
       </div>
+      <div class="score-grid">
+        ${renderScoreMetric("Score", review.scoreValues.total, true)}
+        ${renderScoreMetric("Technical", review.scoreValues.technical)}
+        ${renderScoreMetric("Semantic", review.scoreValues.semantic)}
+        ${renderScoreMetric("Story", review.scoreValues.story)}
+      </div>
+      ${review.decisionSummary ? `<p class="section-recommendation">${escapeHtml(review.decisionSummary)}</p>` : ""}
+      ${review.analysisPathSummary ? `<p class="muted section-analysis-path">Analyzed: ${escapeHtml(review.analysisPathSummary)}</p>` : ""}
+      ${
+        evidence
+          ? `<p class="muted section-evidence">Evidence: ${evidence.keyframe_timestamps_sec.length} keyframe${evidence.keyframe_timestamps_sec.length === 1 ? "" : "s"} • context ${escapeHtml(formatSegmentRange(evidence.context_window_start_sec, evidence.context_window_end_sec))}</p>`
+          : ""
+      }
       <p class="section-summary">${escapeHtml(vlmText)}</p>
       ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
       ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
@@ -1228,6 +1282,15 @@ function renderSegmentCard(segment: CandidateSegment) {
         ${renderOptionalMeta(ai?.mood)}
       </div>
     </article>
+  `;
+}
+
+function renderScoreMetric(label: string, value: string, prominent = false) {
+  return `
+    <div class="score-metric${prominent ? " score-metric--prominent" : ""}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
   `;
 }
 
