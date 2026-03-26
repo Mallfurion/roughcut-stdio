@@ -17,7 +17,7 @@ These are installed automatically by `npm run setup`:
 - **ffmpeg** — Frame and audio extraction
 - **ffprobe** — Optional; metadata probing (ffmpeg includes this)
 - **PySceneDetect** — Optional; improved scene boundary detection
-- **faster-whisper** — Optional; speech transcription
+- **faster-whisper** — Installed by setup when `TIMELINE_TRANSCRIPT_PROVIDER!=disabled`; used for local speech transcription
 
 ### For MLX-VLM Local (Optional)
 
@@ -72,6 +72,12 @@ npm run check:ai
 ```
 
 This checks that all required dependencies are available and working.
+
+If you want transcript-backed speech analysis, also verify that `faster-whisper` is available. The analyzer can still run without it, but transcript runtime will report `unavailable` and speech clips will use deterministic fallback instead of transcript excerpts.
+
+When transcript support is active, the analyzer does not fully transcribe every clip with audio. It reuses transcript cache on reruns, skips clearly weak candidates, and can run a short transcript probe on borderline assets before deciding whether a full transcription pass is worth the cost.
+
+By default, `npm run setup` installs transcript support because `TIMELINE_TRANSCRIPT_PROVIDER` defaults to `auto`. If you want a lighter install without local transcription, set `TIMELINE_TRANSCRIPT_PROVIDER=disabled` before running setup.
 
 ### 4. Open the Desktop App
 

@@ -10,6 +10,9 @@ api = [
   "fastapi>=0.115.0,<1.0.0",
   "uvicorn>=0.34.0,<1.0.0"
 ]
+transcript = [
+  "faster-whisper>=1.1.1,<2.0.0",
+]
 clip = [
   "open-clip-torch>=2.20.0,<3.0.0",
   "pillow>=12.0.0,<13.0.0",

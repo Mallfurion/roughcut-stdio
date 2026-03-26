@@ -72,7 +72,29 @@ Those measurements are aligned to the same sampling grid as frame signals and st
 
 **Output:** `AudioSignal` records on sampled timestamps.
 
-### Step 2.4 - Seed Region Building
+### Step 2.4 - Transcript Runtime Selection
+
+Before segmentation begins, the analyzer resolves transcript support from runtime config:
+
+- `TIMELINE_TRANSCRIPT_PROVIDER=auto` tries the local `faster-whisper` backend when installed
+- `TIMELINE_TRANSCRIPT_PROVIDER=faster-whisper` requests that backend explicitly
+- `TIMELINE_TRANSCRIPT_PROVIDER=disabled` skips transcript extraction entirely
+
+The run records transcript runtime status in `project.analysis_summary`, including configured provider, effective provider, status, model size, targeted/skipped/probed transcript counts, transcribed asset counts, transcript failures, transcript-bearing segments, and speech-fallback segment counts.
+
+When AI cache is enabled and `artifacts_root` is available, transcript spans are also cached on disk under the analysis artifacts so repeated `npm run process` calls can reuse prior transcription results.
+
+Before a full transcript pass begins, the analyzer can selectively target assets:
+
+- clear speech assets may go straight to full transcription
+- weak assets may be skipped
+- borderline assets may receive a short transcript probe over selected high-energy windows first
+
+Only assets whose probe returns real transcript text are promoted into the full transcript pass.
+
+If transcript support is unavailable, processing continues and spoken clips can still enter speech-aware scoring through deterministic fallback.
+
+### Step 2.5 - Seed Region Building
 
 The analyzer combines low-cost structure into **seed regions**. Inputs include:
 
@@ -84,7 +106,7 @@ Seed regions are intermediate structures. They are not yet the final candidate s
 
 **Output:** deduplicated seed regions.
 
-### Step 2.5 - Deterministic Boundary Refinement
+### Step 2.6 - Deterministic Boundary Refinement
 
 Deterministic seed-region refinement is enabled by default. Each seed region is refined into a bounded segment before scoring.
 
@@ -101,7 +123,7 @@ Each refined region records provenance such as boundary strategy, confidence, an
 
 **Output:** deterministically refined regions.
 
-### Step 2.6 - Narrative Unit Assembly
+### Step 2.7 - Narrative Unit Assembly
 
 After refinement, the analyzer can merge or split regions before they become final candidate segments.
 
@@ -112,19 +134,20 @@ Assembly lineage is preserved so review can explain how a final segment was form
 
 **Output:** final candidate ranges used for scoring and review.
 
-### Step 2.7 - Candidate Segment Creation
+### Step 2.8 - Candidate Segment Creation
 
 For each final candidate range, the analyzer creates a `CandidateSegment`. This includes:
 
 - transcript excerpt lookup for the time range
 - `analysis_mode` selection (`speech` or `visual`)
+- speech-aware fallback classification when transcript text is missing but speech signals remain strong
 - aggregated metrics snapshot from frame and audio signals
 - derived quality metrics such as `hook_strength`, `story_alignment`, `duration_fit`, `audio_energy`, and `speech_ratio`
 - initial prefilter decision and segmentation provenance
 
 **Output:** `CandidateSegment` records with quality metrics attached.
 
-### Step 2.8 - Optional Semantic Boundary Validation
+### Step 2.9 - Optional Semantic Boundary Validation
 
 Semantic boundary validation is enabled by default, but only ambiguous segments are eligible for a boundary-validation pass.
 
@@ -139,7 +162,7 @@ Disabled, unavailable, or over-budget validation keeps deterministic output unch
 
 **Output:** validated or skipped segments with persisted validation status.
 
-### Step 2.9 - Shortlist Selection
+### Step 2.10 - Shortlist Selection
 
 In `fast` mode, only the top `max_segments_per_asset` candidates by prefilter score proceed to the expensive evidence and AI stages. The rest are marked `filtered_before_vlm=true` and receive deterministic understanding instead of a VLM call.
 
@@ -147,7 +170,7 @@ In `full` mode, all candidates proceed.
 
 **Output:** shortlist IDs for evidence building and downstream analysis.
 
-### Step 2.10 - Evidence Building
+### Step 2.11 - Evidence Building
 
 For each shortlisted segment, the analyzer extracts keyframes and prepares an evidence bundle.
 
@@ -155,10 +178,11 @@ For each shortlisted segment, the analyzer extracts keyframes and prepares an ev
 - longer segments usually get 4 keyframes
 - keyframes are stitched into a contact sheet when possible
 - neighboring time context is recorded for downstream analysis
+- transcript status and speech-mode source are recorded for review and prompt building
 
-**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript, and metrics.
+**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript evidence, transcript status, speech-mode source, and metrics.
 
-### Step 2.11 - CLIP Semantic Scoring
+### Step 2.12 - CLIP Semantic Scoring
 
 If `TIMELINE_AI_CLIP_ENABLED=true` and `open-clip-torch` is available, the analyzer runs CLIP scoring on shortlisted contact sheets.
 
@@ -172,7 +196,7 @@ If CLIP is unavailable, the pipeline continues without failing.
 
 **Output:** `clip_score` and CLIP-gating flags on `PrefilterDecision`.
 
-### Step 2.12 - Segment Deduplication
+### Step 2.13 - Segment Deduplication
 
 After CLIP scoring, the analyzer removes near-duplicate segments across assets.
 
@@ -183,7 +207,7 @@ Deduplicated segments remain in `generated/project.json` with their elimination 
 
 **Output:** updated `PrefilterDecision` records with dedup flags and group IDs.
 
-### Step 2.13 - VLM Target Selection
+### Step 2.14 - VLM Target Selection
 
 After deduplication, the analyzer selects which shortlisted segments receive VLM analysis using a staged gate:
 
@@ -195,7 +219,7 @@ Segments excluded here still receive deterministic understanding.
 
 **Output:** VLM target IDs plus budget-cap metadata.
 
-### Step 2.14 - AI Analysis
+### Step 2.15 - AI Analysis
 
 Each segment in the VLM target set is analyzed by one of:
 
@@ -204,6 +228,8 @@ Each segment in the VLM target set is analyzed by one of:
 - `mlx-vlm-local`
 
 The analyzer produces `SegmentUnderstanding` records with summary, rationale, story roles, shot type, camera motion, mood, confidence, and keep label. Cached results are reused when inputs match.
+
+When transcript excerpts are missing, prompts receive explicit transcript-status text instead of an empty placeholder so speech-aware fallback segments remain inspectable.
 
 ## Phase 3: Take Selection
 
@@ -278,6 +304,8 @@ The main behavior switches are:
 | `TIMELINE_AI_MODE` | `fast` | Limits VLM targets in fast mode |
 | `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET` | provider-dependent | Per-asset shortlist cap for expensive AI work |
 | `TIMELINE_AI_AUDIO_ENABLED` | `true` | Disable to skip audio extraction and use silent fallback |
+| `TIMELINE_TRANSCRIPT_PROVIDER` | `auto` | Transcript backend selection (`auto`, `disabled`, `faster-whisper`) |
+| `TIMELINE_TRANSCRIPT_MODEL_SIZE` | `small` | Local `faster-whisper` model size |
 | `TIMELINE_AI_CLIP_ENABLED` | `true` | Enable CLIP scoring and CLIP-based dedup |
 | `TIMELINE_AI_CLIP_MIN_SCORE` | `0.35` | CLIP gate threshold for VLM targeting |
 | `TIMELINE_AI_VLM_BUDGET_PCT` | `100` | Percent of shortlisted segments that may reach VLM analysis |

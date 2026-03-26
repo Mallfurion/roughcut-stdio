@@ -16,7 +16,7 @@ This installs dependencies, creates the Python environment, downloads tools (ffm
 npm run check:ai
 ```
 
-Verifies that required AI dependencies are installed and models are accessible.
+Verifies that required AI dependencies are installed and models are accessible. This now also reports transcript runtime status, configured transcript backend, model size, and whether local `faster-whisper` support is available.
 
 ---
 
@@ -126,6 +126,21 @@ TIMELINE_AI_PROVIDER=deterministic npm run process
 ```
 
 This runs the full pipeline without multimodal model calls. The current segmentation stack is on by default; add `TIMELINE_SEGMENT_SEMANTIC_VALIDATION=false` if you want to isolate deterministic boundary behavior.
+
+### Debug transcript-backed speech analysis
+
+Force transcript support on and inspect transcript runtime status in the generated summary:
+
+```bash
+TIMELINE_TRANSCRIPT_PROVIDER=auto npm run process
+cat generated/project.json | jq '.project.analysis_summary | {transcript_status, transcript_provider_effective, transcript_target_asset_count, transcript_skipped_asset_count, transcript_probed_asset_count, transcript_probe_rejected_asset_count, transcribed_asset_count, transcript_cached_asset_count, transcript_excerpt_segment_count, speech_fallback_segment_count}'
+```
+
+If you want to compare against transcript-disabled behavior:
+
+```bash
+TIMELINE_TRANSCRIPT_PROVIDER=disabled npm run process
+```
 
 ### Debug CLIP deduplication
 

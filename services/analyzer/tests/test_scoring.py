@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision
-from services.analyzer.app.scoring import limiting_factor_labels, score_segment, top_score_driver_labels
+from services.analyzer.app.scoring import infer_analysis_mode, limiting_factor_labels, score_segment, top_score_driver_labels
 
 
 class ScoreSegmentTests(unittest.TestCase):
@@ -89,6 +89,49 @@ class ScoreSegmentTests(unittest.TestCase):
         self.assertEqual(breakdown.analysis_mode, "speech")
         self.assertGreater(breakdown.semantic, 0.85)
         self.assertGreater(breakdown.total, 0.8)
+
+    def test_speech_signal_fallback_uses_speech_mode_without_transcript(self) -> None:
+        asset = Asset(
+            id="asset-2b",
+            name="Speech Test",
+            source_path="/tmp/speech.mov",
+            proxy_path="/tmp/speech-proxy.mov",
+            duration_sec=16.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A002_C011",
+        )
+        segment = CandidateSegment(
+            id="segment-2b",
+            asset_id="asset-2b",
+            start_sec=6.0,
+            end_sec=11.0,
+            analysis_mode="speech",
+            transcript_excerpt="",
+            description="Speech fallback beat.",
+            quality_metrics={
+                "sharpness": 0.62,
+                "stability": 0.68,
+                "visual_novelty": 0.4,
+                "subject_clarity": 0.78,
+                "motion_energy": 0.24,
+                "duration_fit": 0.84,
+                "audio_energy": 0.46,
+                "speech_ratio": 1.0,
+                "hook_strength": 0.71,
+                "story_alignment": 0.74,
+            },
+        )
+
+        analysis_mode, source = infer_analysis_mode(asset, segment.transcript_excerpt, segment.quality_metrics)
+        breakdown = score_segment(asset, segment)
+
+        self.assertEqual(analysis_mode, "speech")
+        self.assertEqual(source, "speech-signal-fallback")
+        self.assertEqual(breakdown.analysis_mode, "speech")
+        self.assertGreater(breakdown.total, 0.6)
 
     def test_top_score_driver_labels_follow_weighted_formula(self) -> None:
         asset = Asset(

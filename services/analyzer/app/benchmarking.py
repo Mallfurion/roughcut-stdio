@@ -27,6 +27,17 @@ WORKLOAD_COUNT_KEYS = (
     "filtered_before_vlm_count",
     "audio_signal_asset_count",
     "audio_silent_asset_count",
+    "transcript_target_asset_count",
+    "transcript_skipped_asset_count",
+    "transcript_probed_asset_count",
+    "transcript_probe_rejected_asset_count",
+    "transcribed_asset_count",
+    "transcript_failed_asset_count",
+    "transcript_cached_asset_count",
+    "transcript_runtime_probed_asset_count",
+    "transcript_runtime_probe_rejected_asset_count",
+    "transcript_excerpt_segment_count",
+    "speech_fallback_segment_count",
     "clip_scored_count",
     "clip_gated_count",
     "ai_live_segment_count",
@@ -81,6 +92,8 @@ def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[
         "ai_keyframe_max_width": analysis_config.keyframe_max_width,
         "ai_concurrency": analysis_config.concurrency,
         "ai_cache_enabled": analysis_config.cache_enabled,
+        "transcript_provider_configured": analysis_config.transcript_provider,
+        "transcript_model_size": analysis_config.transcript_model_size,
         "clip_enabled": analysis_config.clip_enabled,
         "clip_available": is_clip_available(),
         "clip_min_score": analysis_config.clip_min_score if analysis_config.clip_enabled else None,
@@ -215,6 +228,12 @@ def write_benchmark_artifacts(
         "workload_counts": {
             "asset_count": benchmark.workload_counts.get("asset_count", 0),
             "candidate_segment_count": benchmark.workload_counts.get("candidate_segment_count", 0),
+            "transcript_target_asset_count": benchmark.workload_counts.get("transcript_target_asset_count", 0),
+            "transcript_skipped_asset_count": benchmark.workload_counts.get("transcript_skipped_asset_count", 0),
+            "transcript_probed_asset_count": benchmark.workload_counts.get("transcript_probed_asset_count", 0),
+            "transcript_probe_rejected_asset_count": benchmark.workload_counts.get("transcript_probe_rejected_asset_count", 0),
+            "transcribed_asset_count": benchmark.workload_counts.get("transcribed_asset_count", 0),
+            "transcript_cached_asset_count": benchmark.workload_counts.get("transcript_cached_asset_count", 0),
         },
         "benchmark_json": str(benchmark_path),
     }
@@ -346,6 +365,20 @@ def build_process_summary_lines(
         lines.append(f"Filtered before VLM: {analysis_summary.get('filtered_before_vlm_count', 0)}")
         lines.append(f"Audio signal assets: {analysis_summary.get('audio_signal_asset_count', 0)}")
         lines.append(f"Silent/no-audio assets: {analysis_summary.get('audio_silent_asset_count', 0)}")
+        lines.append(
+            "Transcript runtime: "
+            f"{analysis_summary.get('transcript_status', 'unknown')} "
+            f"({analysis_summary.get('transcript_provider_effective', 'none')})"
+        )
+        lines.append(f"Transcript-target assets: {analysis_summary.get('transcript_target_asset_count', 0)}")
+        lines.append(f"Transcript-skipped assets: {analysis_summary.get('transcript_skipped_asset_count', 0)}")
+        lines.append(f"Transcript-probed assets: {analysis_summary.get('transcript_probed_asset_count', 0)}")
+        lines.append(f"Transcript probe rejections: {analysis_summary.get('transcript_probe_rejected_asset_count', 0)}")
+        lines.append(f"Transcribed assets: {analysis_summary.get('transcribed_asset_count', 0)}")
+        lines.append(f"Transcript failures: {analysis_summary.get('transcript_failed_asset_count', 0)}")
+        lines.append(f"Transcript cache hits: {analysis_summary.get('transcript_cached_asset_count', 0)}")
+        lines.append(f"Transcript excerpt segments: {analysis_summary.get('transcript_excerpt_segment_count', 0)}")
+        lines.append(f"Speech fallback segments: {analysis_summary.get('speech_fallback_segment_count', 0)}")
         lines.append(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
         lines.append(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
         lines.append(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")

@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from hashlib import md5
 import importlib
 import importlib.util
+import json
 import logging
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ from typing import Callable, Protocol
 logger = logging.getLogger(__name__)
 
 from .ai import (
+    AIAnalysisConfig,
     DeterministicVisionLanguageAnalyzer,
     VisionLanguageAnalyzer,
     analyze_asset_segments,
@@ -63,8 +65,7 @@ from .prefilter import (
     sample_audio_signals,
     sample_timestamps,
 )
-from .scoring import score_segment
-from .scoring import limiting_factor_labels, top_score_driver_labels
+from .scoring import infer_analysis_mode, limiting_factor_labels, score_segment, top_score_driver_labels
 
 
 class SceneDetector(Protocol):
@@ -79,6 +80,12 @@ class TranscriptProvider(Protocol):
     def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list["TranscriptSpan"]:
         ...
 
+    def runtime_status(self) -> "TranscriptRuntimeStatus":
+        ...
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        ...
+
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int, Asset], None]
@@ -86,6 +93,15 @@ ProgressCallback = Callable[[int, int, Asset], None]
 TAKE_SELECTION_MIN_SCORE = 0.68
 TAKE_SELECTION_ALT_GAP = 0.08
 AUDIO_SNAP_MAX_CENTER_DRIFT_SEC = 2.0
+TRANSCRIPT_SELECTIVE_MAX_RMS = 0.02
+TRANSCRIPT_SELECTIVE_MIN_AVG_RMS = 0.0075
+TRANSCRIPT_SELECTIVE_MIN_PEAK_RMS = 0.012
+TRANSCRIPT_SELECTIVE_MIN_NON_SILENT_WINDOWS = 3
+TRANSCRIPT_DIRECT_FULL_PASS_MAX_RMS = 0.05
+TRANSCRIPT_DIRECT_FULL_PASS_MIN_AVG_RMS = 0.02
+TRANSCRIPT_PROBE_DURATION_SEC = 4.0
+TRANSCRIPT_PROBE_MAX_WINDOWS = 2
+TRANSCRIPT_PROBE_MIN_ALPHA_CHARS = 8
 TIMELINE_VISUAL_BASE_MAX_DURATION_SEC = 5.0
 TIMELINE_VISUAL_REFINED_MAX_DURATION_SEC = 6.5
 TIMELINE_VISUAL_MERGED_MAX_DURATION_SEC = 7.0
@@ -104,6 +120,22 @@ class TranscriptSpan:
     start_sec: float
     end_sec: float
     text: str
+
+
+@dataclass(slots=True)
+class TranscriptRuntimeStatus:
+    configured_provider: str
+    effective_provider: str
+    model_size: str
+    enabled: bool
+    available: bool
+    status: str
+    detail: str
+    transcribed_asset_count: int = 0
+    failed_asset_count: int = 0
+    cached_asset_count: int = 0
+    probed_asset_count: int = 0
+    probe_rejected_asset_count: int = 0
 
 
 @dataclass(slots=True)
@@ -128,11 +160,38 @@ class AssemblyContinuitySignals:
 
 
 class NoOpTranscriptProvider:
+    def __init__(
+        self,
+        *,
+        configured_provider: str = "disabled",
+        effective_provider: str = "none",
+        model_size: str = "",
+        enabled: bool = False,
+        available: bool = False,
+        status: str = "disabled",
+        detail: str = "Transcript extraction is disabled.",
+    ) -> None:
+        self._status = TranscriptRuntimeStatus(
+            configured_provider=configured_provider,
+            effective_provider=effective_provider,
+            model_size=model_size,
+            enabled=enabled,
+            available=available,
+            status=status,
+            detail=detail,
+        )
+
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         return ""
 
     def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
         return []
+
+    def runtime_status(self) -> TranscriptRuntimeStatus:
+        return self._status
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        return False
 
 
 class PySceneDetectAdapter:
@@ -160,10 +219,28 @@ class PySceneDetectAdapter:
 
 
 class FasterWhisperAdapter:
-    def __init__(self, model_size: str = "small") -> None:
+    def __init__(
+        self,
+        model_size: str = "small",
+        *,
+        configured_provider: str = "faster-whisper",
+        cache_root: str | Path | None = None,
+    ) -> None:
+        self.configured_provider = configured_provider
         self.model_size = model_size
+        self.cache_root = Path(cache_root) if cache_root is not None else None
         self._model = None
         self._cache: dict[str, list[TranscriptSpan]] = {}
+        self._transcribed_assets: set[str] = set()
+        self._failed_assets: set[str] = set()
+        self._cached_assets: set[str] = set()
+        self._probed_assets: set[str] = set()
+        self._probe_rejected_assets: set[str] = set()
+        self._probe_cache: dict[str, bool] = {}
+        self._last_error: str = ""
+        self._model_load_failed = False
+        self._device = "cpu"
+        self._compute_type = "float32"
 
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         spec = importlib.util.find_spec("faster_whisper")
@@ -192,23 +269,416 @@ class FasterWhisperAdapter:
         ]
 
     def _ensure_cached(self, asset: Asset) -> None:
-        if self._model is None:
-            module = importlib.import_module("faster_whisper")
-            self._model = module.WhisperModel(self.model_size)
+        if asset.proxy_path in self._failed_assets:
+            return
 
         if asset.proxy_path in self._cache:
             return
 
-        segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
-        self._cache[asset.proxy_path] = [
-            TranscriptSpan(
-                start_sec=float(segment.start),
-                end_sec=float(segment.end),
-                text=segment.text.strip(),
+        if self._load_cached_spans(asset):
+            return
+
+        if not self._ensure_model_loaded():
+            return
+
+        try:
+            segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
+            self._cache[asset.proxy_path] = [
+                TranscriptSpan(
+                    start_sec=float(segment.start),
+                    end_sec=float(segment.end),
+                    text=segment.text.strip(),
+                )
+                for segment in segments
+                if segment.text.strip()
+            ]
+            self._transcribed_assets.add(asset.proxy_path)
+            self._write_cached_spans(asset, self._cache[asset.proxy_path])
+        except Exception as exc:
+            self._failed_assets.add(asset.proxy_path)
+            self._cache[asset.proxy_path] = []
+            self._last_error = str(exc)
+            logger.warning("Transcript extraction failed for %s: %s", asset.proxy_path, exc)
+
+    def _ensure_model_loaded(self) -> bool:
+        if self._model is not None:
+            return True
+        try:
+            module = importlib.import_module("faster_whisper")
+            self._device, self._compute_type = resolve_faster_whisper_runtime()
+            self._model = module.WhisperModel(
+                self.model_size,
+                device=self._device,
+                compute_type=self._compute_type,
             )
-            for segment in segments
-            if segment.text.strip()
-        ]
+            return True
+        except Exception as exc:
+            self._model_load_failed = True
+            self._last_error = str(exc)
+            logger.warning("faster-whisper model load failed: %s", exc)
+            return False
+
+    def probe(self, asset: Asset, clip_ranges: list[tuple[float, float]]) -> bool:
+        if not clip_ranges:
+            return True
+        if asset.proxy_path in self._cache or self._load_cached_spans(asset):
+            return True
+        if asset.proxy_path in self._probe_cache:
+            return self._probe_cache[asset.proxy_path]
+        if not self._ensure_model_loaded():
+            return True
+
+        normalized = _normalize_transcript_probe_ranges(asset, clip_ranges)
+        if not normalized:
+            return True
+        clip_timestamps = ",".join(
+            f"{start_sec:.3f},{end_sec:.3f}"
+            for start_sec, end_sec in normalized
+        )
+        try:
+            segments, _info = self._model.transcribe(
+                asset.proxy_path,
+                beam_size=1,
+                best_of=1,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                vad_filter=False,
+                clip_timestamps=clip_timestamps,
+            )
+            probe_text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        except Exception as exc:
+            self._last_error = str(exc)
+            logger.warning("Transcript probe failed for %s: %s", asset.proxy_path, exc)
+            return True
+
+        accepted = transcript_probe_detects_text(probe_text)
+        self._probed_assets.add(asset.proxy_path)
+        self._probe_cache[asset.proxy_path] = accepted
+        if not accepted:
+            self._probe_rejected_assets.add(asset.proxy_path)
+        return accepted
+
+    def _asset_cache_path(self, asset: Asset) -> Path | None:
+        if self.cache_root is None:
+            return None
+        try:
+            stat = Path(asset.proxy_path).stat()
+        except OSError:
+            return None
+        key = md5(
+            f"{asset.proxy_path}|{stat.st_mtime_ns}|{stat.st_size}|{self.model_size}".encode("utf-8")
+        ).hexdigest()
+        return self.cache_root / f"{key}.json"
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        cache_path = self._asset_cache_path(asset)
+        return cache_path is not None and cache_path.is_file()
+
+    def _load_cached_spans(self, asset: Asset) -> bool:
+        cache_path = self._asset_cache_path(asset)
+        if cache_path is None or not cache_path.is_file():
+            return False
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            spans = [
+                TranscriptSpan(
+                    start_sec=float(item["start_sec"]),
+                    end_sec=float(item["end_sec"]),
+                    text=str(item["text"]).strip(),
+                )
+                for item in payload.get("spans", [])
+                if str(item.get("text", "")).strip()
+            ]
+        except Exception as exc:
+            logger.warning("Transcript cache read failed for %s: %s", asset.proxy_path, exc)
+            return False
+        self._cache[asset.proxy_path] = spans
+        self._cached_assets.add(asset.proxy_path)
+        return True
+
+    def _write_cached_spans(self, asset: Asset, spans: list[TranscriptSpan]) -> None:
+        cache_path = self._asset_cache_path(asset)
+        if cache_path is None:
+            return
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "proxy_path": asset.proxy_path,
+                        "model_size": self.model_size,
+                        "spans": [
+                            {
+                                "start_sec": round(span.start_sec, 3),
+                                "end_sec": round(span.end_sec, 3),
+                                "text": span.text,
+                            }
+                            for span in spans
+                        ],
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("Transcript cache write failed for %s: %s", asset.proxy_path, exc)
+
+    def runtime_status(self) -> TranscriptRuntimeStatus:
+        detail = (
+            "faster-whisper transcription is active "
+            f"with model size '{self.model_size}' on {self._device} using {self._compute_type}."
+            if not self._last_error
+            else (
+                "faster-whisper transcription is active "
+                f"with model size '{self.model_size}' on {self._device} using {self._compute_type}, "
+                f"but encountered errors: {self._last_error}"
+            )
+        )
+        status = "active" if not (self._failed_assets or self._model_load_failed) else "partial-fallback"
+        return TranscriptRuntimeStatus(
+            configured_provider=self.configured_provider,
+            effective_provider="faster-whisper",
+            model_size=self.model_size,
+            enabled=True,
+            available=True,
+            status=status,
+            detail=detail,
+            transcribed_asset_count=len(self._transcribed_assets),
+            failed_asset_count=len(self._failed_assets) + (1 if self._model_load_failed else 0),
+            cached_asset_count=len(self._cached_assets),
+            probed_asset_count=len(self._probed_assets),
+            probe_rejected_asset_count=len(self._probe_rejected_assets),
+        )
+
+
+def resolve_faster_whisper_runtime() -> tuple[str, str]:
+    device = "cpu"
+    compute_type = "float32"
+    try:
+        ctranslate2 = importlib.import_module("ctranslate2")
+        supported = set(ctranslate2.get_supported_compute_types(device))
+        if "int8_float32" in supported:
+            compute_type = "int8_float32"
+        elif "int8" in supported:
+            compute_type = "int8"
+        elif "float32" in supported:
+            compute_type = "float32"
+    except Exception:
+        pass
+    return device, compute_type
+
+
+def build_transcript_provider(
+    config: AIAnalysisConfig,
+    *,
+    cache_root: str | Path | None = None,
+) -> TranscriptProvider:
+    provider = config.transcript_provider
+    model_size = config.transcript_model_size
+
+    if provider == "disabled":
+        return NoOpTranscriptProvider(
+            configured_provider="disabled",
+            effective_provider="none",
+            model_size=model_size,
+            enabled=False,
+            available=False,
+            status="disabled",
+            detail="Transcript extraction is disabled by configuration.",
+        )
+
+    if importlib.util.find_spec("faster_whisper") is None:
+        return NoOpTranscriptProvider(
+            configured_provider=provider,
+            effective_provider="none",
+            model_size=model_size,
+            enabled=True,
+            available=False,
+            status="unavailable",
+            detail=(
+                "Transcript extraction is enabled but `faster_whisper` is not installed. "
+                "Speech-aware fallback will be used when speech signals are strong."
+            ),
+        )
+
+    return FasterWhisperAdapter(
+        model_size=model_size,
+        configured_provider=provider,
+        cache_root=cache_root,
+    )
+
+
+def transcript_runtime_status(transcriber: TranscriptProvider) -> TranscriptRuntimeStatus:
+    status_getter = getattr(transcriber, "runtime_status", None)
+    if callable(status_getter):
+        return status_getter()
+    return TranscriptRuntimeStatus(
+        configured_provider="unknown",
+        effective_provider="none",
+        model_size="",
+        enabled=False,
+        available=False,
+        status="unknown",
+        detail="Transcript runtime status is unavailable.",
+    )
+
+
+def transcript_cache_available(transcriber: TranscriptProvider, asset: Asset) -> bool:
+    cache_checker = getattr(transcriber, "has_cached_asset", None)
+    if callable(cache_checker):
+        return bool(cache_checker(asset))
+    return False
+
+
+def transcript_probe_allows_full_pass(
+    transcriber: TranscriptProvider,
+    *,
+    asset: Asset,
+    probe_ranges: list[tuple[float, float]],
+) -> bool:
+    probe_fn = getattr(transcriber, "probe", None)
+    if callable(probe_fn):
+        return bool(probe_fn(asset, probe_ranges))
+    return True
+
+
+def should_request_transcript_for_asset(
+    *,
+    asset: Asset,
+    audio_signals,
+    transcriber: TranscriptProvider,
+    runtime_status: TranscriptRuntimeStatus,
+) -> bool:
+    if not asset.has_speech or not runtime_status.enabled or not runtime_status.available:
+        return False
+    if transcript_cache_available(transcriber, asset):
+        return True
+    relevant = [signal for signal in audio_signals if signal.source == "ffmpeg"]
+    if not relevant:
+        return False
+    non_silent = [signal for signal in relevant if not signal.is_silent]
+    avg_rms = sum(signal.rms_energy for signal in relevant) / len(relevant)
+    max_rms = max(signal.rms_energy for signal in relevant)
+    if max_rms >= TRANSCRIPT_SELECTIVE_MAX_RMS:
+        return True
+    if len(non_silent) >= TRANSCRIPT_SELECTIVE_MIN_NON_SILENT_WINDOWS and avg_rms >= TRANSCRIPT_SELECTIVE_MIN_AVG_RMS:
+        return True
+    if len(non_silent) >= 2 and max_rms >= TRANSCRIPT_SELECTIVE_MIN_PEAK_RMS and avg_rms >= 0.0065:
+        return True
+    return False
+
+
+def should_probe_before_full_transcript(audio_signals) -> bool:
+    relevant = [signal for signal in audio_signals if signal.source == "ffmpeg"]
+    if not relevant:
+        return False
+    non_silent = [signal for signal in relevant if not signal.is_silent]
+    if not non_silent:
+        return False
+    avg_rms = sum(signal.rms_energy for signal in relevant) / len(relevant)
+    max_rms = max(signal.rms_energy for signal in relevant)
+    if max_rms >= TRANSCRIPT_DIRECT_FULL_PASS_MAX_RMS:
+        return False
+    if len(non_silent) >= 4 and avg_rms >= TRANSCRIPT_DIRECT_FULL_PASS_MIN_AVG_RMS:
+        return False
+    return True
+
+
+def should_probe_after_selective_skip(audio_signals) -> bool:
+    relevant = [signal for signal in audio_signals if signal.source == "ffmpeg"]
+    if not relevant:
+        return False
+    non_silent = [signal for signal in relevant if not signal.is_silent]
+    if not non_silent:
+        return False
+    avg_rms = sum(signal.rms_energy for signal in relevant) / len(relevant)
+    max_rms = max(signal.rms_energy for signal in relevant)
+    return avg_rms >= 0.003 or max_rms >= 0.005
+
+
+def build_transcript_probe_ranges(asset: Asset, audio_signals) -> list[tuple[float, float]]:
+    relevant = [signal for signal in audio_signals if signal.source == "ffmpeg" and not signal.is_silent]
+    if not relevant:
+        return []
+    ordered = sorted(relevant, key=lambda signal: signal.rms_energy, reverse=True)
+    selected = ordered[:TRANSCRIPT_PROBE_MAX_WINDOWS]
+    ranges: list[tuple[float, float]] = []
+    for signal in selected:
+        half = TRANSCRIPT_PROBE_DURATION_SEC / 2.0
+        start_sec = max(0.0, signal.timestamp_sec - half)
+        end_sec = min(asset.duration_sec, start_sec + TRANSCRIPT_PROBE_DURATION_SEC)
+        start_sec = max(0.0, end_sec - TRANSCRIPT_PROBE_DURATION_SEC)
+        ranges.append((round(start_sec, 3), round(end_sec, 3)))
+    return _normalize_transcript_probe_ranges(asset, ranges)
+
+
+def _normalize_transcript_probe_ranges(
+    asset: Asset,
+    ranges: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    if not ranges:
+        return []
+    ordered = sorted(ranges, key=lambda item: (item[0], item[1]))
+    merged: list[tuple[float, float]] = []
+    for start_sec, end_sec in ordered:
+        start_sec = max(0.0, min(asset.duration_sec, start_sec))
+        end_sec = max(start_sec, min(asset.duration_sec, end_sec))
+        if end_sec - start_sec < 0.5:
+            continue
+        if not merged:
+            merged.append((start_sec, end_sec))
+            continue
+        previous_start, previous_end = merged[-1]
+        if start_sec <= previous_end + 0.25:
+            merged[-1] = (previous_start, max(previous_end, end_sec))
+        else:
+            merged.append((start_sec, end_sec))
+    return [(round(start_sec, 3), round(end_sec, 3)) for start_sec, end_sec in merged]
+
+
+def transcript_probe_detects_text(text: str) -> bool:
+    normalized = text.strip()
+    if not normalized:
+        return False
+    alpha_chars = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]", normalized)
+    if len(alpha_chars) < TRANSCRIPT_PROBE_MIN_ALPHA_CHARS:
+        return False
+    words = [word for word in re.split(r"\s+", normalized) if word]
+    return len(words) >= 2
+
+
+def segment_transcript_status(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    runtime_status: TranscriptRuntimeStatus,
+    transcript_lookup_attempted: bool = True,
+) -> str:
+    if not asset.has_speech:
+        return "not-applicable"
+    if segment.transcript_excerpt.strip():
+        return "excerpt-available"
+    if not transcript_lookup_attempted and runtime_status.available:
+        return "selective-skip"
+    if segment.analysis_mode == "speech":
+        return "fallback-no-transcript"
+    if runtime_status.status == "disabled":
+        return "provider-disabled"
+    if runtime_status.status == "unavailable":
+        return "provider-unavailable"
+    if runtime_status.status == "partial-fallback":
+        return "provider-partial"
+    return "no-transcript-match"
+
+
+def segment_speech_mode_source(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+) -> str:
+    _analysis_mode, source = infer_analysis_mode(asset, segment.transcript_excerpt, segment.quality_metrics)
+    return source
 
 
 def transcript_spans_for_range(
@@ -238,6 +708,8 @@ def transcript_excerpt_for_range(
     transcript_spans: list[TranscriptSpan],
     start_sec: float,
     end_sec: float,
+    *,
+    allow_provider_lookup: bool = True,
 ) -> str:
     matching = [
         span.text.strip()
@@ -246,6 +718,8 @@ def transcript_excerpt_for_range(
     ]
     if matching:
         return " ".join(matching).strip()
+    if not allow_provider_lookup:
+        return ""
     return transcriber.excerpt(asset, start_sec, end_sec).strip()
 
 
@@ -264,17 +738,24 @@ def make_candidate_segment(
     seed_region_ids: list[str],
     seed_region_sources: list[str],
     seed_region_ranges_sec: list[list[float]],
+    transcript_lookup_enabled: bool = True,
     assembly_operation: str = "none",
     assembly_rule_family: str = "",
     assembly_source_segment_ids: list[str] | None = None,
     assembly_source_ranges_sec: list[list[float]] | None = None,
 ) -> CandidateSegment:
     excerpt = (
-        transcript_excerpt_for_range(transcriber, asset, transcript_spans, start_sec, end_sec)
+        transcript_excerpt_for_range(
+            transcriber,
+            asset,
+            transcript_spans,
+            start_sec,
+            end_sec,
+            allow_provider_lookup=transcript_lookup_enabled,
+        )
         if asset.has_speech
         else ""
     )
-    analysis_mode = "speech" if excerpt else "visual"
     prefilter_snapshot = aggregate_segment_prefilter(
         signals=prefilter_signals,
         start_sec=start_sec,
@@ -285,9 +766,10 @@ def make_candidate_segment(
         asset,
         start_sec,
         end_sec,
-        analysis_mode,
+        "visual",
         prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
     )
+    analysis_mode, _analysis_mode_source = infer_analysis_mode(asset, excerpt, metrics)
     return CandidateSegment(
         id=segment_id,
         asset_id=asset.id,
@@ -295,7 +777,7 @@ def make_candidate_segment(
         end_sec=round(end_sec, 3),
         analysis_mode=analysis_mode,
         transcript_excerpt=excerpt,
-        description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
+        description=describe_segment(asset, start_sec, end_sec, excerpt, metrics, analysis_mode=analysis_mode),
         quality_metrics=metrics,
         prefilter=PrefilterDecision(
             score=float(prefilter_snapshot["score"]),
@@ -594,6 +1076,7 @@ def split_candidate_segment(
                 seed_region_ids=prefilter.seed_region_ids,
                 seed_region_sources=prefilter.seed_region_sources,
                 seed_region_ranges_sec=prefilter.seed_region_ranges_sec,
+                transcript_lookup_enabled=bool(transcript_spans),
                 assembly_operation="split",
                 assembly_rule_family=rule_family,
                 assembly_source_segment_ids=source_segment_ids,
@@ -759,6 +1242,7 @@ def materialize_merged_segment(
         seed_region_ids=flatten_prefilter_lists(segments, "seed_region_ids"),
         seed_region_sources=flatten_prefilter_lists(segments, "seed_region_sources"),
         seed_region_ranges_sec=flatten_prefilter_range_lists(segments, "seed_region_ranges_sec"),
+        transcript_lookup_enabled=bool(transcript_spans),
         assembly_operation="merge",
         assembly_rule_family=rule_family,
         assembly_source_segment_ids=flatten_source_segment_ids(segments),
@@ -1213,6 +1697,7 @@ def rebuild_segment_with_validation(
         assembly_rule_family=prefilter.assembly_rule_family,
         assembly_source_segment_ids=prefilter.assembly_source_segment_ids,
         assembly_source_ranges_sec=prefilter.assembly_source_ranges_sec,
+        transcript_lookup_enabled=bool(transcript_spans),
     )
     rebuilt.boundary_validation = boundary_validation
     return rebuilt
@@ -1255,6 +1740,12 @@ def build_project_from_media_roots(
     progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
     media_discovery_started_at = time.monotonic()
+    ai_config = load_ai_analysis_config()
+    transcript_cache_root = (
+        Path(artifacts_root) / "transcript-cache"
+        if artifacts_root is not None and ai_config.cache_enabled
+        else None
+    )
     discovered = discover_media_files(media_roots, probe_runner=probe_runner)
     if status_callback is not None:
         status_callback(f"Discovered {len(discovered)} video files.")
@@ -1297,8 +1788,15 @@ def analyze_assets(
     progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
     detector = scene_detector or PySceneDetectAdapter()
-    transcriber = transcript_provider or NoOpTranscriptProvider()
     ai_config = load_ai_analysis_config()
+    transcript_provider_injected = transcript_provider is not None
+    transcript_cache_root = (
+        Path(artifacts_root) / "transcript-cache"
+        if artifacts_root is not None and ai_config.cache_enabled
+        else None
+    )
+    transcriber = transcript_provider or build_transcript_provider(ai_config, cache_root=transcript_cache_root)
+    transcript_status = transcript_runtime_status(transcriber)
     analyzer = segment_analyzer or default_vision_language_analyzer(
         artifacts_root=artifacts_root,
         analysis_config=ai_config,
@@ -1310,6 +1808,12 @@ def analyze_assets(
     total_vlm_targets = 0
     total_filtered_before_vlm = 0
     total_audio_signal_assets = 0
+    total_transcript_target_assets = 0
+    total_transcript_skipped_assets = 0
+    total_transcript_probed_assets = 0
+    total_transcript_probe_rejected_assets = 0
+    total_transcript_excerpt_segments = 0
+    total_speech_fallback_segments = 0
     total_deduplicated_segments = 0
     total_clip_scored = 0
     total_clip_gated = 0
@@ -1326,6 +1830,15 @@ def analyze_assets(
     all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
     per_asset_analysis_started_at = time.monotonic()
 
+    if status_callback is not None:
+        transcript_label = transcript_status.effective_provider or "none"
+        status_callback(
+            "Transcript support: "
+            f"{transcript_status.status} via {transcript_label}"
+            + (f" ({transcript_status.model_size})" if transcript_status.model_size else "")
+        )
+        status_callback(transcript_status.detail)
+
     for asset_index, asset in enumerate(assets, start=1):
         if status_callback is not None:
             status_callback(f"[{asset_index}/{total_assets}] Analyzing: {asset.name}")
@@ -1335,11 +1848,6 @@ def analyze_assets(
             base_ranges = fallback_segments(asset.duration_sec)
         timestamps = sample_timestamps(asset.duration_sec)
         prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
-        transcript_spans = (
-            transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
-            if asset.has_speech
-            else []
-        )
 
         # Audio signal sampling
         audio_signals = sample_audio_signals(asset, timestamps)
@@ -1350,6 +1858,56 @@ def analyze_assets(
         if status_callback is not None:
             audio_status = f"audio detected" if has_audio else "silent/no audio"
             status_callback(f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})")
+        if transcript_provider_injected:
+            transcript_lookup_enabled = asset.has_speech
+        else:
+            transcript_lookup_enabled = should_request_transcript_for_asset(
+                asset=asset,
+                audio_signals=audio_signals,
+                transcriber=transcriber,
+                runtime_status=transcript_status,
+            )
+        transcript_probe_ran = False
+        transcript_probe_detected_text = False
+        if (
+            not transcript_provider_injected
+            and asset.has_speech
+            and transcript_status.available
+            and not transcript_cache_available(transcriber, asset)
+        ):
+            should_probe = (
+                transcript_lookup_enabled and should_probe_before_full_transcript(audio_signals)
+            ) or (
+                not transcript_lookup_enabled and should_probe_after_selective_skip(audio_signals)
+            )
+            if should_probe:
+                transcript_probe_ran = True
+                total_transcript_probed_assets += 1
+                probe_ranges = build_transcript_probe_ranges(asset, audio_signals)
+                transcript_probe_detected_text = transcript_probe_allows_full_pass(
+                    transcriber,
+                    asset=asset,
+                    probe_ranges=probe_ranges,
+                )
+                transcript_lookup_enabled = transcript_probe_detected_text
+                if not transcript_lookup_enabled:
+                    total_transcript_probe_rejected_assets += 1
+
+        if transcript_lookup_enabled:
+            total_transcript_target_assets += 1
+        elif asset.has_speech and transcript_status.available:
+            total_transcript_skipped_assets += 1
+        transcript_spans = (
+            transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
+            if transcript_lookup_enabled
+            else []
+        )
+        if status_callback is not None and asset.has_speech and transcript_status.available:
+            transcript_note = "selected for transcript pass" if transcript_lookup_enabled else "skipped transcript pass"
+            status_callback(f"  ✓ Speech gate: {transcript_note}")
+            if transcript_probe_ran:
+                probe_note = "text detected" if transcript_probe_detected_text else "no text detected"
+                status_callback(f"  ✓ Speech probe: {probe_note}")
         top_windows = 2 if ai_config.mode == "fast" else 3
         refined_candidates: list[RefinedSegmentCandidate] = []
         if ai_config.boundary_refinement_enabled:
@@ -1427,6 +1985,7 @@ def analyze_assets(
                     seed_region_ids=seed_region_ids,
                     seed_region_sources=seed_region_sources,
                     seed_region_ranges_sec=seed_region_ranges_sec,
+                    transcript_lookup_enabled=transcript_lookup_enabled,
                 )
             )
 
@@ -1440,6 +1999,13 @@ def analyze_assets(
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
             )
+
+        total_transcript_excerpt_segments += sum(1 for segment in asset_segments if segment.transcript_excerpt.strip())
+        total_speech_fallback_segments += sum(
+            1
+            for segment in asset_segments
+            if segment.analysis_mode == "speech" and not segment.transcript_excerpt.strip()
+        )
 
         semantic_available = semantic_validation_is_available(analyzer)
         ambiguity_by_id, semantic_target_ids = select_semantic_boundary_validation_targets(
@@ -1478,6 +2044,13 @@ def analyze_assets(
                     story_prompt=project.story_prompt,
                     artifacts_root=artifacts_root,
                     extract_keyframes=analyzer.requires_keyframes,
+                    transcript_status=segment_transcript_status(
+                        asset=asset,
+                        segment=segment,
+                        runtime_status=transcript_status,
+                        transcript_lookup_attempted=transcript_lookup_enabled,
+                    ),
+                    speech_mode_source=segment_speech_mode_source(asset=asset, segment=segment),
                     max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
                     keyframe_max_width=ai_config.keyframe_max_width,
                 )
@@ -1592,6 +2165,13 @@ def analyze_assets(
                     story_prompt=project.story_prompt,
                     artifacts_root=artifacts_root,
                     extract_keyframes=analyzer.requires_keyframes,
+                    transcript_status=segment_transcript_status(
+                        asset=asset,
+                        segment=segment,
+                        runtime_status=transcript_status,
+                        transcript_lookup_attempted=transcript_lookup_enabled,
+                    ),
+                    speech_mode_source=segment_speech_mode_source(asset=asset, segment=segment),
                     max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
                     keyframe_max_width=ai_config.keyframe_max_width,
                 )
@@ -1770,6 +2350,24 @@ def analyze_assets(
         "filtered_before_vlm_count": total_filtered_before_vlm,
         "audio_signal_asset_count": total_audio_signal_assets,
         "audio_silent_asset_count": total_assets - total_audio_signal_assets,
+        "transcript_target_asset_count": total_transcript_target_assets,
+        "transcript_skipped_asset_count": total_transcript_skipped_assets,
+        "transcript_probed_asset_count": total_transcript_probed_assets,
+        "transcript_probe_rejected_asset_count": total_transcript_probe_rejected_assets,
+        "transcript_provider_configured": transcript_status.configured_provider,
+        "transcript_provider_effective": transcript_status.effective_provider,
+        "transcript_status": transcript_status.status,
+        "transcript_available": transcript_status.available,
+        "transcript_enabled": transcript_status.enabled,
+        "transcript_model_size": transcript_status.model_size,
+        "transcript_detail": transcript_status.detail,
+        "transcribed_asset_count": transcript_runtime_status(transcriber).transcribed_asset_count,
+        "transcript_failed_asset_count": transcript_runtime_status(transcriber).failed_asset_count,
+        "transcript_cached_asset_count": transcript_runtime_status(transcriber).cached_asset_count,
+        "transcript_runtime_probed_asset_count": transcript_runtime_status(transcriber).probed_asset_count,
+        "transcript_runtime_probe_rejected_asset_count": transcript_runtime_status(transcriber).probe_rejected_asset_count,
+        "transcript_excerpt_segment_count": total_transcript_excerpt_segments,
+        "speech_fallback_segment_count": total_speech_fallback_segments,
         "clip_scored_count": total_clip_scored if (ai_config.clip_enabled and is_clip_available()) else 0,
         "clip_gated_count": total_clip_gated if (ai_config.clip_enabled and is_clip_available()) else 0,
         "semantic_boundary_eligible_count": total_semantic_boundary_eligible,
@@ -1794,6 +2392,18 @@ def analyze_assets(
             "ai_live_request_count": ai_runtime_stats.live_request_count,
         }
     )
+    final_transcript_status = transcript_runtime_status(transcriber)
+    project.analysis_summary.update(
+        {
+            "transcribed_asset_count": final_transcript_status.transcribed_asset_count,
+            "transcript_failed_asset_count": final_transcript_status.failed_asset_count,
+            "transcript_cached_asset_count": final_transcript_status.cached_asset_count,
+            "transcript_runtime_probed_asset_count": final_transcript_status.probed_asset_count,
+            "transcript_runtime_probe_rejected_asset_count": final_transcript_status.probe_rejected_asset_count,
+            "transcript_status": final_transcript_status.status,
+            "transcript_detail": final_transcript_status.detail,
+        }
+    )
     if status_callback is not None:
         status_callback("")
         status_callback("═══════════════════════════════════════════════════")
@@ -1812,6 +2422,17 @@ def analyze_assets(
             status_callback(f"CLIP semantic scoring: {total_clip_scored} segments scored, {total_clip_gated} gated")
 
         status_callback(f"Audio coverage: {total_audio_signal_assets}/{total_assets} assets with audio")
+        status_callback(
+            "Transcript coverage: "
+            f"{final_transcript_status.transcribed_asset_count} assets transcribed, "
+            f"{final_transcript_status.cached_asset_count} loaded from cache, "
+            f"{total_transcript_target_assets} targeted, "
+            f"{total_transcript_skipped_assets} skipped, "
+            f"{total_transcript_probed_assets} probed, "
+            f"{total_transcript_probe_rejected_assets} probe-rejected, "
+            f"{total_transcript_excerpt_segments} segments with transcript excerpts, "
+            f"{total_speech_fallback_segments} speech-fallback segments"
+        )
 
         status_callback(f"VLM analysis: {total_vlm_targets} segments selected for AI")
         status_callback(f"Deterministic analysis: {total_filtered_before_vlm} segments (budget/gating/fast-mode)")
@@ -2030,6 +2651,8 @@ def describe_segment(
     end_sec: float,
     transcript_excerpt: str,
     metrics: dict[str, float],
+    *,
+    analysis_mode: str,
 ) -> str:
     duration = round(end_sec - start_sec, 2)
 
@@ -2037,6 +2660,12 @@ def describe_segment(
         return (
             f"{asset.name} yields a spoken beat around {start_sec:.2f}s to {end_sec:.2f}s. "
             f"The excerpt carries usable narrative value, and the {duration:.2f}s duration is well suited for a rough cut."
+        )
+
+    if analysis_mode == "speech":
+        return (
+            f"{asset.name} reads as a spoken beat from {start_sec:.2f}s to {end_sec:.2f}s, "
+            f"but transcript text is unavailable. Speech activity is still strong enough to keep the {duration:.2f}s range in speech-aware scoring."
         )
 
     shot_role = visual_role(metrics)
@@ -2130,6 +2759,8 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
     deterministic_fallback = bool(understanding and understanding.provider == "deterministic")
     evidence_keyframe_count = len(evidence.keyframe_timestamps_sec) if evidence is not None else 0
     blocked_reason = review_blocked_reason(segment)
+    transcript_status = evidence.transcript_status if evidence is not None else default_segment_transcript_status(segment)
+    speech_mode_source = evidence.speech_mode_source if evidence is not None else default_segment_speech_mode_source(segment)
 
     return SegmentReviewState(
         shortlisted=bool(prefilter and prefilter.shortlisted),
@@ -2150,6 +2781,9 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
         lineage_summary=lineage_summary(segment),
         semantic_validation_status=boundary_validation.status if boundary_validation is not None else "",
         semantic_validation_summary=semantic_validation_summary(segment),
+        transcript_status=transcript_status,
+        transcript_summary=transcript_summary(segment, transcript_status, speech_mode_source),
+        speech_mode_source=speech_mode_source,
     )
 
 
@@ -2185,6 +2819,8 @@ def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: i
             steps.append(f"boundary skipped ({boundary_validation.skip_reason})")
     if evidence_keyframe_count > 0:
         steps.append(f"{evidence_keyframe_count} keyframe{'s' if evidence_keyframe_count != 1 else ''}")
+    elif segment.analysis_mode == "speech" and not segment.transcript_excerpt.strip():
+        steps.append("speech fallback")
 
     if understanding is not None:
         if understanding.provider == "deterministic":
@@ -2193,6 +2829,37 @@ def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: i
             steps.append(f"VLM {understanding.provider}")
 
     return " -> ".join(steps)
+
+
+def default_segment_transcript_status(segment: CandidateSegment) -> str:
+    if segment.transcript_excerpt.strip():
+        return "excerpt-available"
+    if segment.analysis_mode == "speech":
+        return "fallback-no-transcript"
+    return "not-applicable"
+
+
+def default_segment_speech_mode_source(segment: CandidateSegment) -> str:
+    if segment.transcript_excerpt.strip():
+        return "transcript"
+    if segment.analysis_mode == "speech":
+        return "speech-signal-fallback"
+    return "visual"
+
+
+def transcript_summary(segment: CandidateSegment, transcript_status: str, speech_mode_source: str) -> str:
+    if transcript_status == "excerpt-available":
+        return "Transcript excerpt available for this segment."
+    if transcript_status == "selective-skip":
+        return "Transcript extraction was skipped for this asset because cheap speech signals stayed below the selective-transcription threshold."
+    if transcript_status == "fallback-no-transcript":
+        source_label = speech_mode_source or "speech-signal-fallback"
+        return f"Speech-aware fallback is active because transcript text is unavailable ({source_label})."
+    if transcript_status in {"provider-disabled", "provider-unavailable", "provider-partial"}:
+        return f"Transcript support did not provide excerpt text ({transcript_status})."
+    if segment.analysis_mode == "speech":
+        return "Speech scoring is active without transcript text."
+    return "No transcript evidence was needed for this segment."
 
 
 def review_blocked_reason(segment: CandidateSegment) -> str:

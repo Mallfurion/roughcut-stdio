@@ -2,28 +2,37 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 import unittest.mock
 
-from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
+from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer, load_ai_analysis_config
 from services.analyzer.app.analysis import (
+    FasterWhisperAdapter,
     NoOpTranscriptProvider,
     RefinedSegmentCandidate,
     TranscriptSpan,
     analyze_assets,
     assemble_narrative_units,
+    build_transcript_provider,
     build_timeline,
     build_segment_review_state,
     build_take_recommendations,
+    build_transcript_probe_ranges,
     fallback_segments,
     inspect_runtime_capabilities,
+    make_candidate_segment,
+    should_request_transcript_for_asset,
+    should_probe_after_selective_skip,
+    should_probe_before_full_transcript,
     semantic_boundary_ambiguity_score,
     suggested_timeline_duration,
     select_ai_target_segment_ids,
     select_prefilter_shortlist_ids,
+    transcript_runtime_status,
 )
 from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline
-from services.analyzer.app.prefilter import AudioSignal, SeedRegion
+from services.analyzer.app.prefilter import AudioSignal, FrameSignal, SeedRegion
 from services.analyzer.app.service import load_project
 
 
@@ -59,6 +68,68 @@ class TimedTranscriptProvider:
 
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         return " ".join(span.text for span in self.spans(asset, start_sec, end_sec)).strip()
+
+    def runtime_status(self):
+        return transcript_runtime_status(NoOpTranscriptProvider())
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        return False
+
+
+class ExcerptOnlyTranscriptProvider:
+    def __init__(self) -> None:
+        self.called = False
+
+    def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
+        self.called = True
+        return "Should not be used."
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        return []
+
+    def runtime_status(self):
+        return transcript_runtime_status(NoOpTranscriptProvider())
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        return False
+
+
+class ProbeAwareTranscriptProvider:
+    def __init__(self, *, probe_accepts: bool, spans: list[TranscriptSpan] | None = None) -> None:
+        self.probe_accepts = probe_accepts
+        self._spans = spans or []
+        self.probe_calls = 0
+        self.spans_calls = 0
+
+    def probe(self, asset: Asset, clip_ranges: list[tuple[float, float]]) -> bool:
+        self.probe_calls += 1
+        return self.probe_accepts
+
+    def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
+        spans = self.spans(asset, start_sec, end_sec)
+        return " ".join(span.text for span in spans).strip()
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        self.spans_calls += 1
+        return [
+            span
+            for span in self._spans
+            if span.end_sec >= start_sec and span.start_sec <= end_sec
+        ]
+
+    def runtime_status(self):
+        return NoOpTranscriptProvider(
+            configured_provider="auto",
+            effective_provider="faster-whisper",
+            model_size="small",
+            enabled=True,
+            available=True,
+            status="active",
+            detail="active",
+        ).runtime_status()
+
+    def has_cached_asset(self, asset: Asset) -> bool:
+        return False
 
 
 class ExpensiveAnalyzerStub:
@@ -147,6 +218,391 @@ class AnalysisPipelineTests(unittest.TestCase):
     def test_capabilities_are_reported_as_bools(self) -> None:
         capabilities = inspect_runtime_capabilities()
         self.assertTrue(all(isinstance(value, bool) for value in capabilities.values()))
+
+    def test_build_transcript_provider_reports_disabled_or_unavailable(self) -> None:
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_TRANSCRIPT_PROVIDER": "disabled",
+                "TIMELINE_TRANSCRIPT_MODEL_SIZE": "base",
+            },
+            clear=False,
+        ):
+            disabled_provider = build_transcript_provider(load_ai_analysis_config())
+        disabled_status = disabled_provider.runtime_status()
+        self.assertEqual(disabled_status.status, "disabled")
+        self.assertFalse(disabled_status.enabled)
+
+        with (
+            unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "TIMELINE_TRANSCRIPT_PROVIDER": "auto",
+                    "TIMELINE_TRANSCRIPT_MODEL_SIZE": "small",
+                },
+                clear=False,
+            ),
+            unittest.mock.patch("services.analyzer.app.analysis.importlib.util.find_spec", return_value=None),
+        ):
+            unavailable_provider = build_transcript_provider(load_ai_analysis_config())
+        unavailable_status = unavailable_provider.runtime_status()
+        self.assertEqual(unavailable_status.status, "unavailable")
+        self.assertTrue(unavailable_status.enabled)
+        self.assertFalse(unavailable_status.available)
+
+    def test_faster_whisper_adapter_persistent_cache_round_trips_spans(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            proxy_path = Path(temp_dir) / "sample.mov"
+            proxy_path.write_bytes(b"placeholder")
+            asset = Asset(
+                id="asset-cache",
+                name="Cache Test",
+                source_path=str(proxy_path),
+                proxy_path=str(proxy_path),
+                duration_sec=8.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=True,
+                interchange_reel_name="A999_C001",
+            )
+            adapter = FasterWhisperAdapter(model_size="small", cache_root=temp_dir)
+            spans = [TranscriptSpan(start_sec=1.0, end_sec=2.5, text="Cached line.")]
+
+            adapter._write_cached_spans(asset, spans)
+            loaded = adapter._load_cached_spans(asset)
+
+            self.assertTrue(loaded)
+            self.assertEqual(adapter._cache[asset.proxy_path][0].text, "Cached line.")
+            self.assertEqual(adapter.runtime_status().cached_asset_count, 1)
+
+    def test_make_candidate_segment_uses_speech_fallback_without_transcript(self) -> None:
+        asset = Asset(
+            id="asset-speech",
+            name="IMG_8660",
+            source_path="/tmp/speech.mov",
+            proxy_path="/tmp/speech-proxy.mov",
+            duration_sec=15.6,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A007_C001",
+        )
+        segment = make_candidate_segment(
+            asset=asset,
+            segment_id="asset-speech-segment-01",
+            start_sec=10.4,
+            end_sec=15.6,
+            transcriber=NoOpTranscriptProvider(),
+            transcript_spans=[],
+            prefilter_signals=[
+                FrameSignal(11.0, 0.7, 0.6, 0.5, 0.22, 0.45, 0.7, 0.64, "deterministic"),
+                FrameSignal(13.0, 0.72, 0.62, 0.48, 0.18, 0.43, 0.72, 0.63, "deterministic"),
+            ],
+            audio_signals=[
+                AudioSignal(11.0, 0.44, 0.5, False, "ffmpeg"),
+                AudioSignal(13.0, 0.48, 0.55, False, "ffmpeg"),
+            ],
+            boundary_strategy="scene-snap",
+            boundary_confidence=0.8,
+            seed_region_ids=["seed-01"],
+            seed_region_sources=["scene"],
+            seed_region_ranges_sec=[[10.4, 15.6]],
+        )
+
+        self.assertEqual(segment.analysis_mode, "speech")
+        self.assertEqual(segment.transcript_excerpt, "")
+        self.assertIn("transcript text is unavailable", segment.description)
+
+    def test_make_candidate_segment_skip_does_not_lazy_load_transcript(self) -> None:
+        asset = Asset(
+            id="asset-skip",
+            name="Skip Test",
+            source_path="/tmp/skip.mov",
+            proxy_path="/tmp/skip.mov",
+            duration_sec=6.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A008_C001",
+        )
+        provider = ExcerptOnlyTranscriptProvider()
+        segment = make_candidate_segment(
+            asset=asset,
+            segment_id="asset-skip-segment-01",
+            start_sec=0.0,
+            end_sec=4.0,
+            transcriber=provider,
+            transcript_spans=[],
+            prefilter_signals=[FrameSignal(1.0, 0.7, 0.6, 0.5, 0.2, 0.4, 0.7, 0.6, "deterministic")],
+            audio_signals=[AudioSignal(1.0, 0.002, 0.0, True, "ffmpeg")],
+            boundary_strategy="legacy",
+            boundary_confidence=0.0,
+            seed_region_ids=[],
+            seed_region_sources=[],
+            seed_region_ranges_sec=[],
+            transcript_lookup_enabled=False,
+        )
+
+        self.assertFalse(provider.called)
+        self.assertEqual(segment.transcript_excerpt, "")
+
+    def test_should_request_transcript_for_asset_uses_selective_thresholds(self) -> None:
+        asset = Asset(
+            id="asset-selective",
+            name="Selective Test",
+            source_path="/tmp/selective.mov",
+            proxy_path="/tmp/selective.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A010_C001",
+        )
+        runtime_status = NoOpTranscriptProvider(
+            configured_provider="auto",
+            effective_provider="faster-whisper",
+            model_size="small",
+            enabled=True,
+            available=True,
+            status="active",
+            detail="active",
+        ).runtime_status()
+
+        should_skip = should_request_transcript_for_asset(
+            asset=asset,
+            audio_signals=[
+                AudioSignal(1.0, 0.003, 0.0, True, "ffmpeg"),
+                AudioSignal(3.0, 0.004, 0.0, True, "ffmpeg"),
+                AudioSignal(5.0, 0.005, 0.0, False, "ffmpeg"),
+                AudioSignal(7.0, 0.004, 0.0, True, "ffmpeg"),
+            ],
+            transcriber=NoOpTranscriptProvider(),
+            runtime_status=runtime_status,
+        )
+        should_transcribe = should_request_transcript_for_asset(
+            asset=asset,
+            audio_signals=[
+                AudioSignal(1.0, 0.055, 0.0, False, "ffmpeg"),
+                AudioSignal(3.0, 0.038, 0.0, False, "ffmpeg"),
+                AudioSignal(5.0, 0.074, 0.0, False, "ffmpeg"),
+                AudioSignal(7.0, 0.047, 0.0, False, "ffmpeg"),
+            ],
+            transcriber=NoOpTranscriptProvider(),
+            runtime_status=runtime_status,
+        )
+
+        self.assertFalse(should_skip)
+        self.assertTrue(should_transcribe)
+
+    def test_borderline_transcript_candidates_use_probe_ranges(self) -> None:
+        asset = Asset(
+            id="asset-probe",
+            name="Probe Test",
+            source_path="/tmp/probe.mov",
+            proxy_path="/tmp/probe.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A011_C001",
+        )
+        audio_signals = [
+            AudioSignal(1.0, 0.009, 0.0, False, "ffmpeg"),
+            AudioSignal(4.0, 0.006, 0.0, False, "ffmpeg"),
+            AudioSignal(8.0, 0.014, 0.0, False, "ffmpeg"),
+            AudioSignal(10.0, 0.008, 0.0, False, "ffmpeg"),
+        ]
+
+        self.assertTrue(should_probe_before_full_transcript(audio_signals))
+        self.assertEqual(
+            build_transcript_probe_ranges(asset, audio_signals),
+            [(0.0, 4.0), (6.0, 10.0)],
+        )
+
+    def test_selective_skip_assets_can_still_trigger_probe(self) -> None:
+        low_speech_audio = [
+            AudioSignal(1.0, 0.0029, 0.0, True, "ffmpeg"),
+            AudioSignal(3.0, 0.0031, 0.0, True, "ffmpeg"),
+            AudioSignal(5.0, 0.0091, 0.0, False, "ffmpeg"),
+            AudioSignal(7.0, 0.005, 0.0, False, "ffmpeg"),
+        ]
+        silent_audio = [
+            AudioSignal(1.0, 0.001, 0.0, True, "ffmpeg"),
+            AudioSignal(3.0, 0.002, 0.0, True, "ffmpeg"),
+            AudioSignal(5.0, 0.0015, 0.0, True, "ffmpeg"),
+            AudioSignal(7.0, 0.001, 0.0, True, "ffmpeg"),
+        ]
+
+        self.assertTrue(should_probe_after_selective_skip(low_speech_audio))
+        self.assertFalse(should_probe_after_selective_skip(silent_audio))
+
+    def test_analyze_assets_skips_full_transcript_when_probe_finds_no_text(self) -> None:
+        asset = Asset(
+            id="asset-probe-skip",
+            name="Probe Skip",
+            source_path="/tmp/probe-skip.mov",
+            proxy_path="/tmp/probe-skip.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A012_C001",
+        )
+        provider = ProbeAwareTranscriptProvider(probe_accepts=False)
+        frame_signals = [FrameSignal(2.0, 0.6, 0.6, 0.5, 0.1, 0.3, 0.6, 0.55, "deterministic")]
+        audio_signals = [
+            AudioSignal(1.0, 0.008, 0.0, False, "ffmpeg"),
+            AudioSignal(4.0, 0.01, 0.0, False, "ffmpeg"),
+            AudioSignal(8.0, 0.012, 0.0, False, "ffmpeg"),
+            AudioSignal(10.0, 0.008, 0.0, False, "ffmpeg"),
+        ]
+
+        with unittest.mock.patch(
+            "services.analyzer.app.analysis.build_transcript_provider",
+            return_value=provider,
+        ), unittest.mock.patch(
+            "services.analyzer.app.analysis.sample_asset_signals",
+            return_value=frame_signals,
+        ), unittest.mock.patch(
+            "services.analyzer.app.analysis.sample_audio_signals",
+            return_value=audio_signals,
+        ):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="test-project",
+                    name="Test Project",
+                    story_prompt="Build a rough cut",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 6.0), (6.0, 12.0)]),
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        self.assertEqual(provider.probe_calls, 1)
+        self.assertEqual(provider.spans_calls, 0)
+        self.assertEqual(project.project.analysis_summary.get("transcript_target_asset_count"), 0)
+        self.assertEqual(project.project.analysis_summary.get("transcript_skipped_asset_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("transcript_probed_asset_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("transcript_probe_rejected_asset_count"), 1)
+
+    def test_analyze_assets_runs_full_transcript_when_probe_detects_text(self) -> None:
+        asset = Asset(
+            id="asset-probe-accept",
+            name="Probe Accept",
+            source_path="/tmp/probe-accept.mov",
+            proxy_path="/tmp/probe-accept.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A013_C001",
+        )
+        provider = ProbeAwareTranscriptProvider(
+            probe_accepts=True,
+            spans=[TranscriptSpan(0.5, 4.0, "A useful line lives here.")],
+        )
+        frame_signals = [FrameSignal(2.0, 0.6, 0.6, 0.5, 0.1, 0.3, 0.6, 0.55, "deterministic")]
+        audio_signals = [
+            AudioSignal(1.0, 0.008, 0.0, False, "ffmpeg"),
+            AudioSignal(4.0, 0.01, 0.0, False, "ffmpeg"),
+            AudioSignal(8.0, 0.012, 0.0, False, "ffmpeg"),
+            AudioSignal(10.0, 0.008, 0.0, False, "ffmpeg"),
+        ]
+
+        with unittest.mock.patch(
+            "services.analyzer.app.analysis.build_transcript_provider",
+            return_value=provider,
+        ), unittest.mock.patch(
+            "services.analyzer.app.analysis.sample_asset_signals",
+            return_value=frame_signals,
+        ), unittest.mock.patch(
+            "services.analyzer.app.analysis.sample_audio_signals",
+            return_value=audio_signals,
+        ):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="test-project",
+                    name="Test Project",
+                    story_prompt="Build a rough cut",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 6.0), (6.0, 12.0)]),
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        self.assertEqual(provider.probe_calls, 1)
+        self.assertGreater(provider.spans_calls, 0)
+        self.assertEqual(project.project.analysis_summary.get("transcript_target_asset_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("transcript_probed_asset_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("transcript_probe_rejected_asset_count"), 0)
+        self.assertTrue(any(segment.transcript_excerpt for segment in project.candidate_segments))
+
+    def test_analyze_assets_counts_speech_fallback_segments_for_speech_test_asset(self) -> None:
+        asset = Asset(
+            id="asset-007",
+            name="IMG_8660",
+            source_path="/tmp/img_8660.mov",
+            proxy_path="/tmp/img_8660-proxy.mov",
+            duration_sec=15.6,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A007_C001",
+        )
+        frame_signals = [
+            FrameSignal(2.0, 0.72, 0.6, 0.5, 0.25, 0.48, 0.72, 0.66, "deterministic"),
+            FrameSignal(6.0, 0.74, 0.61, 0.5, 0.26, 0.5, 0.72, 0.68, "deterministic"),
+            FrameSignal(10.5, 0.76, 0.62, 0.5, 0.24, 0.52, 0.73, 0.7, "deterministic"),
+            FrameSignal(13.0, 0.76, 0.62, 0.5, 0.2, 0.48, 0.73, 0.69, "deterministic"),
+        ]
+        audio_signals = [
+            AudioSignal(2.0, 0.38, 0.5, False, "ffmpeg"),
+            AudioSignal(6.0, 0.41, 0.53, False, "ffmpeg"),
+            AudioSignal(10.5, 0.45, 0.56, False, "ffmpeg"),
+            AudioSignal(13.0, 0.44, 0.55, False, "ffmpeg"),
+        ]
+
+        with (
+            unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "TIMELINE_TRANSCRIPT_PROVIDER": "disabled",
+                    "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "false",
+                    "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "false",
+                },
+                clear=False,
+            ),
+            unittest.mock.patch("services.analyzer.app.analysis.sample_asset_signals", return_value=frame_signals),
+            unittest.mock.patch("services.analyzer.app.analysis.sample_audio_signals", return_value=audio_signals),
+        ):
+            project = analyze_assets(
+                project=ProjectMeta(
+                    id="speech-test",
+                    name="Speech Test",
+                    story_prompt="Keep the strongest spoken beat.",
+                    status="draft",
+                    media_roots=["/tmp"],
+                ),
+                assets=[asset],
+                scene_detector=StaticSceneDetector([(0.0, 5.2), (5.2, 10.4), (10.4, 15.6)]),
+                segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+            )
+
+        self.assertGreater(project.project.analysis_summary.get("speech_fallback_segment_count", 0), 0)
+        self.assertEqual(project.project.analysis_summary.get("transcript_status"), "disabled")
+        self.assertTrue(any(segment.analysis_mode == "speech" for segment in project.candidate_segments))
 
     def test_fast_mode_shortlists_top_segments_for_expensive_analyzer(self) -> None:
         asset = Asset(

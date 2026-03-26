@@ -45,6 +45,8 @@ class SegmentEvidence:
     context_window_start_sec: float
     context_window_end_sec: float
     metrics_snapshot: dict[str, float]
+    transcript_status: str = ""
+    speech_mode_source: str = ""
     contact_sheet_path: str = ""
 
 
@@ -115,6 +117,9 @@ class SegmentReviewState:
     lineage_summary: str = ""
     semantic_validation_status: str = ""
     semantic_validation_summary: str = ""
+    transcript_status: str = ""
+    transcript_summary: str = ""
+    speech_mode_source: str = ""
 
 
 @dataclass(slots=True)

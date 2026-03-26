@@ -48,6 +48,11 @@ def main() -> int:
         f"concurrency={analysis_config.concurrency}, "
         f"cache={'on' if analysis_config.cache_enabled else 'off'}"
     )
+    log_to_stderr(
+        "Transcript runtime: "
+        f"provider={analysis_config.transcript_provider}, "
+        f"model_size={analysis_config.transcript_model_size}"
+    )
 
     def status_callback(message: str) -> None:
         log_to_stderr(message)

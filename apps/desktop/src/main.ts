@@ -7,6 +7,7 @@ import "./styles.css";
 type Step = "choose" | "process" | "results";
 type AIMode = "fast" | "full";
 type AIProvider = "deterministic" | "lmstudio" | "mlx-vlm-local";
+type TranscriptProvider = "auto" | "disabled" | "faster-whisper";
 
 type ProcessState = {
   running: boolean;
@@ -151,7 +152,7 @@ type TimelineProject = {
     name: string;
     story_prompt: string;
     status: string;
-    analysis_summary?: Record<string, number>;
+    analysis_summary?: Record<string, string | number | boolean>;
   };
   assets: Asset[];
   candidate_segments: CandidateSegment[];
@@ -185,6 +186,8 @@ type AppSettings = {
   aiKeyframeMaxWidth: string;
   aiConcurrency: string;
   aiCacheEnabled: boolean;
+  transcriptProvider: TranscriptProvider;
+  transcriptModelSize: string;
   audioEnabled: boolean;
   deduplicationEnabled: boolean;
   dedupThreshold: string;
@@ -239,6 +242,8 @@ function createDefaultSettings(): AppSettings {
     aiKeyframeMaxWidth: "448",
     aiConcurrency: "2",
     aiCacheEnabled: true,
+    transcriptProvider: "auto",
+    transcriptModelSize: "small",
     audioEnabled: true,
     deduplicationEnabled: true,
     dedupThreshold: "0.85",
@@ -720,6 +725,18 @@ function renderSettingsDialog() {
                 <input id="settings-ai-concurrency" type="number" min="1" value="${escapeHtml(draft.aiConcurrency)}" />
               </label>
               <label class="field">
+                Transcript provider
+                <select id="settings-transcript-provider">
+                  <option value="auto" ${draft.transcriptProvider === "auto" ? "selected" : ""}>auto</option>
+                  <option value="faster-whisper" ${draft.transcriptProvider === "faster-whisper" ? "selected" : ""}>faster-whisper</option>
+                  <option value="disabled" ${draft.transcriptProvider === "disabled" ? "selected" : ""}>disabled</option>
+                </select>
+              </label>
+              <label class="field">
+                Transcript model size
+                <input id="settings-transcript-model-size" type="text" value="${escapeHtml(draft.transcriptModelSize)}" />
+              </label>
+              <label class="field">
                 Dedup threshold
                 <input id="settings-dedup-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.dedupThreshold)}" />
               </label>
@@ -865,7 +882,8 @@ function renderResultsStep() {
 
   const clipViews = resolveClipViews(project);
   const analysisSummary = project.project.analysis_summary ?? {};
-  const vlmAnalyzedCount = (analysisSummary.ai_live_segment_count ?? 0) + (analysisSummary.ai_cached_segment_count ?? 0);
+  const vlmAnalyzedCount =
+    Number(analysisSummary.ai_live_segment_count ?? 0) + Number(analysisSummary.ai_cached_segment_count ?? 0);
 
   return `
     <section class="card view-card">
@@ -1143,11 +1161,19 @@ function bindActions() {
   bindTextSetting("settings-ai-max-keyframes", (value) => updateSettingsDraft({ aiMaxKeyframes: value }));
   bindTextSetting("settings-ai-keyframe-width", (value) => updateSettingsDraft({ aiKeyframeMaxWidth: value }));
   bindTextSetting("settings-ai-concurrency", (value) => updateSettingsDraft({ aiConcurrency: value }));
+  bindTextSetting("settings-transcript-model-size", (value) => updateSettingsDraft({ transcriptModelSize: value }));
 
   const settingsAIDevice = document.getElementById("settings-ai-device") as HTMLSelectElement | null;
   if (settingsAIDevice) {
     settingsAIDevice.onchange = () => {
       updateSettingsDraft({ aiDevice: settingsAIDevice.value });
+    };
+  }
+
+  const settingsTranscriptProvider = document.getElementById("settings-transcript-provider") as HTMLSelectElement | null;
+  if (settingsTranscriptProvider) {
+    settingsTranscriptProvider.onchange = () => {
+      updateSettingsDraft({ transcriptProvider: settingsTranscriptProvider.value as TranscriptProvider });
     };
   }
 

@@ -42,6 +42,32 @@ DRIVER_LABELS = {
     "visual_novelty": "visual novelty",
 }
 
+SPEECH_FALLBACK_MIN_SPEECH_RATIO = 0.65
+SPEECH_FALLBACK_MIN_AUDIO_ENERGY = 0.2
+SPEECH_FALLBACK_STRONG_SPEECH_RATIO = 0.9
+
+
+def infer_analysis_mode(
+    asset: Asset,
+    transcript_excerpt: str,
+    metrics: dict[str, float],
+) -> tuple[str, str]:
+    if not asset.has_speech:
+        return "visual", "not-applicable"
+
+    if transcript_excerpt.strip():
+        return "speech", "transcript"
+
+    speech_ratio = clamp(metrics.get("speech_ratio", 0.0))
+    audio_energy = clamp(metrics.get("audio_energy", 0.0))
+    if (
+        speech_ratio >= SPEECH_FALLBACK_STRONG_SPEECH_RATIO
+        or (speech_ratio >= SPEECH_FALLBACK_MIN_SPEECH_RATIO and audio_energy >= SPEECH_FALLBACK_MIN_AUDIO_ENERGY)
+    ):
+        return "speech", "speech-signal-fallback"
+
+    return "visual", "visual"
+
 
 def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
     analysis_mode, components = score_component_inputs(asset, segment)
@@ -74,7 +100,7 @@ def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
 
 def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str, dict[str, ScoreComponentInputs]]:
     metrics = segment.quality_metrics
-    analysis_mode = "speech" if asset.has_speech and segment.transcript_excerpt.strip() else "visual"
+    analysis_mode, _analysis_mode_source = infer_analysis_mode(asset, segment.transcript_excerpt, metrics)
 
     technical_values = {
         "sharpness": metrics.get("sharpness", 0.0),
@@ -216,6 +242,10 @@ def clip_score_for_segment(segment: CandidateSegment) -> float | None:
 
 def label_for_driver(key: str) -> str:
     return DRIVER_LABELS.get(key, key.replace("_", " "))
+
+
+def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, float(value)))
 
 
 def weighted_average(

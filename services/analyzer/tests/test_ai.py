@@ -283,6 +283,8 @@ class AIPhaseOneTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
+                "TIMELINE_TRANSCRIPT_PROVIDER": "faster-whisper",
+                "TIMELINE_TRANSCRIPT_MODEL_SIZE": "base",
                 "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
                 "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD": "0.82",
                 "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT": "40",
@@ -293,6 +295,8 @@ class AIPhaseOneTests(unittest.TestCase):
         ):
             config = load_ai_analysis_config()
 
+        self.assertEqual(config.transcript_provider, "faster-whisper")
+        self.assertEqual(config.transcript_model_size, "base")
         self.assertTrue(config.semantic_boundary_validation_enabled)
         self.assertEqual(config.semantic_boundary_ambiguity_threshold, 0.82)
         self.assertEqual(config.semantic_boundary_validation_budget_pct, 40)

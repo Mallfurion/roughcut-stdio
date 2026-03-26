@@ -116,9 +116,14 @@ ensure_rust
 
 echo "Installing analyzer package into the virtual environment..."
 install_extras=""
+transcript_provider="${TIMELINE_TRANSCRIPT_PROVIDER:-auto}"
 
 # CLIP is enabled by default
 install_extras="${install_extras}clip,"
+
+if [ "$transcript_provider" != "disabled" ]; then
+  install_extras="${install_extras}transcript,"
+fi
 
 if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
   install_extras="${install_extras}mlx_vlm,"
@@ -147,6 +152,12 @@ if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_clip.py
 else
   echo "Skipping model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
+fi
+
+if [ "$transcript_provider" != "disabled" ]; then
+  echo "Transcript runtime is enabled for setup (${transcript_provider}); faster-whisper will be available after install."
+else
+  echo "Transcript runtime is disabled for setup; skipping transcript dependency installation."
 fi
 
 if [ -n "${TIMELINE_MEDIA_DIR:-}" ]; then

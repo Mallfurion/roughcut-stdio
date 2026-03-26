@@ -47,6 +47,17 @@ The analyzer is configured through environment variables loaded from `.env` and 
 - `TIMELINE_AI_VLM_BUDGET_PCT` — Percentage of shortlisted candidates sent to VLM (default: `100`)
 - `TIMELINE_AI_CLIP_MODEL_PRETRAINED` — CLIP pretrained weights tag (default: `laion2b_s34b_b79k`)
 
+## Transcript Support
+
+- `TIMELINE_TRANSCRIPT_PROVIDER` — One of: `auto`, `disabled`, `faster-whisper` (default: `auto`)
+- `TIMELINE_TRANSCRIPT_MODEL_SIZE` — Local `faster-whisper` model size (default: `small`)
+
+When transcript support is enabled, the analyzer will try to extract timed transcript spans during processing. It does not blindly transcribe every audio-bearing asset: strong speech assets can go straight to full transcription, weak assets can be skipped, and borderline assets can be promoted through a short transcript probe first. If the backend is unavailable, the run continues and speech-aware fallback scoring is used for strong speech segments instead of failing the pipeline.
+
+`npm run setup` installs the transcript dependency automatically whenever `TIMELINE_TRANSCRIPT_PROVIDER` is not `disabled`.
+
+If `TIMELINE_AI_CACHE=true`, transcript spans are cached between process runs under the generated analysis artifacts, which can materially reduce rerun time on the same media set. `project.analysis_summary` and `generated/process-summary.txt` now report transcript-targeted, transcript-skipped, transcript-probed, transcript-probe-rejected, transcribed, and cached asset counts.
+
 ## Segment Boundary Refinement
 
 - `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` — Enable deterministic seed-region refinement before scoring (default: `true`)
@@ -79,6 +90,7 @@ If you want the current deterministic segmentation stack without any VLM calls, 
 TIMELINE_AI_PROVIDER=deterministic
 TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true
 TIMELINE_SEGMENT_SEMANTIC_VALIDATION=false
+TIMELINE_TRANSCRIPT_PROVIDER=disabled
 ```
 
 ### Recommended: MLX-VLM Local (Apple Silicon)
@@ -136,3 +148,14 @@ TIMELINE_DEDUP_THRESHOLD=0.85
 If CLIP is unavailable or disabled, deduplication falls back to histogram-based similarity using `TIMELINE_DEDUP_THRESHOLD`.
 
 Read more: [Segment Deduplication Spec](../openspec/specs/segment-deduplication/spec.md)
+
+## Using Local Transcript Support
+
+Enable transcript extraction with the local `faster-whisper` backend:
+
+```bash
+TIMELINE_TRANSCRIPT_PROVIDER=auto
+TIMELINE_TRANSCRIPT_MODEL_SIZE=small
+```
+
+If `faster-whisper` is installed, `generated/project.json` will include transcript-backed excerpts and `project.analysis_summary` will record transcript runtime status, targeted/skipped/probed transcript counts, transcribed or cached asset counts, excerpt-bearing segments, and speech-fallback segments. If the backend is missing or disabled, processing still completes and spoken clips can fall back to speech-aware scoring when `speech_ratio` and `audio_energy` are strong enough.

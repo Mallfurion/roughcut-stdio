@@ -33,6 +33,12 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "filtered_before_vlm_count": 1,
                     "audio_signal_asset_count": 1,
                     "audio_silent_asset_count": 0,
+                    "transcript_status": "partial-fallback",
+                    "transcript_provider_effective": "faster-whisper",
+                    "transcribed_asset_count": 1,
+                    "transcript_failed_asset_count": 1,
+                    "transcript_excerpt_segment_count": 2,
+                    "speech_fallback_segment_count": 1,
                     "ai_live_segment_count": 0,
                     "ai_cached_segment_count": 1,
                     "ai_fallback_segment_count": 1,
@@ -126,6 +132,8 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertEqual(comparison.baseline_run_id, "run-001")
             self.assertIn("Benchmark comparison: vs run-001", "\n".join(summary_lines))
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
+            self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
+            self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
             self.assertTrue((benchmark_root / "history.jsonl").is_file())
 
 

@@ -8,6 +8,7 @@ There is too much footage to watch manually. **Roughcut Stdio** solves this by:
 
 - **Scanning** a large set of videos to find candidate moments
 - **Refining** those moments into more context-complete candidate segments
+- **Transcribing** spoken footage locally when transcript support is available, with selective targeting and probe-based promotion so weak clips do not all pay full transcript cost
 - **Surfacing** the strongest segments using deterministic scoring plus optional local AI analysis
 - **Grading** each segment on visual, audio, and editorial qualities
 - **Assembling** those selections into a first-pass rough timeline
@@ -28,6 +29,8 @@ cd roughcut-stdio
 npm run setup
 npm run view
 ```
+
+`npm run setup` now installs local transcript support by default because `TIMELINE_TRANSCRIPT_PROVIDER=auto` unless you explicitly disable it.
 
 **Then in the desktop app:**
 
@@ -82,6 +85,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed design decisions a
 ## Core Features
 
 - **Context-complete segmentation** — Seed regions are deterministically refined, optionally merged or split into better narrative units, and can be semantically validated when boundaries are ambiguous
+- **Transcript-backed speech analysis** — Local transcript extraction can feed speech-aware refinement, scoring, and review; the analyzer now uses transcript cache reuse plus selective probing so only strong or validated speech assets pay the full transcription cost, and when transcripts are unavailable speech-heavy clips still degrade through explicit fallback instead of silent visual scoring
 - **Review provenance** — Desktop review shows how a segment was formed: boundary strategy, confidence, lineage, and semantic-validation status
 - **CLIP-based deduplication** — Semantic near-duplicate detection using embeddings (cosine similarity >= 0.95)
 - **Audio & visual analysis** — Frame signals (sharpness, motion, distinctiveness) + audio signals (RMS, silence)

@@ -112,6 +112,8 @@ class AIAnalysisConfig:
     keyframe_max_width: int
     concurrency: int
     cache_enabled: bool
+    transcript_provider: str = "auto"
+    transcript_model_size: str = "small"
     clip_enabled: bool = True
     clip_min_score: float = 0.35
     vlm_budget_pct: int = 100
@@ -945,6 +947,10 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     mode = os.environ.get("TIMELINE_AI_MODE", "fast").strip().lower() or "fast"
     if mode not in {"fast", "full"}:
         mode = "fast"
+    transcript_provider = os.environ.get("TIMELINE_TRANSCRIPT_PROVIDER", "auto").strip().lower() or "auto"
+    if transcript_provider not in {"auto", "disabled", "faster-whisper"}:
+        transcript_provider = "auto"
+    transcript_model_size = os.environ.get("TIMELINE_TRANSCRIPT_MODEL_SIZE", "small").strip().lower() or "small"
 
     max_segments_default = 1 if mode == "fast" else 99
     max_keyframes_default = 1 if mode == "fast" else 4
@@ -983,6 +989,8 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
         keyframe_max_width=max(160, parse_int_env("TIMELINE_AI_KEYFRAME_MAX_WIDTH", max_width_default)),
         concurrency=max(1, parse_int_env("TIMELINE_AI_CONCURRENCY", 2)),
         cache_enabled=parse_bool_env("TIMELINE_AI_CACHE", True),
+        transcript_provider=transcript_provider,
+        transcript_model_size=transcript_model_size,
         clip_enabled=parse_bool_env("TIMELINE_AI_CLIP_ENABLED", True),
         clip_min_score=clip_min_score,
         vlm_budget_pct=vlm_budget_pct,
@@ -1241,6 +1249,8 @@ def build_segment_evidence(
     story_prompt: str,
     artifacts_root: str | Path | None,
     extract_keyframes: bool,
+    transcript_status: str = "",
+    speech_mode_source: str = "",
     max_keyframes_per_segment: int = 3,
     keyframe_max_width: int = 640,
 ) -> SegmentEvidence:
@@ -1279,6 +1289,8 @@ def build_segment_evidence(
         transcript_excerpt=segment.transcript_excerpt,
         story_prompt=story_prompt,
         analysis_mode=segment.analysis_mode,
+        transcript_status=transcript_status,
+        speech_mode_source=speech_mode_source,
         keyframe_timestamps_sec=[round(timestamp, 3) for timestamp in keyframe_timestamps],
         keyframe_paths=keyframe_paths,
         contact_sheet_path=contact_sheet_path,
@@ -1424,7 +1436,7 @@ def segment_understanding_user_prompt(
     metrics = ", ".join(
         f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
     )
-    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    transcript = transcript_prompt_text(evidence)
     keyframes = ", ".join(f"{timestamp:.2f}s" for timestamp in evidence.keyframe_timestamps_sec)
 
     return (
@@ -1438,7 +1450,7 @@ def segment_understanding_user_prompt(
         f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
         f"- Keyframe timestamps: {keyframes}\n"
         f"- Metrics: {metrics}\n"
-        f"- Transcript: {transcript}\n\n"
+        f"- Transcript evidence: {transcript}\n\n"
         "Decide what is happening in the segment, whether it is editorially useful, "
         "what role it could play in a rough cut, and whether it should be kept."
     )
@@ -1467,7 +1479,7 @@ def segment_batch_understanding_user_prompt(
         metrics = ", ".join(
             f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
         )
-        transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+        transcript = transcript_prompt_text(evidence)
         lines.extend(
             [
                 f"{index}. segment_id={segment.id}",
@@ -1475,7 +1487,7 @@ def segment_batch_understanding_user_prompt(
                 f"   - range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s",
                 f"   - context: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s",
                 f"   - keyframes: {', '.join(f'{timestamp:.2f}s' for timestamp in evidence.keyframe_timestamps_sec)}",
-                f"   - transcript: {transcript}",
+                f"   - transcript evidence: {transcript}",
                 f"   - metrics: {metrics}",
             ]
         )
@@ -1492,7 +1504,7 @@ def local_vlm_segment_understanding_prompt(
     metrics = ", ".join(
         f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
     )
-    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    transcript = transcript_prompt_text(evidence)
     return (
         "Analyze this stitched contact sheet from a shortlisted video segment and respond with exactly one compact JSON object. "
         "No markdown fences. No commentary outside JSON. No duplicated list items. "
@@ -1512,7 +1524,7 @@ def local_vlm_segment_understanding_prompt(
         f"Analysis mode: {segment.analysis_mode}\n"
         f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
         f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"Transcript: {transcript}\n"
+        f"Transcript evidence: {transcript}\n"
         f"Metrics: {metrics}\n"
         "Focus on whether the segment has a clear subject, usable motion, readable composition, and editorial usefulness."
     )
@@ -1540,7 +1552,7 @@ def boundary_validation_user_prompt(
     metrics = ", ".join(
         f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
     )
-    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    transcript = transcript_prompt_text(evidence)
     boundary_strategy = segment.prefilter.boundary_strategy if segment.prefilter is not None else "unknown"
     assembly = (
         f"{segment.prefilter.assembly_operation}:{segment.prefilter.assembly_rule_family}"
@@ -1558,7 +1570,7 @@ def boundary_validation_user_prompt(
         f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
         f"- Boundary strategy: {boundary_strategy}\n"
         f"- Assembly lineage: {assembly}\n"
-        f"- Transcript: {transcript}\n"
+        f"- Transcript evidence: {transcript}\n"
         f"- Metrics: {metrics}\n\n"
         "Decide whether the current segment is complete as-is, needs a small extend or trim, "
         "or contains two ideas that should be split once. Keep adjustments local to the current bounds."
@@ -1586,9 +1598,18 @@ def local_vlm_boundary_validation_prompt(
         f"Analysis mode: {segment.analysis_mode}\n"
         f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
         f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"Transcript: {evidence.transcript_excerpt or 'No transcript excerpt available.'}\n"
+        f"Transcript evidence: {transcript_prompt_text(evidence)}\n"
         "Focus on whether the moment starts too late, ends too early, or bundles two separate beats."
     )
+
+
+def transcript_prompt_text(evidence: SegmentEvidence) -> str:
+    if evidence.transcript_excerpt.strip():
+        return evidence.transcript_excerpt
+    if evidence.transcript_status:
+        source = f" via {evidence.speech_mode_source}" if evidence.speech_mode_source else ""
+        return f"No transcript excerpt available ({evidence.transcript_status}{source})."
+    return "No transcript excerpt available."
 
 
 def normalize_boundary_validation_output(
