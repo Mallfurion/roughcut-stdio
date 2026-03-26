@@ -64,7 +64,12 @@ Runs the complete analysis pipeline:
 3. Take selection
 4. Timeline assembly
 
-Generates `generated/project.json` with all results.
+Generates:
+- `generated/project.json` with all results
+- `generated/process.log` with runtime/config diagnostics for the latest run
+- `generated/process-summary.txt` with the latest operational and benchmark summary
+- `generated/process-output.txt` with the exact terminal-facing output from the latest run
+- `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
 **Export to DaVinci Resolve**:
 
@@ -153,6 +158,15 @@ cat generated/project.json | jq '.project.analysis_summary | {clip_dedup_group_c
 
 # View all segments with dedup info
 cat generated/project.json | jq '.assets[].segments[] | {id, deduplicated, dedup_group_id}'
+
+# View the latest benchmark summary
+cat generated/process-summary.txt
+
+# View the latest terminal-facing process output
+cat generated/process-output.txt
+
+# View benchmark history
+cat generated/benchmarks/history.jsonl
 ```
 
 ---

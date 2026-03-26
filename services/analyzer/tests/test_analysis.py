@@ -105,6 +105,11 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(project.project.analysis_summary.get("ai_live_segment_count", 0), 0)
         self.assertEqual(project.project.analysis_summary.get("ai_cached_segment_count", 0), 0)
         self.assertEqual(project.project.analysis_summary.get("ai_fallback_segment_count", 0), 0)
+        phase_timings = project.project.analysis_summary.get("phase_timings_sec", {})
+        self.assertIn("per_asset_analysis", phase_timings)
+        self.assertIn("take_selection", phase_timings)
+        self.assertIn("timeline_assembly", phase_timings)
+        self.assertTrue(all(phase_timings[key] >= 0.0 for key in phase_timings))
 
     def test_capabilities_are_reported_as_bools(self) -> None:
         capabilities = inspect_runtime_capabilities()

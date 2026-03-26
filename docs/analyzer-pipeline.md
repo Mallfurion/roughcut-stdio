@@ -2,7 +2,7 @@
 
 This document describes what the analyzer does when `npm run process` is run, step by step.
 
-The entry point is `scripts/process.sh`. It sets up the environment, then invokes `services/analyzer/scripts/scan_media_root.py`, which runs the full pipeline and writes the result to `generated/project.json`.
+The entry point is `scripts/process.sh`. It sets up the environment, invokes `services/analyzer/scripts/scan_media_root.py`, writes the result to `generated/project.json`, then persists latest-run logs and benchmark artifacts under `generated/`.
 
 ---
 
@@ -247,6 +247,18 @@ A short story summary is generated from the composition of selected segments: di
 The complete result — project metadata, all assets, all candidate segments with their prefilter decisions and AI understanding, all take recommendations, and the assembled timeline — is serialized to `generated/project.json`.
 
 This file is the source of truth for the review workspace and export stage. The desktop app reads it to display recommendations and the rough timeline. The export command reads it to produce the FCPXML file for Resolve.
+
+The process step also writes operational artifacts for the latest run:
+
+- `generated/process.log` — key/value runtime configuration and benchmark metadata
+- `generated/process-summary.txt` — human-readable operational summary including total runtime and benchmark comparison
+- `generated/process-output.txt` — the exact terminal-facing output emitted during the run
+
+Benchmark history is stored separately under `generated/benchmarks/`:
+
+- `generated/benchmarks/history.jsonl` — append-only lightweight benchmark index
+- `generated/benchmarks/<run-id>/benchmark.json` — structured per-run benchmark payload with phase timings, workload counts, runtime configuration, and artifact paths
+- `generated/benchmarks/<run-id>/process-output.txt` — run-scoped copy of the saved terminal-facing output
 
 ---
 

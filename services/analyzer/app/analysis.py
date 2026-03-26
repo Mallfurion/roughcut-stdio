@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
@@ -154,17 +155,18 @@ def build_project_from_media_roots(
     status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
+    media_discovery_started_at = time.monotonic()
     discovered = discover_media_files(media_roots, probe_runner=probe_runner)
     if status_callback is not None:
         status_callback(f"Discovered {len(discovered)} video files.")
     matches = match_media_files(discovered)
     assets = build_assets_from_matches(matches)
+    media_discovery_duration = time.monotonic() - media_discovery_started_at
     if status_callback is not None:
         status_callback(f"Matched {len(assets)} source assets to process.")
-    project_id = slugify(project_name)
-    return analyze_assets(
+    project_data = analyze_assets(
         project=ProjectMeta(
-            id=project_id,
+            id=slugify(project_name),
             name=project_name,
             story_prompt=story_prompt,
             status="draft",
@@ -178,6 +180,10 @@ def build_project_from_media_roots(
         status_callback=status_callback,
         progress_callback=progress_callback,
     )
+    phase_timings = dict(project_data.project.analysis_summary.get("phase_timings_sec", {}))
+    phase_timings["media_discovery"] = round(media_discovery_duration, 3)
+    project_data.project.analysis_summary["phase_timings_sec"] = phase_timings
+    return project_data
 
 
 def analyze_assets(
@@ -215,6 +221,7 @@ def analyze_assets(
 
     total_assets = len(assets)
     all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
+    per_asset_analysis_started_at = time.monotonic()
 
     for asset_index, asset in enumerate(assets, start=1):
         if status_callback is not None:
@@ -500,8 +507,18 @@ def analyze_assets(
         candidate_segments.extend(asset_segments)
         if progress_callback is not None:
             progress_callback(asset_index, total_assets, asset)
+    per_asset_analysis_duration = time.monotonic() - per_asset_analysis_started_at
+
+    take_selection_started_at = time.monotonic()
+    take_recommendations = build_take_recommendations(assets, candidate_segments)
+    take_selection_duration = time.monotonic() - take_selection_started_at
+
+    timeline_assembly_started_at = time.monotonic()
+    timeline = build_timeline(take_recommendations, candidate_segments, assets)
+    timeline_assembly_duration = time.monotonic() - timeline_assembly_started_at
 
     project.analysis_summary = {
+        "asset_count": total_assets,
         "prefilter_sample_count": total_prefilter_samples,
         "candidate_segment_count": len(candidate_segments),
         "deduplicated_segment_count": total_deduplicated_segments if deduplication_enabled else 0,
@@ -517,6 +534,11 @@ def analyze_assets(
         "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
         "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
         "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
+        "phase_timings_sec": {
+            "per_asset_analysis": round(per_asset_analysis_duration, 3),
+            "take_selection": round(take_selection_duration, 3),
+            "timeline_assembly": round(timeline_assembly_duration, 3),
+        },
     }
     ai_runtime_stats = get_ai_runtime_stats(analyzer)
     project.analysis_summary.update(
@@ -556,9 +578,6 @@ def analyze_assets(
             f"fallback={ai_runtime_stats.fallback_segment_count}"
         )
         status_callback("═══════════════════════════════════════════════════")
-
-    take_recommendations = build_take_recommendations(assets, candidate_segments)
-    timeline = build_timeline(take_recommendations, candidate_segments, assets)
 
     return ProjectData(
         project=project,
