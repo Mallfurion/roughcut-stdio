@@ -80,6 +80,26 @@ struct AppSettings {
     deduplication_enabled: bool,
     #[serde(rename = "dedupThreshold")]
     dedup_threshold: String,
+    #[serde(rename = "clipEnabled")]
+    clip_enabled: bool,
+    #[serde(rename = "clipMinScore")]
+    clip_min_score: String,
+    #[serde(rename = "vlmBudgetPct")]
+    vlm_budget_pct: String,
+    #[serde(rename = "segmentBoundaryRefinementEnabled")]
+    segment_boundary_refinement_enabled: bool,
+    #[serde(rename = "segmentLegacyFallbackEnabled")]
+    segment_legacy_fallback_enabled: bool,
+    #[serde(rename = "segmentSemanticValidationEnabled")]
+    segment_semantic_validation_enabled: bool,
+    #[serde(rename = "segmentSemanticAmbiguityThreshold")]
+    segment_semantic_ambiguity_threshold: String,
+    #[serde(rename = "segmentSemanticValidationBudgetPct")]
+    segment_semantic_validation_budget_pct: String,
+    #[serde(rename = "segmentSemanticValidationMaxSegments")]
+    segment_semantic_validation_max_segments: String,
+    #[serde(rename = "segmentSemanticMaxAdjustmentSec")]
+    segment_semantic_max_adjustment_sec: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +406,16 @@ fn default_app_settings() -> AppSettings {
         audio_enabled: true,
         deduplication_enabled: true,
         dedup_threshold: "0.85".into(),
+        clip_enabled: true,
+        clip_min_score: "0.35".into(),
+        vlm_budget_pct: "100".into(),
+        segment_boundary_refinement_enabled: true,
+        segment_legacy_fallback_enabled: true,
+        segment_semantic_validation_enabled: true,
+        segment_semantic_ambiguity_threshold: "0.7".into(),
+        segment_semantic_validation_budget_pct: "100".into(),
+        segment_semantic_validation_max_segments: "2".into(),
+        segment_semantic_max_adjustment_sec: "1.5".into(),
     }
 }
 
@@ -444,6 +474,36 @@ fn read_app_settings(root: &Path) -> Result<AppSettings, String> {
     }
     if let Some(value) = env_map.get("TIMELINE_DEDUP_THRESHOLD") {
         settings.dedup_threshold = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_CLIP_ENABLED") {
+        settings.clip_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_CLIP_MIN_SCORE") {
+        settings.clip_min_score = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_AI_VLM_BUDGET_PCT") {
+        settings.vlm_budget_pct = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT") {
+        settings.segment_boundary_refinement_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_LEGACY_FALLBACK") {
+        settings.segment_legacy_fallback_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_VALIDATION") {
+        settings.segment_semantic_validation_enabled = parse_bool(value, true);
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD") {
+        settings.segment_semantic_ambiguity_threshold = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT") {
+        settings.segment_semantic_validation_budget_pct = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS") {
+        settings.segment_semantic_validation_max_segments = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC") {
+        settings.segment_semantic_max_adjustment_sec = value.clone();
     }
 
     Ok(settings)
@@ -530,6 +590,40 @@ fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)>
             if settings.deduplication_enabled { "true".into() } else { "false".into() },
         ),
         ("TIMELINE_DEDUP_THRESHOLD".into(), sanitize_single_line(&settings.dedup_threshold)),
+        (
+            "TIMELINE_AI_CLIP_ENABLED".into(),
+            if settings.clip_enabled { "true".into() } else { "false".into() },
+        ),
+        ("TIMELINE_AI_CLIP_MIN_SCORE".into(), sanitize_single_line(&settings.clip_min_score)),
+        ("TIMELINE_AI_VLM_BUDGET_PCT".into(), sanitize_single_line(&settings.vlm_budget_pct)),
+        (
+            "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT".into(),
+            if settings.segment_boundary_refinement_enabled { "true".into() } else { "false".into() },
+        ),
+        (
+            "TIMELINE_SEGMENT_LEGACY_FALLBACK".into(),
+            if settings.segment_legacy_fallback_enabled { "true".into() } else { "false".into() },
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_VALIDATION".into(),
+            if settings.segment_semantic_validation_enabled { "true".into() } else { "false".into() },
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD".into(),
+            sanitize_single_line(&settings.segment_semantic_ambiguity_threshold),
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT".into(),
+            sanitize_single_line(&settings.segment_semantic_validation_budget_pct),
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS".into(),
+            sanitize_single_line(&settings.segment_semantic_validation_max_segments),
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC".into(),
+            sanitize_single_line(&settings.segment_semantic_max_adjustment_sec),
+        ),
     ]
 }
 

@@ -191,6 +191,13 @@ type AppSettings = {
   clipEnabled: boolean;
   clipMinScore: string;
   vlmBudgetPct: string;
+  segmentBoundaryRefinementEnabled: boolean;
+  segmentLegacyFallbackEnabled: boolean;
+  segmentSemanticValidationEnabled: boolean;
+  segmentSemanticAmbiguityThreshold: string;
+  segmentSemanticValidationBudgetPct: string;
+  segmentSemanticValidationMaxSegments: string;
+  segmentSemanticMaxAdjustmentSec: string;
 };
 
 type AppState = {
@@ -237,7 +244,14 @@ function createDefaultSettings(): AppSettings {
     dedupThreshold: "0.85",
     clipEnabled: true,
     clipMinScore: "0.35",
-    vlmBudgetPct: "100"
+    vlmBudgetPct: "100",
+    segmentBoundaryRefinementEnabled: true,
+    segmentLegacyFallbackEnabled: true,
+    segmentSemanticValidationEnabled: true,
+    segmentSemanticAmbiguityThreshold: "0.7",
+    segmentSemanticValidationBudgetPct: "100",
+    segmentSemanticValidationMaxSegments: "2",
+    segmentSemanticMaxAdjustmentSec: "1.5"
   };
 }
 
@@ -717,6 +731,22 @@ function renderSettingsDialog() {
                 VLM budget %
                 <input id="settings-vlm-budget-pct" type="number" min="0" max="100" step="1" value="${escapeHtml(draft.vlmBudgetPct)}" />
               </label>
+              <label class="field">
+                Semantic ambiguity threshold
+                <input id="settings-segment-semantic-ambiguity-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.segmentSemanticAmbiguityThreshold)}" />
+              </label>
+              <label class="field">
+                Semantic validation budget %
+                <input id="settings-segment-semantic-budget-pct" type="number" min="0" max="100" step="1" value="${escapeHtml(draft.segmentSemanticValidationBudgetPct)}" />
+              </label>
+              <label class="field">
+                Semantic validation max segments
+                <input id="settings-segment-semantic-max-segments" type="number" min="0" step="1" value="${escapeHtml(draft.segmentSemanticValidationMaxSegments)}" />
+              </label>
+              <label class="field">
+                Semantic max adjustment (sec)
+                <input id="settings-segment-semantic-max-adjustment-sec" type="number" min="0.25" step="0.25" value="${escapeHtml(draft.segmentSemanticMaxAdjustmentSec)}" />
+              </label>
             </div>
             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1.5rem;">
               <label class="checkbox-field">
@@ -734,6 +764,18 @@ function renderSettingsDialog() {
               <label class="checkbox-field">
                 <input id="settings-clip-enabled" type="checkbox" ${draft.clipEnabled ? "checked" : ""} />
                 <span>Enable CLIP semantic scoring</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-segment-boundary-refinement-enabled" type="checkbox" ${draft.segmentBoundaryRefinementEnabled ? "checked" : ""} />
+                <span>Enable boundary refinement</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-segment-legacy-fallback-enabled" type="checkbox" ${draft.segmentLegacyFallbackEnabled ? "checked" : ""} />
+                <span>Enable legacy fallback</span>
+              </label>
+              <label class="checkbox-field">
+                <input id="settings-segment-semantic-validation-enabled" type="checkbox" ${draft.segmentSemanticValidationEnabled ? "checked" : ""} />
+                <span>Enable semantic boundary validation</span>
               </label>
             </div>
           </section>
@@ -1141,6 +1183,39 @@ function bindActions() {
 
   bindTextSetting("settings-clip-min-score", (value) => updateSettingsDraft({ clipMinScore: value }));
   bindTextSetting("settings-vlm-budget-pct", (value) => updateSettingsDraft({ vlmBudgetPct: value }));
+  bindTextSetting("settings-segment-semantic-ambiguity-threshold", (value) =>
+    updateSettingsDraft({ segmentSemanticAmbiguityThreshold: value }),
+  );
+  bindTextSetting("settings-segment-semantic-budget-pct", (value) =>
+    updateSettingsDraft({ segmentSemanticValidationBudgetPct: value }),
+  );
+  bindTextSetting("settings-segment-semantic-max-segments", (value) =>
+    updateSettingsDraft({ segmentSemanticValidationMaxSegments: value }),
+  );
+  bindTextSetting("settings-segment-semantic-max-adjustment-sec", (value) =>
+    updateSettingsDraft({ segmentSemanticMaxAdjustmentSec: value }),
+  );
+
+  const settingsBoundaryRefinementEnabled = document.getElementById("settings-segment-boundary-refinement-enabled") as HTMLInputElement | null;
+  if (settingsBoundaryRefinementEnabled) {
+    settingsBoundaryRefinementEnabled.onchange = () => {
+      updateSettingsDraft({ segmentBoundaryRefinementEnabled: settingsBoundaryRefinementEnabled.checked });
+    };
+  }
+
+  const settingsLegacyFallbackEnabled = document.getElementById("settings-segment-legacy-fallback-enabled") as HTMLInputElement | null;
+  if (settingsLegacyFallbackEnabled) {
+    settingsLegacyFallbackEnabled.onchange = () => {
+      updateSettingsDraft({ segmentLegacyFallbackEnabled: settingsLegacyFallbackEnabled.checked });
+    };
+  }
+
+  const settingsSemanticValidationEnabled = document.getElementById("settings-segment-semantic-validation-enabled") as HTMLInputElement | null;
+  if (settingsSemanticValidationEnabled) {
+    settingsSemanticValidationEnabled.onchange = () => {
+      updateSettingsDraft({ segmentSemanticValidationEnabled: settingsSemanticValidationEnabled.checked });
+    };
+  }
 
   const saveSettings = document.getElementById("save-settings");
   if (saveSettings) {
