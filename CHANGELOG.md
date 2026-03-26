@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-03-27
+
+### 🛠 Fixes & Improvements
+- Split the desktop app into state, platform, render, and review modules to improve separation of concerns and maintainability.
+
 ## [1.5.0] - 2026-03-26
 
 ### 🚀 Features
