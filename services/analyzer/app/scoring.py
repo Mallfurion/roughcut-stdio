@@ -39,6 +39,7 @@ DRIVER_LABELS = {
     "stability": "stability",
     "story_alignment": "story alignment",
     "subject_clarity": "subject clarity",
+    "turn_completeness": "turn completeness",
     "visual_novelty": "visual novelty",
 }
 
@@ -101,6 +102,10 @@ def score_segment(asset: Asset, segment: CandidateSegment) -> ScoreBreakdown:
 def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str, dict[str, ScoreComponentInputs]]:
     metrics = segment.quality_metrics
     analysis_mode, _analysis_mode_source = infer_analysis_mode(asset, segment.transcript_excerpt, metrics)
+    turn_completeness = metrics.get(
+        "turn_completeness",
+        0.75 if segment.transcript_excerpt.strip() else 0.0,
+    )
 
     technical_values = {
         "sharpness": metrics.get("sharpness", 0.0),
@@ -125,22 +130,26 @@ def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str
             "story_alignment": metrics.get("story_alignment", 0.0),
             "speech_ratio": metrics.get("speech_ratio", 0.0),
             "subject_clarity": metrics.get("subject_clarity", 0.0),
+            "turn_completeness": turn_completeness,
         }
         semantic_weights = {
-            "hook_strength": 0.32,
-            "story_alignment": 0.28,
-            "speech_ratio": 0.24,
-            "subject_clarity": 0.16,
+            "hook_strength": 0.26,
+            "story_alignment": 0.24,
+            "speech_ratio": 0.2,
+            "subject_clarity": 0.12,
+            "turn_completeness": 0.18,
         }
         story_values = {
             "story_alignment": metrics.get("story_alignment", 0.0),
             "hook_strength": metrics.get("hook_strength", 0.0),
             "duration_fit": metrics.get("duration_fit", 0.0),
+            "turn_completeness": turn_completeness,
         }
         story_weights = {
-            "story_alignment": 0.46,
-            "hook_strength": 0.28,
-            "duration_fit": 0.26,
+            "story_alignment": 0.36,
+            "hook_strength": 0.22,
+            "duration_fit": 0.2,
+            "turn_completeness": 0.22,
         }
     else:
         semantic_values = {

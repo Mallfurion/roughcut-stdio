@@ -7,6 +7,7 @@ Semantic boundary validation is implemented, but current runs show that it often
 - Retune semantic-boundary eligibility and ambiguity scoring using transcript-turn-aware evidence and evaluation-harness results.
 - Add bounded activation rules so borderline runs do not end with zero semantic validation targets by default.
 - Persist benchmark-facing metrics that explain when semantic validation helped, skipped, or stayed dormant.
+- Normalize local-model boundary responses more defensively and keep semantic split behavior conservative unless the evidence is strong.
 
 ## Capabilities
 

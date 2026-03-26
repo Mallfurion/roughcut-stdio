@@ -94,6 +94,8 @@ Only assets whose probe returns real transcript text are promoted into the full 
 
 If transcript support is unavailable, processing continues and spoken clips can still enter speech-aware scoring through deterministic fallback.
 
+When transcript spans are available, the analyzer also derives lightweight **transcript turns** by grouping adjacent spans with short internal gaps. These turns become first-class structure for downstream speech segmentation and scoring.
+
 ### Step 2.5 - Seed Region Building
 
 The analyzer combines low-cost structure into **seed regions**. Inputs include:
@@ -112,6 +114,7 @@ Deterministic seed-region refinement is enabled by default. Each seed region is 
 
 Depending on available evidence, the analyzer may:
 
+- snap to transcript turn edges
 - snap to transcript span edges
 - snap to audio transitions or silence gaps
 - align to nearby scene boundaries
@@ -119,7 +122,7 @@ Depending on available evidence, the analyzer may:
 
 If refinement is enabled but a seed region has weak structure, the analyzer still produces a deterministic bounded result. If `TIMELINE_SEGMENT_LEGACY_FALLBACK=true`, legacy fallback behavior remains available when refinement yields nothing usable.
 
-Each refined region records provenance such as boundary strategy, confidence, and source seed lineage.
+Each refined region records provenance such as boundary strategy, confidence, source seed lineage, and aligned transcript-turn metadata when available.
 
 **Output:** deterministically refined regions.
 
@@ -128,9 +131,9 @@ Each refined region records provenance such as boundary strategy, confidence, an
 After refinement, the analyzer can merge or split regions before they become final candidate segments.
 
 - **Merge:** adjacent refined regions from the same asset may be combined when transcript continuity, question/answer flow, or short continuous action suggests they form one beat
-- **Split:** a refined region may be divided when it clearly contains multiple ideas or a strong internal divider
+- **Split:** a refined region may be divided when it clearly contains multiple ideas, a strong transcript turn break, or a scene divider
 
-Assembly lineage is preserved so review can explain how a final segment was formed.
+Assembly lineage is preserved so review can explain how a final segment was formed, including whether a merge came from turn continuity or whether a split was triggered by a turn break.
 
 **Output:** final candidate ranges used for scoring and review.
 
@@ -142,8 +145,14 @@ For each final candidate range, the analyzer creates a `CandidateSegment`. This 
 - `analysis_mode` selection (`speech` or `visual`)
 - speech-aware fallback classification when transcript text is missing but speech signals remain strong
 - aggregated metrics snapshot from frame and audio signals
-- derived quality metrics such as `hook_strength`, `story_alignment`, `duration_fit`, `audio_energy`, and `speech_ratio`
+- derived quality metrics such as `hook_strength`, `story_alignment`, `duration_fit`, `audio_energy`, `speech_ratio`, and `turn_completeness`
 - initial prefilter decision and segmentation provenance
+
+When transcript turns are present, each speech-heavy segment also records:
+
+- which turns it overlaps
+- whether it is turn-aligned, mostly complete, or partial
+- a `turn_completeness` score used later during speech scoring
 
 **Output:** `CandidateSegment` records with quality metrics attached.
 
@@ -151,14 +160,18 @@ For each final candidate range, the analyzer creates a `CandidateSegment`. This 
 
 Semantic boundary validation is enabled by default, but only ambiguous segments are eligible for a boundary-validation pass.
 
-Eligibility is based on boundary confidence and assembly strategy. Validation is bounded by:
+Eligibility is based on boundary confidence, turn completeness, and assembly strategy. Validation is bounded by:
 
 - `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD`
+- `TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD`
+- `TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS`
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT`
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS`
 - `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC`
 
-Disabled, unavailable, or over-budget validation keeps deterministic output unchanged and persists the reason in review metadata.
+If no segment crosses the primary threshold, the analyzer may still validate a very small floor-targeted subset of the most ambiguous segments so the semantic stage does not stay permanently dormant.
+
+Disabled, unavailable, over-budget, or not-eligible validation keeps deterministic output unchanged and persists the reason in review metadata, including whether a validated segment was threshold-targeted or floor-targeted.
 
 **Output:** validated or skipped segments with persisted validation status.
 
@@ -179,8 +192,9 @@ For each shortlisted segment, the analyzer extracts keyframes and prepares an ev
 - keyframes are stitched into a contact sheet when possible
 - neighboring time context is recorded for downstream analysis
 - transcript status and speech-mode source are recorded for review and prompt building
+- transcript turn count, turn ranges, and turn completeness are attached for review and downstream debugging
 
-**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript evidence, transcript status, speech-mode source, and metrics.
+**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript evidence, transcript status, speech-mode source, transcript-turn metadata, and metrics.
 
 ### Step 2.12 - CLIP Semantic Scoring
 
@@ -276,6 +290,22 @@ The process step also writes:
 - `generated/benchmarks/history.jsonl`
 - `generated/benchmarks/<run-id>/benchmark.json`
 - `generated/benchmarks/<run-id>/process-output.txt`
+
+## Segmentation Evaluation Workflow
+
+The repository also has a fixture-driven segmentation evaluation workflow layered on top of the normal process run.
+
+**Command:** `npm run evaluate:segmentation -- --fixture-set <name> [--media-dir <path>]`
+
+That workflow:
+
+1. runs `npm run process` unless `--skip-process` is provided
+2. loads a stable fixture manifest from [fixtures/segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json)
+3. evaluates the latest `generated/project.json` against the selected fixture set
+4. writes a human-readable summary to `generated/segmentation-evaluation-summary.txt`
+5. attaches the full evaluation result to the latest benchmark run as `generated/benchmarks/<run-id>/segmentation-evaluation.json`
+
+The latest `benchmark.json` and `history.jsonl` entry are also updated with a summary of the quality-evaluation result, so segmentation-quality checks travel with the existing benchmark artifacts.
 
 ## What Gets Filtered And When
 

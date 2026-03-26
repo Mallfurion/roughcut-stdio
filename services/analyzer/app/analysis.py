@@ -102,6 +102,11 @@ TRANSCRIPT_DIRECT_FULL_PASS_MIN_AVG_RMS = 0.02
 TRANSCRIPT_PROBE_DURATION_SEC = 4.0
 TRANSCRIPT_PROBE_MAX_WINDOWS = 2
 TRANSCRIPT_PROBE_MIN_ALPHA_CHARS = 8
+TRANSCRIPT_TURN_MAX_INTERNAL_GAP_SEC = 0.9
+TRANSCRIPT_TURN_BREAK_GAP_SEC = 1.35
+TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC = 0.45
+TRANSCRIPT_TURN_REFINE_MARGIN_SEC = 0.75
+TRANSCRIPT_TURN_CONTINUITY_GAP_SEC = 0.55
 TIMELINE_VISUAL_BASE_MAX_DURATION_SEC = 5.0
 TIMELINE_VISUAL_REFINED_MAX_DURATION_SEC = 6.5
 TIMELINE_VISUAL_MERGED_MAX_DURATION_SEC = 7.0
@@ -120,6 +125,15 @@ class TranscriptSpan:
     start_sec: float
     end_sec: float
     text: str
+
+
+@dataclass(slots=True)
+class TranscriptTurn:
+    id: str
+    start_sec: float
+    end_sec: float
+    text: str
+    span_count: int
 
 
 @dataclass(slots=True)
@@ -147,6 +161,9 @@ class RefinedSegmentCandidate:
     seed_region_ids: list[str]
     seed_region_sources: list[str]
     seed_region_ranges_sec: list[list[float]]
+    transcript_turn_ids: list[str] | None = None
+    transcript_turn_ranges_sec: list[list[float]] | None = None
+    transcript_turn_alignment: str = ""
 
 
 @dataclass(slots=True)
@@ -154,9 +171,14 @@ class AssemblyContinuitySignals:
     gap_sec: float
     transcript_span_count: int
     transcript_internal_gap_sec: float
+    transcript_turn_count: int
+    transcript_turn_gap_sec: float
     same_analysis_mode: bool
     shared_seed_source: bool
     scene_divider_between: bool
+    shared_turn: bool
+    consecutive_turns: bool
+    strong_turn_break_between: bool
 
 
 class NoOpTranscriptProvider:
@@ -702,6 +724,77 @@ def transcript_spans_for_range(
     return []
 
 
+def derive_transcript_turns(transcript_spans: list[TranscriptSpan]) -> list[TranscriptTurn]:
+    if not transcript_spans:
+        return []
+
+    ordered = sorted(transcript_spans, key=lambda span: (span.start_sec, span.end_sec))
+    turns: list[TranscriptTurn] = []
+    current: list[TranscriptSpan] = [ordered[0]]
+
+    for span in ordered[1:]:
+        previous = current[-1]
+        if span.start_sec - previous.end_sec <= TRANSCRIPT_TURN_MAX_INTERNAL_GAP_SEC:
+            current.append(span)
+            continue
+        turns.append(_transcript_turn_from_spans(len(turns) + 1, current))
+        current = [span]
+
+    turns.append(_transcript_turn_from_spans(len(turns) + 1, current))
+    return turns
+
+
+def _transcript_turn_from_spans(index: int, spans: list[TranscriptSpan]) -> TranscriptTurn:
+    return TranscriptTurn(
+        id=f"turn-{index:02d}",
+        start_sec=round(min(span.start_sec for span in spans), 3),
+        end_sec=round(max(span.end_sec for span in spans), 3),
+        text=" ".join(span.text.strip() for span in spans if span.text.strip()).strip(),
+        span_count=len(spans),
+    )
+
+
+def transcript_turns_for_range(
+    transcript_turns: list[TranscriptTurn],
+    start_sec: float,
+    end_sec: float,
+) -> list[TranscriptTurn]:
+    return [
+        turn
+        for turn in transcript_turns
+        if turn.end_sec >= start_sec and turn.start_sec <= end_sec
+    ]
+
+
+def transcript_turn_alignment(
+    transcript_turns: list[TranscriptTurn],
+    start_sec: float,
+    end_sec: float,
+) -> tuple[list[TranscriptTurn], str, float]:
+    matched = transcript_turns_for_range(transcript_turns, start_sec, end_sec)
+    if not matched:
+        return [], "", 0.0
+
+    first_turn = matched[0]
+    last_turn = matched[-1]
+    turn_window_start = first_turn.start_sec
+    turn_window_end = last_turn.end_sec
+    covered_duration = max(0.0, min(end_sec, turn_window_end) - max(start_sec, turn_window_start))
+    turn_window_duration = max(0.1, turn_window_end - turn_window_start)
+    coverage = clamp(covered_duration / turn_window_duration)
+    start_edge = clamp(1.0 - abs(start_sec - turn_window_start) / TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC)
+    end_edge = clamp(1.0 - abs(end_sec - turn_window_end) / TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC)
+    completeness = round(clamp((coverage * 0.55) + (((start_edge + end_edge) / 2.0) * 0.45)), 4)
+
+    if start_edge >= 0.85 and end_edge >= 0.85:
+        alignment = "turn-aligned"
+    elif coverage >= 0.8:
+        alignment = "mostly-complete"
+    else:
+        alignment = "partial-turn"
+    return matched, alignment, completeness
+
+
 def transcript_excerpt_for_range(
     transcriber: TranscriptProvider,
     asset: Asset,
@@ -731,6 +824,7 @@ def make_candidate_segment(
     end_sec: float,
     transcriber: TranscriptProvider,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     prefilter_signals,
     audio_signals,
     boundary_strategy: str,
@@ -756,6 +850,11 @@ def make_candidate_segment(
         if asset.has_speech
         else ""
     )
+    matched_turns, turn_alignment, turn_completeness = transcript_turn_alignment(
+        transcript_turns,
+        start_sec,
+        end_sec,
+    )
     prefilter_snapshot = aggregate_segment_prefilter(
         signals=prefilter_signals,
         start_sec=start_sec,
@@ -769,6 +868,8 @@ def make_candidate_segment(
         "visual",
         prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
     )
+    metrics["turn_completeness"] = turn_completeness
+    metrics["transcript_turn_count"] = float(len(matched_turns))
     analysis_mode, _analysis_mode_source = infer_analysis_mode(asset, excerpt, metrics)
     return CandidateSegment(
         id=segment_id,
@@ -797,6 +898,9 @@ def make_candidate_segment(
             assembly_rule_family=assembly_rule_family,
             assembly_source_segment_ids=list(assembly_source_segment_ids or []),
             assembly_source_ranges_sec=[list(item) for item in (assembly_source_ranges_sec or [])],
+            transcript_turn_ids=[turn.id for turn in matched_turns],
+            transcript_turn_ranges_sec=[[turn.start_sec, turn.end_sec] for turn in matched_turns],
+            transcript_turn_alignment=turn_alignment,
         ),
     )
 
@@ -807,6 +911,7 @@ def refine_seed_regions(
     seed_regions: list[SeedRegion],
     base_ranges: list[tuple[float, float]],
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     audio_signals,
 ) -> list[RefinedSegmentCandidate]:
     if not seed_regions:
@@ -815,7 +920,7 @@ def refine_seed_regions(
     refined: list[RefinedSegmentCandidate] = []
     for seed in seed_regions:
         candidate = (
-            _refine_seed_with_transcript(asset, seed, transcript_spans)
+            _refine_seed_with_transcript(asset, seed, transcript_spans, transcript_turns)
             or _refine_seed_with_audio(asset, seed, audio_signals)
             or _refine_seed_with_scene(asset, seed, base_ranges)
             or _refine_seed_with_duration(asset, seed)
@@ -828,12 +933,30 @@ def _refine_seed_with_transcript(
     asset: Asset,
     seed: SeedRegion,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
 ) -> RefinedSegmentCandidate | None:
+    expanded_start = max(0.0, seed.start_sec - TRANSCRIPT_TURN_REFINE_MARGIN_SEC)
+    expanded_end = min(asset.duration_sec, seed.end_sec + TRANSCRIPT_TURN_REFINE_MARGIN_SEC)
+    if transcript_turns:
+        matching_turns = transcript_turns_for_range(transcript_turns, expanded_start, expanded_end)
+        if matching_turns:
+            start_sec = max(0.0, min(turn.start_sec for turn in matching_turns))
+            end_sec = min(asset.duration_sec, max(turn.end_sec for turn in matching_turns))
+            if end_sec - start_sec >= 1.0:
+                return RefinedSegmentCandidate(
+                    start_sec=round(start_sec, 3),
+                    end_sec=round(end_sec, 3),
+                    boundary_strategy="turn-snap",
+                    boundary_confidence=0.93,
+                    seed_region_ids=[seed.id],
+                    seed_region_sources=[seed.source],
+                    seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+                    transcript_turn_ids=[turn.id for turn in matching_turns],
+                    transcript_turn_ranges_sec=[[turn.start_sec, turn.end_sec] for turn in matching_turns],
+                    transcript_turn_alignment="turn-aligned",
+                )
     if not transcript_spans:
         return None
-    margin = 0.75
-    expanded_start = max(0.0, seed.start_sec - margin)
-    expanded_end = min(asset.duration_sec, seed.end_sec + margin)
     matching = [
         span
         for span in transcript_spans
@@ -853,6 +976,9 @@ def _refine_seed_with_transcript(
         seed_region_ids=[seed.id],
         seed_region_sources=[seed.source],
         seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+        transcript_turn_ids=[],
+        transcript_turn_ranges_sec=[],
+        transcript_turn_alignment="span-aligned",
     )
 
 
@@ -998,6 +1124,7 @@ def assemble_narrative_units(
     segments: list[CandidateSegment],
     base_ranges: list[tuple[float, float]],
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     transcriber: TranscriptProvider,
     prefilter_signals,
     audio_signals,
@@ -1013,6 +1140,7 @@ def assemble_narrative_units(
                 segment=segment,
                 base_ranges=base_ranges,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 transcriber=transcriber,
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
@@ -1024,6 +1152,7 @@ def assemble_narrative_units(
         segments=split_segments,
         base_ranges=base_ranges,
         transcript_spans=transcript_spans,
+        transcript_turns=transcript_turns,
         transcriber=transcriber,
         prefilter_signals=prefilter_signals,
         audio_signals=audio_signals,
@@ -1041,11 +1170,12 @@ def split_candidate_segment(
     segment: CandidateSegment,
     base_ranges: list[tuple[float, float]],
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     transcriber: TranscriptProvider,
     prefilter_signals,
     audio_signals,
 ) -> list[CandidateSegment]:
-    divider, rule_family = _find_segment_split_divider(segment, base_ranges, transcript_spans)
+    divider, rule_family = _find_segment_split_divider(segment, base_ranges, transcript_spans, transcript_turns)
     if divider is None or not rule_family:
         return [segment]
 
@@ -1069,6 +1199,7 @@ def split_candidate_segment(
                 end_sec=end_sec,
                 transcriber=transcriber,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
                 boundary_strategy=f"assembly-split:{rule_family}",
@@ -1092,6 +1223,7 @@ def merge_adjacent_segments(
     segments: list[CandidateSegment],
     base_ranges: list[tuple[float, float]],
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     transcriber: TranscriptProvider,
     prefilter_signals,
     audio_signals,
@@ -1105,7 +1237,7 @@ def merge_adjacent_segments(
     buffer_rules: list[str] = []
 
     for candidate in ordered[1:]:
-        signals = collect_assembly_continuity_signals(buffer[-1], candidate, transcript_spans, base_ranges)
+        signals = collect_assembly_continuity_signals(buffer[-1], candidate, transcript_spans, transcript_turns, base_ranges)
         rule_family = merge_rule_family(buffer[-1], candidate, signals)
         if rule_family:
             buffer.append(candidate)
@@ -1118,6 +1250,7 @@ def merge_adjacent_segments(
                 rule_families=buffer_rules,
                 transcriber=transcriber,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
             )
@@ -1132,6 +1265,7 @@ def merge_adjacent_segments(
             rule_families=buffer_rules,
             transcriber=transcriber,
             transcript_spans=transcript_spans,
+            transcript_turns=transcript_turns,
             prefilter_signals=prefilter_signals,
             audio_signals=audio_signals,
         )
@@ -1143,6 +1277,7 @@ def collect_assembly_continuity_signals(
     left: CandidateSegment,
     right: CandidateSegment,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     base_ranges: list[tuple[float, float]],
 ) -> AssemblyContinuitySignals:
     gap_sec = round(max(0.0, right.start_sec - left.end_sec), 3)
@@ -1155,17 +1290,37 @@ def collect_assembly_continuity_signals(
         key=lambda span: (span.start_sec, span.end_sec),
     )
     transcript_gap = largest_transcript_gap(matching_spans)
+    matching_turns = transcript_turns_for_range(transcript_turns, left.start_sec, right.end_sec)
+    transcript_turn_gap = largest_transcript_turn_gap(matching_turns)
     scene_boundaries = scene_boundaries_from_ranges(base_ranges)
     scene_divider_between = any(left.end_sec <= boundary <= right.start_sec for boundary in scene_boundaries)
     left_sources = set(left.prefilter.seed_region_sources if left.prefilter is not None else [])
     right_sources = set(right.prefilter.seed_region_sources if right.prefilter is not None else [])
+    left_turn_ids = set(left.prefilter.transcript_turn_ids if left.prefilter is not None else [])
+    right_turn_ids = set(right.prefilter.transcript_turn_ids if right.prefilter is not None else [])
+    shared_turn = bool(left_turn_ids.intersection(right_turn_ids))
+    consecutive_turns = False
+    strong_turn_break_between = False
+    if left_turn_ids and right_turn_ids and transcript_turns:
+        order_by_id = {turn.id: index for index, turn in enumerate(transcript_turns)}
+        left_last = max((order_by_id[turn_id] for turn_id in left_turn_ids if turn_id in order_by_id), default=-1)
+        right_first = min((order_by_id[turn_id] for turn_id in right_turn_ids if turn_id in order_by_id), default=-1)
+        if left_last >= 0 and right_first >= 0 and right_first - left_last == 1:
+            consecutive_turns = True
+            turn_gap = transcript_turns[right_first].start_sec - transcript_turns[left_last].end_sec
+            strong_turn_break_between = turn_gap >= TRANSCRIPT_TURN_BREAK_GAP_SEC
     return AssemblyContinuitySignals(
         gap_sec=gap_sec,
         transcript_span_count=len(matching_spans),
         transcript_internal_gap_sec=transcript_gap,
+        transcript_turn_count=len(matching_turns),
+        transcript_turn_gap_sec=transcript_turn_gap,
         same_analysis_mode=left.analysis_mode == right.analysis_mode,
         shared_seed_source=bool(left_sources.intersection(right_sources)),
         scene_divider_between=scene_divider_between,
+        shared_turn=shared_turn,
+        consecutive_turns=consecutive_turns,
+        strong_turn_break_between=strong_turn_break_between,
     )
 
 
@@ -1186,6 +1341,13 @@ def merge_rule_family(
         return ""
     if signals.gap_sec > ASSEMBLY_MERGE_MAX_GAP_SEC:
         return ""
+    if (
+        (signals.shared_turn or signals.consecutive_turns)
+        and not signals.strong_turn_break_between
+        and signals.transcript_turn_gap_sec <= TRANSCRIPT_TURN_CONTINUITY_GAP_SEC
+        and not signals.scene_divider_between
+    ):
+        return "turn-continuity"
     if (
         signals.transcript_span_count >= 2
         and signals.transcript_internal_gap_sec <= ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC
@@ -1214,6 +1376,7 @@ def materialize_merged_segment(
     rule_families: list[str],
     transcriber: TranscriptProvider,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     prefilter_signals,
     audio_signals,
 ) -> CandidateSegment:
@@ -1235,6 +1398,7 @@ def materialize_merged_segment(
         end_sec=segments[-1].end_sec,
         transcriber=transcriber,
         transcript_spans=transcript_spans,
+        transcript_turns=transcript_turns,
         prefilter_signals=prefilter_signals,
         audio_signals=audio_signals,
         boundary_strategy=f"assembly-merge:{rule_family}",
@@ -1254,9 +1418,22 @@ def _find_segment_split_divider(
     segment: CandidateSegment,
     base_ranges: list[tuple[float, float]],
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
 ) -> tuple[float | None, str]:
     if segment.end_sec - segment.start_sec < ASSEMBLY_SPLIT_MIN_DURATION_SEC:
         return None, ""
+
+    matching_turns = transcript_turns_for_range(transcript_turns, segment.start_sec, segment.end_sec)
+    if len(matching_turns) >= 2:
+        for earlier, later in zip(matching_turns, matching_turns[1:]):
+            gap_sec = later.start_sec - earlier.end_sec
+            divider = round((earlier.end_sec + later.start_sec) / 2.0, 3)
+            if (
+                gap_sec >= TRANSCRIPT_TURN_BREAK_GAP_SEC
+                and divider - segment.start_sec >= ASSEMBLY_SPLIT_MIN_PART_SEC
+                and segment.end_sec - divider >= ASSEMBLY_SPLIT_MIN_PART_SEC
+            ):
+                return divider, "turn-break"
 
     matching_spans = sorted(
         [
@@ -1308,6 +1485,13 @@ def _find_segment_split_divider(
 def largest_transcript_gap(spans: list[TranscriptSpan]) -> float:
     largest_gap = 0.0
     for earlier, later in zip(spans, spans[1:]):
+        largest_gap = max(largest_gap, later.start_sec - earlier.end_sec)
+    return round(max(0.0, largest_gap), 3)
+
+
+def largest_transcript_turn_gap(turns: list[TranscriptTurn]) -> float:
+    largest_gap = 0.0
+    for earlier, later in zip(turns, turns[1:]):
         largest_gap = max(largest_gap, later.start_sec - earlier.end_sec)
     return round(max(0.0, largest_gap), 3)
 
@@ -1401,6 +1585,22 @@ def semantic_boundary_ambiguity_score(segment: CandidateSegment) -> float:
         score += 0.08
     if prefilter.boundary_strategy == "transcript-snap" and seed_drift_sec >= 0.75:
         score += 0.04
+    if prefilter.boundary_strategy == "turn-snap" and seed_drift_sec >= 0.5:
+        score += 0.03
+    if segment.analysis_mode == "speech" and prefilter.transcript_turn_alignment == "partial-turn":
+        score += 0.08
+    if segment.analysis_mode == "speech" and prefilter.transcript_turn_alignment == "mostly-complete":
+        score += 0.03
+    if segment.analysis_mode == "speech" and prefilter.assembly_rule_family == "turn-break":
+        score += 0.14
+    if segment.analysis_mode == "speech" and prefilter.assembly_rule_family == "turn-continuity":
+        score += 0.04
+    if segment.analysis_mode == "speech" and len(prefilter.transcript_turn_ids) >= 2:
+        score += 0.05
+    if segment.analysis_mode == "speech" and segment.quality_metrics.get("turn_completeness", 0.0) < 0.7:
+        score += 0.06
+    if segment.analysis_mode == "speech" and segment.quality_metrics.get("turn_completeness", 0.0) < 0.5:
+        score += 0.08
     if segment.analysis_mode == "speech" and 2.0 <= duration <= 7.0:
         score += 0.08
     if segment.analysis_mode == "visual" and segment.quality_metrics.get("motion_energy", 0.0) >= 0.65:
@@ -1437,15 +1637,18 @@ def select_semantic_boundary_validation_targets(
     enabled: bool,
     analyzer_available: bool,
     ambiguity_threshold: float,
+    floor_threshold: float,
+    min_targets: int,
     budget_pct: int,
     max_segments: int,
-) -> tuple[dict[str, float], set[str]]:
+) -> tuple[dict[str, float], set[str], dict[str, str]]:
     ambiguity_by_id = {
         segment.id: semantic_boundary_ambiguity_score(segment)
         for segment in segments
     }
+    target_reasons: dict[str, str] = {}
     if not enabled or not analyzer_available:
-        return ambiguity_by_id, set()
+        return ambiguity_by_id, set(), target_reasons
 
     eligible = [
         segment
@@ -1460,12 +1663,36 @@ def select_semantic_boundary_validation_targets(
         ),
         reverse=True,
     )
+    if not ordered and min_targets > 0:
+        floor_candidates = [
+            segment
+            for segment in segments
+            if ambiguity_by_id.get(segment.id, 0.0) >= floor_threshold
+        ]
+        ordered = sorted(
+            floor_candidates,
+            key=lambda segment: (
+                ambiguity_by_id.get(segment.id, 0.0),
+                segment.prefilter.score if segment.prefilter is not None else 0.0,
+            ),
+            reverse=True,
+        )
+        if ordered:
+            ordered = ordered[:min_targets]
+            target_reasons = {segment.id: "floor" for segment in ordered}
+    else:
+        target_reasons = {segment.id: "threshold" for segment in ordered}
+
     if not ordered or max_segments <= 0 or budget_pct <= 0:
-        return ambiguity_by_id, set()
+        return ambiguity_by_id, set(), {}
 
     pct_limit = max(1, int(len(ordered) * budget_pct / 100.0))
     effective_limit = min(len(ordered), max_segments, pct_limit)
-    return ambiguity_by_id, {segment.id for segment in ordered[:effective_limit]}
+    selected = ordered[:effective_limit]
+    return ambiguity_by_id, {segment.id for segment in selected}, {
+        segment.id: target_reasons.get(segment.id, "threshold")
+        for segment in selected
+    }
 
 
 def initial_boundary_validation_result(
@@ -1476,14 +1703,16 @@ def initial_boundary_validation_result(
     ambiguity_score: float,
     ambiguity_threshold: float,
     targeted: bool,
+    target_reason: str = "",
 ) -> BoundaryValidationResult:
-    if ambiguity_score < ambiguity_threshold:
+    if ambiguity_score < ambiguity_threshold and not targeted:
         return BoundaryValidationResult(
             status="not_eligible",
             decision="keep",
             reason="Deterministic boundaries were not ambiguous enough for semantic validation.",
             confidence=0.0,
             ambiguity_score=ambiguity_score,
+            target_reason=target_reason,
             original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
             suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
         )
@@ -1498,7 +1727,10 @@ def initial_boundary_validation_result(
         reason = "Semantic boundary validation was skipped because the runtime budget was exhausted."
     else:
         skip_reason = ""
-        reason = "Semantic boundary validation is pending."
+        if target_reason == "floor":
+            reason = "Semantic boundary validation was activated by the minimum-target floor."
+        else:
+            reason = "Semantic boundary validation is pending."
 
     status = "pending" if targeted else "skipped"
     return BoundaryValidationResult(
@@ -1507,6 +1739,7 @@ def initial_boundary_validation_result(
         reason=reason,
         confidence=0.0,
         ambiguity_score=ambiguity_score,
+        target_reason=target_reason,
         provider="deterministic" if not targeted else "",
         provider_model="fallback-v1" if not targeted else "",
         skip_reason=skip_reason,
@@ -1523,12 +1756,12 @@ def apply_semantic_boundary_validation(
     validation_results: dict[str, BoundaryValidationResult],
     transcriber: TranscriptProvider,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     prefilter_signals,
     audio_signals,
     max_adjustment_sec: float,
 ) -> list[CandidateSegment]:
     updated: list[CandidateSegment] = []
-    next_index = 1
 
     for segment in segments:
         result = validation_results.get(segment.id)
@@ -1536,7 +1769,6 @@ def apply_semantic_boundary_validation(
             if result is not None:
                 segment.boundary_validation = result
             updated.append(segment)
-            next_index += 1
             continue
 
         transformed = apply_single_boundary_validation(
@@ -1545,16 +1777,46 @@ def apply_semantic_boundary_validation(
             result=result,
             transcriber=transcriber,
             transcript_spans=transcript_spans,
+            transcript_turns=transcript_turns,
             prefilter_signals=prefilter_signals,
             audio_signals=audio_signals,
             max_adjustment_sec=max_adjustment_sec,
         )
-        for child in transformed:
-            child.id = f"{asset.id}-segment-{next_index:02d}"
-            updated.append(child)
-            next_index += 1
+        updated.extend(transformed)
 
-    return updated
+    return [
+        replace(segment, id=f"{asset.id}-segment-{index:02d}")
+        for index, segment in enumerate(updated, start=1)
+    ]
+
+
+def semantic_split_is_supported(
+    *,
+    segment: CandidateSegment,
+    result: BoundaryValidationResult,
+    transcript_turns: list[TranscriptTurn],
+) -> bool:
+    if result.decision != "split":
+        return True
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return False
+    if prefilter.boundary_strategy.startswith("assembly-split:"):
+        return True
+    if prefilter.assembly_operation == "merge":
+        return True
+    if len(prefilter.transcript_turn_ids) >= 2:
+        return True
+    matched_turns = transcript_turns_for_range(transcript_turns, segment.start_sec, segment.end_sec)
+    if len(matched_turns) >= 2:
+        return True
+    if (
+        segment.analysis_mode == "speech"
+        and result.confidence >= 0.85
+        and (prefilter.boundary_strategy.startswith("transcript-") or prefilter.boundary_strategy == "turn-snap")
+    ):
+        return True
+    return False
 
 
 def apply_single_boundary_validation(
@@ -1564,6 +1826,7 @@ def apply_single_boundary_validation(
     result: BoundaryValidationResult,
     transcriber: TranscriptProvider,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     prefilter_signals,
     audio_signals,
     max_adjustment_sec: float,
@@ -1593,6 +1856,16 @@ def apply_single_boundary_validation(
         bounded_start, bounded_end = original_start, original_end
 
     if result.decision == "split" and result.split_ranges_sec:
+        if not semantic_split_is_supported(
+            segment=segment,
+            result=result,
+            transcript_turns=transcript_turns,
+        ):
+            result.decision = "keep"
+            result.applied = False
+            result.suggested_range_sec = [round(original_start, 3), round(original_end, 3)]
+            segment.boundary_validation = result
+            return [segment]
         split_point = clamp_range_value(
             value=result.split_ranges_sec[0][1],
             current=(original_start + original_end) / 2.0,
@@ -1612,6 +1885,7 @@ def apply_single_boundary_validation(
                     reason=result.reason,
                     confidence=result.confidence,
                     ambiguity_score=result.ambiguity_score,
+                    target_reason=result.target_reason,
                     provider=result.provider,
                     provider_model=result.provider_model,
                     skip_reason=result.skip_reason,
@@ -1629,6 +1903,7 @@ def apply_single_boundary_validation(
                         end_sec=end_sec,
                         transcriber=transcriber,
                         transcript_spans=transcript_spans,
+                        transcript_turns=transcript_turns,
                         prefilter_signals=prefilter_signals,
                         audio_signals=audio_signals,
                         boundary_validation=child_result,
@@ -1654,6 +1929,7 @@ def apply_single_boundary_validation(
             end_sec=bounded_end,
             transcriber=transcriber,
             transcript_spans=transcript_spans,
+            transcript_turns=transcript_turns,
             prefilter_signals=prefilter_signals,
             audio_signals=audio_signals,
             boundary_validation=result,
@@ -1670,6 +1946,7 @@ def rebuild_segment_with_validation(
     end_sec: float,
     transcriber: TranscriptProvider,
     transcript_spans: list[TranscriptSpan],
+    transcript_turns: list[TranscriptTurn],
     prefilter_signals,
     audio_signals,
     boundary_validation: BoundaryValidationResult,
@@ -1686,6 +1963,7 @@ def rebuild_segment_with_validation(
         end_sec=end_sec,
         transcriber=transcriber,
         transcript_spans=transcript_spans,
+        transcript_turns=transcript_turns,
         prefilter_signals=prefilter_signals,
         audio_signals=audio_signals,
         boundary_strategy=prefilter.boundary_strategy,
@@ -1821,6 +2099,10 @@ def analyze_assets(
     total_semantic_boundary_validated = 0
     total_semantic_boundary_skipped = 0
     total_semantic_boundary_fallback = 0
+    total_semantic_boundary_threshold_targeted = 0
+    total_semantic_boundary_floor_targeted = 0
+    total_semantic_boundary_applied = 0
+    total_semantic_boundary_noop = 0
     deduplication_enabled = is_deduplication_enabled()
     dedup_threshold = get_dedup_threshold()
     total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
@@ -1902,6 +2184,7 @@ def analyze_assets(
             if transcript_lookup_enabled
             else []
         )
+        transcript_turns = derive_transcript_turns(transcript_spans)
         if status_callback is not None and asset.has_speech and transcript_status.available:
             transcript_note = "selected for transcript pass" if transcript_lookup_enabled else "skipped transcript pass"
             status_callback(f"  ✓ Speech gate: {transcript_note}")
@@ -1923,6 +2206,7 @@ def analyze_assets(
                 seed_regions=seed_regions,
                 base_ranges=base_ranges,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 audio_signals=audio_signals,
             )
 
@@ -1978,6 +2262,7 @@ def analyze_assets(
                     end_sec=end_sec,
                     transcriber=transcriber,
                     transcript_spans=transcript_spans,
+                    transcript_turns=transcript_turns,
                     prefilter_signals=prefilter_signals,
                     audio_signals=audio_signals,
                     boundary_strategy=boundary_strategy,
@@ -1995,6 +2280,7 @@ def analyze_assets(
                 segments=asset_segments,
                 base_ranges=base_ranges,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 transcriber=transcriber,
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
@@ -2008,11 +2294,13 @@ def analyze_assets(
         )
 
         semantic_available = semantic_validation_is_available(analyzer)
-        ambiguity_by_id, semantic_target_ids = select_semantic_boundary_validation_targets(
+        ambiguity_by_id, semantic_target_ids, semantic_target_reasons = select_semantic_boundary_validation_targets(
             segments=asset_segments,
             enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
             analyzer_available=semantic_available,
             ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
+            floor_threshold=ai_config.semantic_boundary_floor_threshold,
+            min_targets=ai_config.semantic_boundary_min_targets,
             budget_pct=ai_config.semantic_boundary_validation_budget_pct,
             max_segments=ai_config.semantic_boundary_validation_max_segments,
         )
@@ -2029,7 +2317,15 @@ def analyze_assets(
                 ambiguity_score=ambiguity_by_id.get(segment.id, 0.0),
                 ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
                 targeted=segment.id in semantic_target_ids,
+                target_reason=semantic_target_reasons.get(segment.id, ""),
             )
+
+        total_semantic_boundary_threshold_targeted += sum(
+            1 for reason in semantic_target_reasons.values() if reason == "threshold"
+        )
+        total_semantic_boundary_floor_targeted += sum(
+            1 for reason in semantic_target_reasons.values() if reason == "floor"
+        )
 
         if semantic_target_ids:
             semantic_tasks: list[tuple[CandidateSegment, object, str]] = []
@@ -2067,6 +2363,7 @@ def analyze_assets(
                 if segment.id not in semantic_target_ids:
                     continue
                 result = semantic_results.get(segment.id)
+                pending_result = segment.boundary_validation
                 if result is None:
                     result = BoundaryValidationResult(
                         status="fallback",
@@ -2079,6 +2376,8 @@ def analyze_assets(
                         original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
                         suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
                     )
+                if pending_result is not None and not result.target_reason:
+                    result.target_reason = pending_result.target_reason
                 result.ambiguity_score = ambiguity_by_id.get(segment.id, 0.0)
                 segment.boundary_validation = result
                 if result.status == "validated":
@@ -2092,9 +2391,24 @@ def analyze_assets(
                 validation_results={segment.id: segment.boundary_validation for segment in asset_segments if segment.boundary_validation is not None},
                 transcriber=transcriber,
                 transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
                 max_adjustment_sec=ai_config.semantic_boundary_max_adjustment_sec,
+            )
+            total_semantic_boundary_applied += sum(
+                1
+                for segment in asset_segments
+                if segment.boundary_validation is not None
+                and segment.boundary_validation.status == "validated"
+                and segment.boundary_validation.applied
+            )
+            total_semantic_boundary_noop += sum(
+                1
+                for segment in asset_segments
+                if segment.boundary_validation is not None
+                and segment.boundary_validation.status == "validated"
+                and not segment.boundary_validation.applied
             )
 
         total_semantic_boundary_skipped += sum(
@@ -2374,6 +2688,11 @@ def analyze_assets(
         "semantic_boundary_validated_count": total_semantic_boundary_validated,
         "semantic_boundary_skipped_count": total_semantic_boundary_skipped,
         "semantic_boundary_fallback_count": total_semantic_boundary_fallback,
+        "semantic_boundary_threshold_targeted_count": total_semantic_boundary_threshold_targeted,
+        "semantic_boundary_floor_targeted_count": total_semantic_boundary_floor_targeted,
+        "semantic_boundary_applied_count": total_semantic_boundary_applied,
+        "semantic_boundary_noop_count": total_semantic_boundary_noop,
+        "semantic_boundary_dormant": total_semantic_boundary_validated == 0,
         "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
         "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
         "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
@@ -2784,6 +3103,7 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
         transcript_status=transcript_status,
         transcript_summary=transcript_summary(segment, transcript_status, speech_mode_source),
         speech_mode_source=speech_mode_source,
+        turn_summary=turn_summary(segment),
     )
 
 
@@ -2849,6 +3169,12 @@ def default_segment_speech_mode_source(segment: CandidateSegment) -> str:
 
 def transcript_summary(segment: CandidateSegment, transcript_status: str, speech_mode_source: str) -> str:
     if transcript_status == "excerpt-available":
+        prefilter = segment.prefilter
+        if prefilter is not None and prefilter.transcript_turn_ids:
+            return (
+                f"Transcript excerpt available with {len(prefilter.transcript_turn_ids)} aligned "
+                f"turn{'s' if len(prefilter.transcript_turn_ids) != 1 else ''}."
+            )
         return "Transcript excerpt available for this segment."
     if transcript_status == "selective-skip":
         return "Transcript extraction was skipped for this asset because cheap speech signals stayed below the selective-transcription threshold."
@@ -2884,6 +3210,7 @@ def boundary_strategy_label(segment: CandidateSegment) -> str:
     strategy = prefilter.boundary_strategy
     labels = {
         "legacy": "Legacy window",
+        "turn-snap": "Turn snapped",
         "transcript-snap": "Transcript snapped",
         "audio-snap": "Audio snapped",
         "scene-snap": "Scene snapped",
@@ -2920,16 +3247,36 @@ def lineage_summary(segment: CandidateSegment) -> str:
     return ""
 
 
+def turn_summary(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None or not prefilter.transcript_turn_ids:
+        return ""
+    count = len(prefilter.transcript_turn_ids)
+    if prefilter.assembly_rule_family == "turn-continuity":
+        return f"Merged {count} transcript turns via turn continuity."
+    if prefilter.assembly_rule_family == "turn-break":
+        return "Split at a strong transcript turn break."
+    alignment = prefilter.transcript_turn_alignment or "turn-aware"
+    if alignment == "turn-aligned":
+        return f"Aligned to {count} transcript turn{'s' if count != 1 else ''}."
+    if alignment == "mostly-complete":
+        return f"Mostly covers {count} transcript turn{'s' if count != 1 else ''}."
+    return f"Partially overlaps {count} transcript turn{'s' if count != 1 else ''}."
+
+
 def semantic_validation_summary(segment: CandidateSegment) -> str:
     validation = segment.boundary_validation
     if validation is None:
         return ""
+    target_prefix = ""
+    if validation.target_reason == "floor":
+        target_prefix = "Floor-targeted semantic validation "
     if validation.status == "validated":
         if validation.decision == "keep":
-            return f"Semantic validation kept the deterministic boundary at {round(validation.confidence * 100):d}% confidence."
+            return f"{target_prefix or 'Semantic validation '}kept the deterministic boundary at {round(validation.confidence * 100):d}% confidence."
         if validation.decision == "split":
-            return f"Semantic validation split the segment because {validation.reason.lower()}"
-        return f"Semantic validation suggested {validation.decision} because {validation.reason.lower()}"
+            return f"{target_prefix or 'Semantic validation '}split the segment because {validation.reason.lower()}"
+        return f"{target_prefix or 'Semantic validation '}suggested {validation.decision} because {validation.reason.lower()}"
     if validation.status == "fallback":
         return "Semantic validation fell back to deterministic output."
     if validation.status == "skipped":

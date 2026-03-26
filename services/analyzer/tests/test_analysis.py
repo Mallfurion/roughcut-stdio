@@ -12,6 +12,7 @@ from services.analyzer.app.analysis import (
     NoOpTranscriptProvider,
     RefinedSegmentCandidate,
     TranscriptSpan,
+    derive_transcript_turns,
     analyze_assets,
     assemble_narrative_units,
     build_transcript_provider,
@@ -296,6 +297,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             end_sec=15.6,
             transcriber=NoOpTranscriptProvider(),
             transcript_spans=[],
+            transcript_turns=[],
             prefilter_signals=[
                 FrameSignal(11.0, 0.7, 0.6, 0.5, 0.22, 0.45, 0.7, 0.64, "deterministic"),
                 FrameSignal(13.0, 0.72, 0.62, 0.48, 0.18, 0.43, 0.72, 0.63, "deterministic"),
@@ -336,6 +338,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             end_sec=4.0,
             transcriber=provider,
             transcript_spans=[],
+            transcript_turns=[],
             prefilter_signals=[FrameSignal(1.0, 0.7, 0.6, 0.5, 0.2, 0.4, 0.7, 0.6, "deterministic")],
             audio_signals=[AudioSignal(1.0, 0.002, 0.0, True, "ffmpeg")],
             boundary_strategy="legacy",
@@ -348,6 +351,20 @@ class AnalysisPipelineTests(unittest.TestCase):
 
         self.assertFalse(provider.called)
         self.assertEqual(segment.transcript_excerpt, "")
+
+    def test_derive_transcript_turns_groups_adjacent_spans(self) -> None:
+        turns = derive_transcript_turns(
+            [
+                TranscriptSpan(1.0, 1.8, "How do we start?"),
+                TranscriptSpan(2.0, 3.1, "Start with the strongest frame."),
+                TranscriptSpan(5.0, 6.2, "Then hold on the answer."),
+            ]
+        )
+
+        self.assertEqual(len(turns), 2)
+        self.assertEqual((turns[0].start_sec, turns[0].end_sec), (1.0, 3.1))
+        self.assertEqual(turns[0].id, "turn-01")
+        self.assertIn("strongest frame", turns[0].text)
 
     def test_should_request_transcript_for_asset_uses_selective_thresholds(self) -> None:
         asset = Asset(
@@ -1151,11 +1168,12 @@ class AnalysisPipelineTests(unittest.TestCase):
 
         transcript_segments = [
             segment for segment in project.candidate_segments
-            if segment.prefilter and segment.prefilter.boundary_strategy == "transcript-snap"
+            if segment.prefilter and segment.prefilter.boundary_strategy == "turn-snap"
         ]
         self.assertTrue(transcript_segments)
         self.assertTrue(any(segment.start_sec <= 1.0 and segment.end_sec >= 4.8 for segment in transcript_segments))
         self.assertTrue(all(segment.prefilter.seed_region_ids for segment in transcript_segments if segment.prefilter))
+        self.assertTrue(all(segment.prefilter.transcript_turn_ids for segment in transcript_segments if segment.prefilter))
 
     def test_boundary_refinement_uses_audio_when_transcript_missing(self) -> None:
         asset = Asset(
@@ -1390,7 +1408,7 @@ class AnalysisPipelineTests(unittest.TestCase):
         restored = ProjectData.from_dict(project.to_dict())
         restored_segment = restored.candidate_segments[0]
         self.assertIsNotNone(restored_segment.prefilter)
-        self.assertIn(restored_segment.prefilter.boundary_strategy, {"transcript-snap", "scene-duration", "scene-snap", "duration-rule"})
+        self.assertIn(restored_segment.prefilter.boundary_strategy, {"turn-snap", "transcript-snap", "scene-duration", "scene-snap", "duration-rule"})
         self.assertIsInstance(restored_segment.prefilter.seed_region_ids, list)
 
     def test_assemble_narrative_units_merges_adjacent_regions_with_transcript_continuity(self) -> None:
@@ -1430,6 +1448,9 @@ class AnalysisPipelineTests(unittest.TestCase):
                     seed_region_ids=["seed-1"],
                     seed_region_sources=["transcript"],
                     seed_region_ranges_sec=[[1.0, 3.0]],
+                    transcript_turn_ids=["turn-01"],
+                    transcript_turn_ranges_sec=[[1.0, 5.4]],
+                    transcript_turn_alignment="partial-turn",
                 ),
             ),
             CandidateSegment(
@@ -1455,6 +1476,9 @@ class AnalysisPipelineTests(unittest.TestCase):
                     seed_region_ids=["seed-2"],
                     seed_region_sources=["transcript"],
                     seed_region_ranges_sec=[[3.2, 5.4]],
+                    transcript_turn_ids=["turn-01"],
+                    transcript_turn_ranges_sec=[[1.0, 5.4]],
+                    transcript_turn_alignment="partial-turn",
                 ),
             ),
         ]
@@ -1468,6 +1492,13 @@ class AnalysisPipelineTests(unittest.TestCase):
                 TranscriptSpan(2.1, 3.0, "Start with the strongest moment."),
                 TranscriptSpan(3.2, 5.4, "Then carry the answer through."),
             ],
+            transcript_turns=derive_transcript_turns(
+                [
+                    TranscriptSpan(1.0, 2.0, "How do we start?"),
+                    TranscriptSpan(2.1, 3.0, "Start with the strongest moment."),
+                    TranscriptSpan(3.2, 5.4, "Then carry the answer through."),
+                ]
+            ),
             transcriber=TimedTranscriptProvider([]),
             prefilter_signals=[],
             audio_signals=[],
@@ -1477,11 +1508,12 @@ class AnalysisPipelineTests(unittest.TestCase):
         segment = assembled[0]
         self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
         self.assertEqual(segment.prefilter.assembly_operation, "merge")
-        self.assertEqual(segment.prefilter.assembly_rule_family, "transcript-continuity")
+        self.assertEqual(segment.prefilter.assembly_rule_family, "turn-continuity")
         self.assertEqual(
             segment.prefilter.assembly_source_segment_ids,
             ["asset-merge-region-01", "asset-merge-region-02"],
         )
+        self.assertEqual(segment.prefilter.transcript_turn_alignment, "turn-aligned")
 
     def test_assemble_narrative_units_splits_region_on_transcript_gap(self) -> None:
         asset = Asset(
@@ -1532,6 +1564,14 @@ class AnalysisPipelineTests(unittest.TestCase):
                 TranscriptSpan(5.5, 6.5, "New idea."),
                 TranscriptSpan(7.0, 8.0, "Close it."),
             ],
+            transcript_turns=derive_transcript_turns(
+                [
+                    TranscriptSpan(0.5, 1.5, "Set up."),
+                    TranscriptSpan(2.0, 3.0, "Explain it."),
+                    TranscriptSpan(5.5, 6.5, "New idea."),
+                    TranscriptSpan(7.0, 8.0, "Close it."),
+                ]
+            ),
             transcriber=TimedTranscriptProvider([]),
             prefilter_signals=[],
             audio_signals=[],
@@ -1539,7 +1579,7 @@ class AnalysisPipelineTests(unittest.TestCase):
 
         self.assertEqual(len(assembled), 2)
         self.assertTrue(all(item.prefilter.assembly_operation == "split" for item in assembled))
-        self.assertTrue(all(item.prefilter.assembly_rule_family == "transcript-gap" for item in assembled))
+        self.assertTrue(all(item.prefilter.assembly_rule_family == "turn-break" for item in assembled))
         self.assertTrue(all(item.prefilter.assembly_source_segment_ids == ["asset-split-region-01"] for item in assembled))
         self.assertLessEqual(assembled[0].end_sec, assembled[1].start_sec)
 
@@ -1707,6 +1747,7 @@ class AnalysisPipelineTests(unittest.TestCase):
         segment = project.candidate_segments[0]
         self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
         self.assertEqual(segment.prefilter.assembly_operation, "merge")
+        self.assertEqual(segment.prefilter.assembly_rule_family, "turn-continuity")
         self.assertEqual(segment.prefilter.assembly_source_segment_ids, ["asset-1-region-01", "asset-1-region-02"])
         self.assertEqual(project.take_recommendations[0].candidate_segment_id, segment.id)
         self.assertEqual(project.timeline.items[0].source_asset_path, asset.source_path)
@@ -1810,7 +1851,7 @@ class AnalysisPipelineTests(unittest.TestCase):
                 "services.analyzer.app.analysis.refine_seed_regions",
                 return_value=[
                     RefinedSegmentCandidate(0.0, 0.8, "scene-snap", 0.62, ["seed-1"], ["scene"], [[0.0, 0.8]]),
-                    RefinedSegmentCandidate(0.9, 2.6, "transcript-snap", 0.9, ["seed-2"], ["transcript"], [[0.9, 2.6]]),
+                    RefinedSegmentCandidate(0.9, 2.6, "turn-snap", 0.9, ["seed-2"], ["transcript"], [[0.9, 2.6]]),
                 ],
             ):
                 project = analyze_assets(
@@ -1844,8 +1885,6 @@ class AnalysisPipelineTests(unittest.TestCase):
             has_speech=True,
             interchange_reel_name="A001_C120B",
         )
-        transcript_provider = TimedTranscriptProvider([TranscriptSpan(0.8, 2.7, "Keep these beats connected.")])
-
         with unittest.mock.patch.dict(
             os.environ,
             {
@@ -1886,7 +1925,7 @@ class AnalysisPipelineTests(unittest.TestCase):
                         ),
                         assets=[asset],
                         scene_detector=StaticSceneDetector([(0.0, 8.0)]),
-                        transcript_provider=transcript_provider,
+                        transcript_provider=NoOpTranscriptProvider(),
                         segment_analyzer=ExpensiveAnalyzerStub(),
                     )
 
@@ -1991,6 +2030,127 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.status, "skipped")
         self.assertEqual(result.skip_reason, "ai_unavailable")
+
+    def test_semantic_boundary_validation_reports_dormant_when_no_segments_cross_threshold(self) -> None:
+        asset = Asset(
+            id="asset-semantic-dormant",
+            name="Stable Interview",
+            source_path="/tmp/stable.mov",
+            proxy_path="/tmp/stable.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C122B",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.0, "A stable full answer.")])
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD": "0.95",
+                "TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS": "0",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 4.0, "turn-snap", 0.93, ["seed-1"], ["transcript"], [[1.0, 4.0]]),
+                ],
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                    transcript_provider=transcript_provider,
+                    segment_analyzer=ExpensiveAnalyzerStub(),
+                )
+
+        result = project.candidate_segments[0].boundary_validation
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "not_eligible")
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_dormant"), True)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_validated_count"), 0)
+
+    def test_semantic_boundary_validation_floor_targets_borderline_segment(self) -> None:
+        asset = Asset(
+            id="asset-semantic-floor",
+            name="Borderline Interview",
+            source_path="/tmp/floor.mov",
+            proxy_path="/tmp/floor.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C123B",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.5, "This is borderline but worth checking.")])
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD": "0.8",
+                "TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD": "0.45",
+                "TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS": "1",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS": "1",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 4.5, "duration-rule", 0.58, ["seed-1"], ["peak"], [[1.0, 4.5]]),
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    return_value={
+                        "asset-semantic-floor-segment-01": BoundaryValidationResult(
+                            status="validated",
+                            decision="keep",
+                            reason="Worth checking but keep the current range.",
+                            confidence=0.69,
+                            provider="lmstudio",
+                            provider_model="qwen3.5-9b",
+                            original_range_sec=[1.0, 4.5],
+                            suggested_range_sec=[1.0, 4.5],
+                        )
+                    },
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=[asset],
+                        scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                        transcript_provider=transcript_provider,
+                        segment_analyzer=ExpensiveAnalyzerStub(),
+                    )
+
+        result = project.candidate_segments[0].boundary_validation
+        self.assertIsNotNone(result)
+        self.assertEqual(result.status, "validated")
+        self.assertEqual(result.target_reason, "floor")
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_floor_targeted_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_threshold_targeted_count"), 0)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_noop_count"), 1)
 
     def test_semantic_boundary_validation_respects_budget_cap(self) -> None:
         asset = Asset(
@@ -2126,6 +2286,7 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertIsNotNone(segment.boundary_validation)
         self.assertEqual(segment.boundary_validation.decision, "trim")
         self.assertTrue(segment.boundary_validation.applied)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_applied_count"), 1)
 
     def test_semantic_boundary_validation_splits_ambiguous_action_segment(self) -> None:
         asset = Asset(
@@ -2152,7 +2313,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             with unittest.mock.patch(
                 "services.analyzer.app.analysis.refine_seed_regions",
                 return_value=[
-                    RefinedSegmentCandidate(1.0, 6.0, "duration-rule", 0.39, ["seed-1"], ["peak"], [[1.0, 6.0]]),
+                    RefinedSegmentCandidate(1.0, 6.0, "assembly-split:scene-divider", 0.39, ["seed-1"], ["peak"], [[1.0, 6.0]]),
                 ],
             ):
                 with unittest.mock.patch(
@@ -2189,6 +2350,76 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(len(project.candidate_segments), 2)
         self.assertTrue(all(segment.boundary_validation for segment in project.candidate_segments))
         self.assertTrue(all(segment.boundary_validation.decision == "split" for segment in project.candidate_segments))
+        self.assertEqual(
+            [segment.id for segment in project.candidate_segments],
+            ["asset-semantic-split-segment-01", "asset-semantic-split-segment-02"],
+        )
+
+    def test_semantic_boundary_validation_ignores_unsupported_scene_split(self) -> None:
+        asset = Asset(
+            id="asset-semantic-scene-split",
+            name="Scene Split",
+            source_path="/tmp/scene-split.mov",
+            proxy_path="/tmp/scene-split.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C126",
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 6.0, "scene-snap", 0.74, ["seed-1"], ["scene"], [[1.0, 6.0]]),
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    return_value={
+                        "asset-semantic-scene-split-segment-01": BoundaryValidationResult(
+                            status="validated",
+                            decision="split",
+                            reason="This looks like two beats.",
+                            confidence=0.0,
+                            provider="mlx-vlm-local",
+                            provider_model="mlx-community/Qwen3.5-0.8B-4bit",
+                            original_range_sec=[1.0, 6.0],
+                            suggested_range_sec=[1.0, 6.0],
+                            split_ranges_sec=[[1.0, 3.5], [3.5, 6.0]],
+                            applied=False,
+                        )
+                    },
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=[asset],
+                        scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                        transcript_provider=NoOpTranscriptProvider(),
+                        segment_analyzer=ExpensiveAnalyzerStub(),
+                    )
+
+        self.assertEqual(len(project.candidate_segments), 1)
+        segment = project.candidate_segments[0]
+        self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 6.0))
+        self.assertIsNotNone(segment.boundary_validation)
+        self.assertEqual(segment.boundary_validation.decision, "keep")
+        self.assertFalse(segment.boundary_validation.applied)
 
 
 if __name__ == "__main__":

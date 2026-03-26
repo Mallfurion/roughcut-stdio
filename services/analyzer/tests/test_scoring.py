@@ -88,7 +88,7 @@ class ScoreSegmentTests(unittest.TestCase):
 
         self.assertEqual(breakdown.analysis_mode, "speech")
         self.assertGreater(breakdown.semantic, 0.85)
-        self.assertGreater(breakdown.total, 0.8)
+        self.assertGreater(breakdown.total, 0.79)
 
     def test_speech_signal_fallback_uses_speech_mode_without_transcript(self) -> None:
         asset = Asset(
@@ -132,6 +132,71 @@ class ScoreSegmentTests(unittest.TestCase):
         self.assertEqual(source, "speech-signal-fallback")
         self.assertEqual(breakdown.analysis_mode, "speech")
         self.assertGreater(breakdown.total, 0.6)
+
+    def test_complete_turn_scores_above_truncated_turn(self) -> None:
+        asset = Asset(
+            id="asset-turn",
+            name="Interview Turn",
+            source_path="/tmp/interview-turn.mov",
+            proxy_path="/tmp/interview-turn-proxy.mov",
+            duration_sec=18.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A002_C012",
+        )
+        complete = CandidateSegment(
+            id="segment-complete",
+            asset_id=asset.id,
+            start_sec=2.0,
+            end_sec=6.0,
+            analysis_mode="speech",
+            transcript_excerpt="We start with the question and carry the answer through.",
+            description="Complete spoken beat.",
+            quality_metrics={
+                "sharpness": 0.74,
+                "stability": 0.7,
+                "visual_novelty": 0.45,
+                "subject_clarity": 0.83,
+                "motion_energy": 0.28,
+                "duration_fit": 0.88,
+                "audio_energy": 0.78,
+                "speech_ratio": 0.94,
+                "hook_strength": 0.82,
+                "story_alignment": 0.87,
+                "turn_completeness": 0.95,
+            },
+        )
+        truncated = CandidateSegment(
+            id="segment-truncated",
+            asset_id=asset.id,
+            start_sec=2.5,
+            end_sec=5.2,
+            analysis_mode="speech",
+            transcript_excerpt="carry the answer through",
+            description="Truncated spoken beat.",
+            quality_metrics={
+                "sharpness": 0.74,
+                "stability": 0.7,
+                "visual_novelty": 0.45,
+                "subject_clarity": 0.83,
+                "motion_energy": 0.28,
+                "duration_fit": 0.88,
+                "audio_energy": 0.78,
+                "speech_ratio": 0.94,
+                "hook_strength": 0.82,
+                "story_alignment": 0.87,
+                "turn_completeness": 0.42,
+            },
+        )
+
+        complete_score = score_segment(asset, complete)
+        truncated_score = score_segment(asset, truncated)
+
+        self.assertGreater(complete_score.semantic, truncated_score.semantic)
+        self.assertGreater(complete_score.story, truncated_score.story)
+        self.assertGreater(complete_score.total, truncated_score.total)
 
     def test_top_score_driver_labels_follow_weighted_formula(self) -> None:
         asset = Asset(

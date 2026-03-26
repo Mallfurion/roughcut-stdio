@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -20,6 +21,7 @@ from services.analyzer.app.ai import (
     encode_image_as_data_url,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
+    local_vlm_boundary_validation_prompt,
     load_ai_analysis_config,
     model_matches,
     normalize_boundary_validation_output,
@@ -279,6 +281,227 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(result.decision, "trim")
         self.assertEqual(result.suggested_range_sec, [1.4, 4.8])
 
+    def test_local_boundary_validation_prompt_uses_simple_schema(self) -> None:
+        asset = Asset(
+            id="asset-boundary-local",
+            name="Boundary Local",
+            source_path="/tmp/boundary-local.mov",
+            proxy_path="/tmp/boundary-local.mov",
+            duration_sec=8.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C900",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-local",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=4.5,
+            analysis_mode="speech",
+            transcript_excerpt="Start with the answer.",
+            description="Speech beat.",
+            quality_metrics={"story_alignment": 0.77},
+        )
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segment,
+            asset_segments=[segment],
+            segment_index=0,
+            story_prompt="Build a concise answer-led cut.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+
+        prompt = local_vlm_boundary_validation_prompt(
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=evidence.story_prompt,
+        )
+
+        self.assertIn("decision, reason, confidence", prompt)
+        self.assertIn("Do not include timestamps", prompt)
+        self.assertNotIn("suggested_start_sec", prompt)
+
+    def test_local_boundary_validation_defaults_to_deterministic_ranges(self) -> None:
+        asset = Asset(
+            id="asset-boundary-defaults",
+            name="Boundary Defaults",
+            source_path="/tmp/boundary-defaults.mov",
+            proxy_path="/tmp/boundary-defaults.mov",
+            duration_sec=8.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C902",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-defaults",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=5.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Visual beat.",
+            quality_metrics={"story_alignment": 0.61},
+        )
+
+        trim_result = normalize_boundary_validation_output(
+            {
+                "decision": "trim",
+                "reason": "The beat has extra lead-in and tail.",
+                "confidence": 0.7,
+            },
+            provider="mlx-vlm-local",
+            model="mlx-community/Qwen3.5-0.8B-4bit",
+            segment=segment,
+            asset=asset,
+        )
+        extend_result = normalize_boundary_validation_output(
+            {
+                "decision": "extend",
+                "reason": "The beat feels cut too tight.",
+                "confidence": 0.67,
+            },
+            provider="mlx-vlm-local",
+            model="mlx-community/Qwen3.5-0.8B-4bit",
+            segment=segment,
+            asset=asset,
+        )
+        split_result = normalize_boundary_validation_output(
+            {
+                "decision": "split",
+                "reason": "This contains two moments.",
+                "confidence": 0.78,
+            },
+            provider="mlx-vlm-local",
+            model="mlx-community/Qwen3.5-0.8B-4bit",
+            segment=segment,
+            asset=asset,
+        )
+
+        self.assertEqual(trim_result.suggested_range_sec, [1.48, 4.52])
+        self.assertEqual(extend_result.suggested_range_sec, [0.52, 5.48])
+        self.assertEqual(split_result.decision, "keep")
+        self.assertEqual(split_result.split_ranges_sec, [])
+
+    def test_boundary_validation_accepts_key_value_response_for_mlx_local(self) -> None:
+        class FakeRuntime:
+            def query_image(self, *, image_path: str, prompt: str) -> str:
+                return "\n".join(
+                    [
+                        "decision: trim",
+                        "reason: The answer starts slightly late.",
+                        "confidence: 0.8",
+                    ]
+                )
+
+        asset = Asset(
+            id="asset-boundary-kv",
+            name="Boundary KV",
+            source_path="/tmp/boundary-kv.mov",
+            proxy_path="/tmp/boundary-kv.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C904",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-kv",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=4.0,
+            analysis_mode="speech",
+            transcript_excerpt="Start here.",
+            description="Boundary kv.",
+            quality_metrics={"story_alignment": 0.77},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            contact_sheet = Path(tmpdir) / "sheet.jpg"
+            contact_sheet.write_bytes(b"fake")
+            evidence = build_segment_evidence(
+                asset=asset,
+                segment=segment,
+                asset_segments=[segment],
+                segment_index=0,
+                story_prompt="Build a rough cut.",
+                artifacts_root=None,
+                extract_keyframes=False,
+            )
+            evidence.contact_sheet_path = str(contact_sheet)
+            debug_log = Path(tmpdir) / "vlm-debug.jsonl"
+            analyzer = MLXVLMVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
+                    base_url="",
+                    timeout_sec=30.0,
+                ),
+                runtime=FakeRuntime(),
+                debug_log_path=debug_log,
+            )
+
+            result = validate_single_segment_boundary(
+                analyzer=analyzer,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+
+            self.assertEqual(result.status, "validated")
+            self.assertEqual(result.decision, "trim")
+            self.assertEqual(result.confidence, 0.8)
+            self.assertEqual(result.suggested_range_sec, [1.36, 3.64])
+            entries = [json.loads(line) for line in debug_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(entries[0]["event"], "boundary_raw_response")
+            self.assertEqual(entries[1]["event"], "boundary_parsed_response")
+
+    def test_local_split_requires_high_confidence(self) -> None:
+        asset = Asset(
+            id="asset-boundary-split-confidence",
+            name="Boundary Split Confidence",
+            source_path="/tmp/boundary-split-confidence.mov",
+            proxy_path="/tmp/boundary-split-confidence.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C905",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-split-confidence",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=6.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Boundary split confidence.",
+            quality_metrics={"story_alignment": 0.62},
+        )
+
+        result = normalize_boundary_validation_output(
+            {
+                "decision": "split",
+                "reason": "This looks like two beats.",
+                "confidence": 0.8,
+            },
+            provider="mlx-vlm-local",
+            model="mlx-community/Qwen3.5-0.8B-4bit",
+            segment=segment,
+            asset=asset,
+        )
+
+        self.assertEqual(result.decision, "keep")
+        self.assertEqual(result.split_ranges_sec, [])
+
     def test_load_ai_analysis_config_reads_semantic_boundary_fields(self) -> None:
         with patch.dict(
             os.environ,
@@ -287,6 +510,8 @@ class AIPhaseOneTests(unittest.TestCase):
                 "TIMELINE_TRANSCRIPT_MODEL_SIZE": "base",
                 "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
                 "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD": "0.82",
+                "TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD": "0.51",
+                "TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS": "2",
                 "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT": "40",
                 "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS": "3",
                 "TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC": "1.8",
@@ -299,6 +524,8 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(config.transcript_model_size, "base")
         self.assertTrue(config.semantic_boundary_validation_enabled)
         self.assertEqual(config.semantic_boundary_ambiguity_threshold, 0.82)
+        self.assertEqual(config.semantic_boundary_floor_threshold, 0.51)
+        self.assertEqual(config.semantic_boundary_min_targets, 2)
         self.assertEqual(config.semantic_boundary_validation_budget_pct, 40)
         self.assertEqual(config.semantic_boundary_validation_max_segments, 3)
         self.assertEqual(config.semantic_boundary_max_adjustment_sec, 1.8)
@@ -783,6 +1010,73 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(stats.cached_segment_count, 1)
         self.assertEqual(stats.fallback_segment_count, 0)
         self.assertEqual(stats.live_request_count, 1)
+
+    def test_boundary_validation_logs_parse_failure_for_mlx_local(self) -> None:
+        class FakeRuntime:
+            def query_image(self, *, image_path: str, prompt: str) -> str:
+                return "the answer starts late and should probably be trimmed"
+
+        asset = Asset(
+            id="asset-boundary-debug",
+            name="Boundary Debug",
+            source_path="/tmp/boundary-debug.mov",
+            proxy_path="/tmp/boundary-debug.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C903",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-debug",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=4.0,
+            analysis_mode="speech",
+            transcript_excerpt="Start here.",
+            description="Boundary debug.",
+            quality_metrics={"story_alignment": 0.77},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            contact_sheet = Path(tmpdir) / "sheet.jpg"
+            contact_sheet.write_bytes(b"fake")
+            evidence = build_segment_evidence(
+                asset=asset,
+                segment=segment,
+                asset_segments=[segment],
+                segment_index=0,
+                story_prompt="Build a rough cut.",
+                artifacts_root=None,
+                extract_keyframes=False,
+            )
+            evidence.contact_sheet_path = str(contact_sheet)
+            debug_log = Path(tmpdir) / "vlm-debug.jsonl"
+            analyzer = MLXVLMVisionLanguageAnalyzer(
+                config=AIProviderConfig(
+                    provider="mlx-vlm-local",
+                    model="mlx-community/Qwen3.5-0.8B-4bit",
+                    base_url="",
+                    timeout_sec=30.0,
+                ),
+                runtime=FakeRuntime(),
+                debug_log_path=debug_log,
+            )
+
+            result = validate_single_segment_boundary(
+                analyzer=analyzer,
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=evidence.story_prompt,
+            )
+
+            self.assertEqual(result.status, "fallback")
+            entries = [json.loads(line) for line in debug_log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(entries[0]["event"], "boundary_raw_response")
+            self.assertEqual(entries[1]["event"], "boundary_parse_failed")
+            self.assertEqual(entries[2]["event"], "boundary_validate_failed")
 
     def test_mlx_vlm_local_analyzer_falls_back_on_runtime_error(self) -> None:
         class FailingRuntime:

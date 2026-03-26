@@ -64,9 +64,13 @@ If `TIMELINE_AI_CACHE=true`, transcript spans are cached between process runs un
 - `TIMELINE_SEGMENT_LEGACY_FALLBACK` — Keep legacy candidate behavior available when refinement yields nothing (default: `true`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` — Enable optional semantic boundary validation for ambiguous segments (default: `true`)
 - `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` — Ambiguity threshold used to select validation candidates [0–1] (default: `0.6`)
+- `TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD` — Softer ambiguity floor for the minimum-target rule [0–1] (default: `0.45`)
+- `TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS` — Minimum number of most-ambiguous segments that may still be validated when nothing crosses the primary threshold (default: `1`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` — Percentage of eligible ambiguous segments that may be semantically validated (default: `100`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` — Hard cap on semantically validated segments per run (default: `2`)
 - `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC` — Max boundary change applied from semantic validation (default: `1.5`)
+
+Semantic boundary validation no longer depends only on the primary threshold. If no segment clears `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD`, the analyzer can still activate the pass for a very small number of floor-qualified segments using `TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD` and `TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS`. This keeps the pass measurable without turning it into a blanket second stage on every segment.
 
 See [.env.example](../.env.example) for the baseline project settings. The analyzer source in [ai.py](../services/analyzer/app/ai.py) is the source of truth for advanced runtime defaults.
 

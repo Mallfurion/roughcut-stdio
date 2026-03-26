@@ -71,6 +71,20 @@ Generates:
 - `generated/process-output.txt` with the exact terminal-facing output from the latest run
 - `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
+**Evaluate segmentation quality**:
+
+```bash
+npm run evaluate:segmentation -- --fixture-set ccl2025_media_light --media-dir /path/to/media
+```
+
+This runs the analyzer for the selected fixture set, evaluates the resulting `generated/project.json` against [fixtures/segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json), writes `generated/segmentation-evaluation-summary.txt`, and attaches the evaluation result to the latest benchmark run.
+
+To evaluate the current generated output without rerunning `process`:
+
+```bash
+npm run evaluate:segmentation -- --fixture-set ccl2025_media_light --skip-process
+```
+
 **Export to DaVinci Resolve**:
 
 ```bash
@@ -188,6 +202,9 @@ cat generated/process-output.txt
 
 # View benchmark history
 cat generated/benchmarks/history.jsonl
+
+# View the latest segmentation evaluation summary
+cat generated/segmentation-evaluation-summary.txt
 ```
 
 ---

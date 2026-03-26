@@ -4,7 +4,7 @@
 TBD - created by archiving change init-deterministic-pass. Update Purpose after archive.
 ## Requirements
 ### Requirement: System SHALL persist structured segment-understanding records
-The analyzer SHALL attach structured evidence and understanding records to candidate segments in the generated project state so segment recommendations can be inspected after processing. When semantic boundary validation runs on an ambiguous segment, the analyzer SHALL also persist the boundary decision, decision reason, and validation status for that segment.
+The analyzer SHALL attach structured evidence and understanding records to candidate segments in the generated project state so segment recommendations can be inspected after processing. When semantic boundary validation runs on an ambiguous segment, the analyzer SHALL also persist the boundary decision, decision reason, validation status, and impact metadata for that segment.
 
 #### Scenario: Candidate segment is analyzed
 - **WHEN** the analyzer finishes processing a candidate segment
@@ -14,6 +14,11 @@ The analyzer SHALL attach structured evidence and understanding records to candi
 #### Scenario: Semantic boundary validation runs
 - **WHEN** the analyzer performs semantic boundary validation on an ambiguous segment
 - **THEN** the generated project SHALL persist the validation result and validation status for that segment
+
+#### Scenario: Semantic boundary validation changes a segment
+- **WHEN** semantic boundary validation trims, extends, or splits a segment
+- **THEN** the generated project SHALL persist the validation impact alongside the segment provenance
+- **THEN** downstream review SHALL be able to distinguish a no-op validation from a materially changed boundary
 
 ### Requirement: System SHALL include transcript context in segment evidence when available
 The analyzer SHALL include transcript excerpts in persisted segment evidence and AI understanding prompts when transcript-backed analysis is available. When transcript-backed analysis is unavailable, the analyzer SHALL persist explicit fallback context rather than silently omitting the distinction.

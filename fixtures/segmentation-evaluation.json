@@ -1,0 +1,113 @@
+{
+  "fixture_sets": [
+    {
+      "name": "ccl2025_media_light",
+      "description": "Local evaluation set for the CCL2025 Media_light footage, covering speech-heavy, silent, montage, and mixed-content assets.",
+      "media_dir_hint": "Provide --media-dir or set TIMELINE_MEDIA_DIR to the CCL2025/Media_light directory before running the evaluation command.",
+      "analysis_summary_expectations": {
+        "candidate_segment_count": {
+          "min": 12
+        },
+        "transcript_target_asset_count": {
+          "min": 1,
+          "max": 3
+        },
+        "transcript_probed_asset_count": {
+          "min": 1
+        },
+        "speech_fallback_segment_count": {
+          "min": 1
+        },
+        "semantic_boundary_dormant": {
+          "exact": false
+        },
+        "semantic_boundary_eligible_count": {
+          "min": 1
+        },
+        "semantic_boundary_validated_count": {
+          "min": 1
+        },
+        "semantic_boundary_floor_targeted_count": {
+          "min": 1
+        },
+        "semantic_boundary_threshold_targeted_count": {
+          "min": 1
+        }
+      },
+      "asset_expectations": [
+        {
+          "name": "Img 8660",
+          "category": "speech-heavy",
+          "expectations": {
+            "candidate_segments_min": 2,
+            "excerpt_segments_min": 2,
+            "required_modes": [
+              "speech"
+            ],
+            "required_transcript_statuses": [
+              "excerpt-available"
+            ]
+          }
+        },
+        {
+          "name": "A001 08101522 C002",
+          "category": "speech-heavy",
+          "expectations": {
+            "candidate_segments_min": 1,
+            "candidate_segments_max": 2,
+            "excerpt_segments_min": 1,
+            "required_modes": [
+              "speech"
+            ],
+            "required_transcript_statuses": [
+              "excerpt-available"
+            ]
+          }
+        },
+        {
+          "name": "Dji 0721",
+          "category": "silent",
+          "expectations": {
+            "candidate_segments_min": 1,
+            "excerpt_segments_exact": 0,
+            "required_modes": [
+              "visual"
+            ],
+            "required_transcript_statuses": [
+              "not-applicable"
+            ]
+          }
+        },
+        {
+          "name": "A001 08101523 C004",
+          "category": "montage",
+          "expectations": {
+            "candidate_segments_min": 2,
+            "excerpt_segments_exact": 0,
+            "required_modes": [
+              "visual"
+            ],
+            "required_transcript_statuses": [
+              "selective-skip"
+            ]
+          }
+        },
+        {
+          "name": "A001 08101522 C001",
+          "category": "mixed-content",
+          "expectations": {
+            "candidate_segments_min": 3,
+            "excerpt_segments_exact": 0,
+            "required_modes": [
+              "speech",
+              "visual"
+            ],
+            "required_transcript_statuses": [
+              "selective-skip"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -42,6 +42,10 @@ The analyzer should record whether semantic validation:
 - split a segment
 - was skipped by threshold, budget, or provider state
 
+### 4. Treat local semantic split suggestions conservatively
+
+Small local models may understand the boundary task but still prefer overly eager `split` outputs or non-JSON formatting. The shipped calibration should therefore normalize local responses defensively and require stronger evidence before a semantic split is allowed to change segment structure.
+
 ## Risks / Trade-offs
 
 - over-activation could erase the runtime advantage of bounded semantic validation

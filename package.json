@@ -9,6 +9,7 @@
     "setup": "bash ./scripts/setup.sh",
     "check:ai": "bash ./scripts/check_ai.sh",
     "process": "bash ./scripts/process.sh",
+    "evaluate:segmentation": "python3 ./services/analyzer/scripts/evaluate_segmentation.py",
     "view": "npm run dev:desktop",
     "export": "bash ./scripts/export.sh",
     "check:openspec-graph": "python3 ./scripts/check_openspec_graph.py",

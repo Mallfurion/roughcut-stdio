@@ -5,7 +5,7 @@ Define how local transcript extraction participates in analyzer processing witho
 
 ## Requirements
 ### Requirement: System SHALL support local transcript-backed analysis during processing
-The analyzer SHALL support an optional local transcript backend during process runs and SHALL extract timed transcript spans and transcript excerpts for assets when that backend is enabled and available. The analyzer SHALL also be allowed to use selective transcript targeting and short transcript probes so it does not need to fully transcribe every audio-bearing asset.
+The analyzer SHALL support an optional local transcript backend during process runs and SHALL extract timed transcript spans and transcript excerpts for assets when that backend is enabled and available. The analyzer SHALL also be allowed to use selective transcript targeting and short transcript probes so it does not need to fully transcribe every audio-bearing asset. When transcript evidence is available, the analyzer SHALL be able to derive turn-level transcript structure from that evidence for downstream segmentation and scoring.
 
 #### Scenario: Transcript backend is enabled and available
 - **WHEN** a process run starts with transcript support enabled and a supported local transcript backend is available
@@ -21,6 +21,11 @@ The analyzer SHALL support an optional local transcript backend during process r
 - **WHEN** the analyzer runs a short transcript probe for an asset and the probe does not detect useful text
 - **THEN** the analyzer SHALL skip the full transcript pass for that asset
 - **THEN** the run SHALL preserve explicit selective-skip or probe-rejected metadata instead of silently behaving like a silent asset
+
+#### Scenario: Transcript-backed asset yields turn structure
+- **WHEN** transcript spans are available for an asset and the analyzer can derive turn structure from them
+- **THEN** the analyzer SHALL preserve turn timing information as a first-class transcript input
+- **THEN** downstream segmentation and scoring stages SHALL be able to use that turn structure
 
 #### Scenario: Transcript backend is disabled
 - **WHEN** transcript support is explicitly disabled for a process run

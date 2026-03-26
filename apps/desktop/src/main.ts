@@ -198,6 +198,8 @@ type AppSettings = {
   segmentLegacyFallbackEnabled: boolean;
   segmentSemanticValidationEnabled: boolean;
   segmentSemanticAmbiguityThreshold: string;
+  segmentSemanticFloorThreshold: string;
+  segmentSemanticMinTargets: string;
   segmentSemanticValidationBudgetPct: string;
   segmentSemanticValidationMaxSegments: string;
   segmentSemanticMaxAdjustmentSec: string;
@@ -254,6 +256,8 @@ function createDefaultSettings(): AppSettings {
     segmentLegacyFallbackEnabled: true,
     segmentSemanticValidationEnabled: true,
     segmentSemanticAmbiguityThreshold: "0.6",
+    segmentSemanticFloorThreshold: "0.45",
+    segmentSemanticMinTargets: "1",
     segmentSemanticValidationBudgetPct: "100",
     segmentSemanticValidationMaxSegments: "2",
     segmentSemanticMaxAdjustmentSec: "1.5"
@@ -753,6 +757,14 @@ function renderSettingsDialog() {
                 <input id="settings-segment-semantic-ambiguity-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.segmentSemanticAmbiguityThreshold)}" />
               </label>
               <label class="field">
+                Semantic floor threshold
+                <input id="settings-segment-semantic-floor-threshold" type="number" min="0" max="1" step="0.01" value="${escapeHtml(draft.segmentSemanticFloorThreshold)}" />
+              </label>
+              <label class="field">
+                Semantic minimum targets
+                <input id="settings-segment-semantic-min-targets" type="number" min="0" step="1" value="${escapeHtml(draft.segmentSemanticMinTargets)}" />
+              </label>
+              <label class="field">
                 Semantic validation budget %
                 <input id="settings-segment-semantic-budget-pct" type="number" min="0" max="100" step="1" value="${escapeHtml(draft.segmentSemanticValidationBudgetPct)}" />
               </label>
@@ -1211,6 +1223,12 @@ function bindActions() {
   bindTextSetting("settings-vlm-budget-pct", (value) => updateSettingsDraft({ vlmBudgetPct: value }));
   bindTextSetting("settings-segment-semantic-ambiguity-threshold", (value) =>
     updateSettingsDraft({ segmentSemanticAmbiguityThreshold: value }),
+  );
+  bindTextSetting("settings-segment-semantic-floor-threshold", (value) =>
+    updateSettingsDraft({ segmentSemanticFloorThreshold: value }),
+  );
+  bindTextSetting("settings-segment-semantic-min-targets", (value) =>
+    updateSettingsDraft({ segmentSemanticMinTargets: value }),
   );
   bindTextSetting("settings-segment-semantic-budget-pct", (value) =>
     updateSettingsDraft({ segmentSemanticValidationBudgetPct: value }),

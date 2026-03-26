@@ -123,6 +123,8 @@ class AIAnalysisConfig:
     boundary_refinement_legacy_fallback: bool = True
     semantic_boundary_validation_enabled: bool = True
     semantic_boundary_ambiguity_threshold: float = 0.6
+    semantic_boundary_floor_threshold: float = 0.45
+    semantic_boundary_min_targets: int = 1
     semantic_boundary_validation_budget_pct: int = 100
     semantic_boundary_validation_max_segments: int = 2
     semantic_boundary_max_adjustment_sec: float = 1.5
@@ -960,6 +962,14 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", True)
     semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.6)
     semantic_boundary_ambiguity_threshold = max(0.0, min(1.0, semantic_boundary_ambiguity_threshold))
+    semantic_boundary_floor_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD", 0.45)
+    semantic_boundary_floor_threshold = max(0.0, min(1.0, semantic_boundary_floor_threshold))
+    if semantic_boundary_floor_threshold > semantic_boundary_ambiguity_threshold:
+        semantic_boundary_floor_threshold = semantic_boundary_ambiguity_threshold
+    semantic_boundary_min_targets = max(
+        0,
+        parse_int_env("TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS", 1),
+    )
     semantic_boundary_validation_budget_pct = parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT", 100)
     semantic_boundary_validation_budget_pct = max(0, min(100, semantic_boundary_validation_budget_pct))
     semantic_boundary_validation_max_segments = max(
@@ -1000,6 +1010,8 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
         boundary_refinement_legacy_fallback=boundary_refinement_legacy_fallback,
         semantic_boundary_validation_enabled=semantic_boundary_validation_enabled,
         semantic_boundary_ambiguity_threshold=semantic_boundary_ambiguity_threshold,
+        semantic_boundary_floor_threshold=semantic_boundary_floor_threshold,
+        semantic_boundary_min_targets=semantic_boundary_min_targets,
         semantic_boundary_validation_budget_pct=semantic_boundary_validation_budget_pct,
         semantic_boundary_validation_max_segments=semantic_boundary_validation_max_segments,
         semantic_boundary_max_adjustment_sec=semantic_boundary_max_adjustment_sec,
@@ -1297,6 +1309,17 @@ def build_segment_evidence(
         context_window_start_sec=round(context_window_start_sec, 3),
         context_window_end_sec=round(context_window_end_sec, 3),
         metrics_snapshot=dict(segment.quality_metrics),
+        transcript_turn_count=(
+            len(segment.prefilter.transcript_turn_ids)
+            if segment.prefilter is not None
+            else 0
+        ),
+        transcript_turn_ranges_sec=(
+            [list(item) for item in segment.prefilter.transcript_turn_ranges_sec]
+            if segment.prefilter is not None
+            else []
+        ),
+        turn_completeness=round(segment.quality_metrics.get("turn_completeness", 0.0), 4),
     )
 
 
@@ -1587,11 +1610,16 @@ def local_vlm_boundary_validation_prompt(
     return (
         "Analyze this stitched contact sheet and decide whether the segment boundaries feel complete. "
         "Return exactly one compact JSON object only with keys: "
-        "decision, reason, confidence, suggested_start_sec, suggested_end_sec, split_point_sec. "
+        "decision, reason, confidence. "
         "decision must be keep, extend, trim, or split. "
         "confidence must be a number between 0 and 1. reason must be one short sentence. "
-        "If the segment is already complete, use decision keep and repeat the current start and end. "
-        "Only suggest nearby changes.\n\n"
+        "Do not include timestamps or extra keys. "
+        "Use keep when the current beat is already complete. "
+        "Use trim when the beat contains extra lead-in or tail. "
+        "Use extend when the beat feels cut too tight. "
+        "Use split only when the contact sheet unmistakably shows two self-contained moments; "
+        "if you are unsure, prefer keep. "
+        "Do not use split for one continuous action that simply changes framing or composition.\n\n"
         f"Project story prompt: {story_prompt}\n"
         f"Asset: {asset.name}\n"
         f"Reel: {asset.interchange_reel_name}\n"
@@ -1618,13 +1646,33 @@ def normalize_boundary_validation_output(
     provider: str,
     model: str,
     segment: CandidateSegment,
+    asset: Asset | None = None,
 ) -> BoundaryValidationResult:
     decision_raw = str(payload.get("decision", "keep")).strip().lower()
     decision = decision_raw if decision_raw in {"keep", "extend", "trim", "split"} else "keep"
     reason = string_or_default(payload.get("reason"), "Semantic validation kept the deterministic boundary.")
     confidence = rounded_metric(number_or_default(payload.get("confidence"), 0.0))
-    suggested_start_sec = round(float(number_or_default(payload.get("suggested_start_sec"), segment.start_sec)), 3)
-    suggested_end_sec = round(float(number_or_default(payload.get("suggested_end_sec"), segment.end_sec)), 3)
+    if provider == "mlx-vlm-local" and decision == "split" and confidence < 0.85:
+        decision = "keep"
+        reason = (
+            "Semantic validation kept the deterministic boundary because the local split recommendation "
+            "was not confident enough."
+        )
+    segment_duration = max(0.0, segment.end_sec - segment.start_sec)
+    local_delta = round(min(0.75, max(0.25, segment_duration * 0.12)), 3)
+    asset_duration = asset.duration_sec if asset is not None else segment.end_sec
+
+    default_start_sec = segment.start_sec
+    default_end_sec = segment.end_sec
+    if decision == "trim":
+        default_start_sec = min(segment.end_sec - 1.5, segment.start_sec + local_delta)
+        default_end_sec = max(default_start_sec + 1.5, segment.end_sec - local_delta)
+    elif decision == "extend":
+        default_start_sec = max(0.0, segment.start_sec - local_delta)
+        default_end_sec = min(asset_duration, segment.end_sec + local_delta)
+
+    suggested_start_sec = round(float(number_or_default(payload.get("suggested_start_sec"), default_start_sec)), 3)
+    suggested_end_sec = round(float(number_or_default(payload.get("suggested_end_sec"), default_end_sec)), 3)
     split_point_sec = payload.get("split_point_sec")
     split_ranges_sec: list[list[float]] = []
     if decision == "split":
@@ -1990,6 +2038,42 @@ def parse_json_object(raw: str) -> dict[str, object] | None:
             return salvage_partial_json_object(match.group(0))
 
 
+def parse_key_value_object(
+    raw: str,
+    *,
+    allowed_keys: set[str] | None = None,
+) -> dict[str, object] | None:
+    payload: dict[str, object] = {}
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        normalized_key = key.strip().lower().replace(" ", "_")
+        if not normalized_key:
+            continue
+        if allowed_keys is not None and normalized_key not in allowed_keys:
+            continue
+        parsed_value: object = value.strip()
+        if isinstance(parsed_value, str):
+            if parsed_value.startswith('"') and parsed_value.endswith('"') and len(parsed_value) >= 2:
+                parsed_value = parsed_value[1:-1]
+            else:
+                lowered = parsed_value.lower()
+                if lowered == "null":
+                    parsed_value = None
+                else:
+                    try:
+                        parsed_value = int(parsed_value)
+                    except ValueError:
+                        try:
+                            parsed_value = float(parsed_value)
+                        except ValueError:
+                            parsed_value = parsed_value
+        payload[normalized_key] = parsed_value
+    return payload or None
+
+
 def salvage_partial_json_object(raw: str) -> dict[str, object] | None:
     start = raw.find("{")
     if start < 0:
@@ -2316,6 +2400,7 @@ def validate_single_segment_boundary(
                 provider="lmstudio",
                 model=analyzer.config.model,
                 segment=segment,
+                asset=asset,
             )
         except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             analyzer.last_error_detail = str(exc)
@@ -2339,17 +2424,79 @@ def validate_single_segment_boundary(
                     story_prompt=story_prompt,
                 ),
             )
+            analyzer._write_debug_entry(
+                event="boundary_raw_response",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": analyzer.config.model,
+                    "image_path": image_path,
+                    "raw_response": raw,
+                },
+            )
             payload = parse_json_object(raw)
             if payload is None:
+                payload = parse_key_value_object(
+                    raw,
+                    allowed_keys={"decision", "reason", "confidence"},
+                )
+            if payload is None:
+                analyzer._write_debug_entry(
+                    event="boundary_parse_failed",
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    payload={
+                        "provider": "mlx-vlm-local",
+                        "model": analyzer.config.model,
+                        "image_path": image_path,
+                        "raw_response": raw,
+                        "error": "MLX-VLM local response did not contain valid JSON.",
+                    },
+                )
                 raise AIProviderRequestError("MLX-VLM local response did not contain valid JSON.")
-            return normalize_boundary_validation_output(
+            result = normalize_boundary_validation_output(
                 payload,
                 provider="mlx-vlm-local",
                 model=analyzer.config.model,
                 segment=segment,
+                asset=asset,
             )
+            analyzer._write_debug_entry(
+                event="boundary_parsed_response",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": analyzer.config.model,
+                    "image_path": image_path,
+                    "parsed_payload": payload,
+                    "normalized_result": {
+                        "decision": result.decision,
+                        "confidence": result.confidence,
+                        "suggested_range_sec": result.suggested_range_sec,
+                        "split_ranges_sec": result.split_ranges_sec,
+                    },
+                },
+            )
+            return result
         except (AIProviderRequestError, OSError, ValueError, RuntimeError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
             analyzer.last_error_detail = str(exc)
+            analyzer._write_debug_entry(
+                event="boundary_validate_failed",
+                asset=asset,
+                segment=segment,
+                evidence=evidence,
+                payload={
+                    "provider": "mlx-vlm-local",
+                    "model": analyzer.config.model,
+                    "image_path": image_path,
+                    "error": analyzer.last_error_detail,
+                },
+            )
             return boundary_validation_fallback_result(segment=segment, detail=str(exc), skip_reason="request_failed")
 
     return BoundaryValidationResult(

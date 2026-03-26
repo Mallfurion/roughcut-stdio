@@ -98,6 +98,10 @@ struct AppSettings {
     segment_semantic_validation_enabled: bool,
     #[serde(rename = "segmentSemanticAmbiguityThreshold")]
     segment_semantic_ambiguity_threshold: String,
+    #[serde(rename = "segmentSemanticFloorThreshold")]
+    segment_semantic_floor_threshold: String,
+    #[serde(rename = "segmentSemanticMinTargets")]
+    segment_semantic_min_targets: String,
     #[serde(rename = "segmentSemanticValidationBudgetPct")]
     segment_semantic_validation_budget_pct: String,
     #[serde(rename = "segmentSemanticValidationMaxSegments")]
@@ -419,6 +423,8 @@ fn default_app_settings() -> AppSettings {
         segment_legacy_fallback_enabled: true,
         segment_semantic_validation_enabled: true,
         segment_semantic_ambiguity_threshold: "0.6".into(),
+        segment_semantic_floor_threshold: "0.45".into(),
+        segment_semantic_min_targets: "1".into(),
         segment_semantic_validation_budget_pct: "100".into(),
         segment_semantic_validation_max_segments: "2".into(),
         segment_semantic_max_adjustment_sec: "1.5".into(),
@@ -507,6 +513,12 @@ fn read_app_settings(root: &Path) -> Result<AppSettings, String> {
     }
     if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD") {
         settings.segment_semantic_ambiguity_threshold = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD") {
+        settings.segment_semantic_floor_threshold = value.clone();
+    }
+    if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS") {
+        settings.segment_semantic_min_targets = value.clone();
     }
     if let Some(value) = env_map.get("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT") {
         settings.segment_semantic_validation_budget_pct = value.clone();
@@ -631,6 +643,14 @@ fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)>
         (
             "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD".into(),
             sanitize_single_line(&settings.segment_semantic_ambiguity_threshold),
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD".into(),
+            sanitize_single_line(&settings.segment_semantic_floor_threshold),
+        ),
+        (
+            "TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS".into(),
+            sanitize_single_line(&settings.segment_semantic_min_targets),
         ),
         (
             "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT".into(),

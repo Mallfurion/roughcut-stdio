@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from services.analyzer.app.benchmarking import (
+    attach_quality_evaluation,
     build_process_benchmark,
     build_process_summary_lines,
     compare_benchmarks,
@@ -39,6 +40,12 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "transcript_failed_asset_count": 1,
                     "transcript_excerpt_segment_count": 2,
                     "speech_fallback_segment_count": 1,
+                    "semantic_boundary_validated_count": 1,
+                    "semantic_boundary_applied_count": 1,
+                    "semantic_boundary_noop_count": 0,
+                    "semantic_boundary_threshold_targeted_count": 1,
+                    "semantic_boundary_floor_targeted_count": 0,
+                    "semantic_boundary_skipped_count": 0,
                     "ai_live_segment_count": 0,
                     "ai_cached_segment_count": 1,
                     "ai_fallback_segment_count": 1,
@@ -134,7 +141,86 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
             self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
+            self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
             self.assertTrue((benchmark_root / "history.jsonl").is_file())
+
+    def test_attach_quality_evaluation_updates_benchmark_and_history(self) -> None:
+        payload = {
+            "project": {
+                "analysis_summary": {
+                    "phase_timings_sec": {"per_asset_analysis": 4.2},
+                    "candidate_segment_count": 3,
+                }
+            },
+            "assets": [{"id": "asset-1"}],
+        }
+        runtime_configuration = {
+            "media_dir": "/tmp/media-one",
+            "media_dir_input": "./media-one",
+            "ai_provider_effective": "deterministic",
+            "ai_mode": "fast",
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            benchmark_root = root / "generated" / "benchmarks"
+            artifact_paths = {
+                "project_json": str(root / "generated" / "project.json"),
+                "process_log": str(root / "generated" / "process.log"),
+                "process_summary": str(root / "generated" / "process-summary.txt"),
+                "process_output": str(root / "generated" / "process-output.txt"),
+                "benchmark_json": str(benchmark_root / "run-001" / "benchmark.json"),
+                "benchmark_history": str(benchmark_root / "history.jsonl"),
+                "run_process_output": str(benchmark_root / "run-001" / "process-output.txt"),
+            }
+            benchmark = build_process_benchmark(
+                run_id="run-001",
+                started_at="2026-03-26T10:00:00Z",
+                completed_at="2026-03-26T10:00:10Z",
+                total_runtime_sec=10.0,
+                project_payload=payload,
+                runtime_configuration=runtime_configuration,
+                artifact_paths=artifact_paths,
+            )
+            write_benchmark_artifacts(benchmark=benchmark, benchmark_root=benchmark_root)
+            summary_path = root / "generated" / "segmentation-evaluation-summary.txt"
+            evaluation_result = {
+                "fixture_set": "fixture-a",
+                "passed": True,
+                "summary": {
+                    "check_count": 5,
+                    "passed_check_count": 5,
+                    "failed_check_count": 0,
+                },
+                "semantic_validation": {
+                    "dormant": False,
+                    "validated_count": 1,
+                    "applied_count": 1,
+                    "floor_targeted_count": 0,
+                },
+            }
+
+            evaluation_path = attach_quality_evaluation(
+                benchmark_root=benchmark_root,
+                run_id="run-001",
+                evaluation_result=evaluation_result,
+                summary_path=summary_path,
+            )
+
+            benchmark_payload = json.loads((benchmark_root / "run-001" / "benchmark.json").read_text(encoding="utf-8"))
+            history_entries = [
+                json.loads(line)
+                for line in (benchmark_root / "history.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(evaluation_path.name, "segmentation-evaluation.json")
+            self.assertEqual(benchmark_payload["quality_evaluation"]["fixture_set"], "fixture-a")
+            self.assertEqual(
+                benchmark_payload["artifact_paths"]["segmentation_evaluation_summary"],
+                str(summary_path),
+            )
+            self.assertEqual(history_entries[-1]["quality_evaluation_summary"]["fixture_set"], "fixture-a")
+            self.assertEqual(history_entries[-1]["quality_evaluation_summary"]["semantic_validation"]["validated_count"], 1)
 
 
 if __name__ == "__main__":

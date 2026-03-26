@@ -48,6 +48,9 @@ class SegmentEvidence:
     transcript_status: str = ""
     speech_mode_source: str = ""
     contact_sheet_path: str = ""
+    transcript_turn_count: int = 0
+    transcript_turn_ranges_sec: list[list[float]] = field(default_factory=list)
+    turn_completeness: float = 0.0
 
 
 @dataclass(slots=True)
@@ -73,6 +76,9 @@ class PrefilterDecision:
     assembly_rule_family: str = ""
     assembly_source_segment_ids: list[str] = field(default_factory=list)
     assembly_source_ranges_sec: list[list[float]] = field(default_factory=list)
+    transcript_turn_ids: list[str] = field(default_factory=list)
+    transcript_turn_ranges_sec: list[list[float]] = field(default_factory=list)
+    transcript_turn_alignment: str = ""
 
 
 @dataclass(slots=True)
@@ -120,6 +126,7 @@ class SegmentReviewState:
     transcript_status: str = ""
     transcript_summary: str = ""
     speech_mode_source: str = ""
+    turn_summary: str = ""
 
 
 @dataclass(slots=True)
@@ -129,6 +136,7 @@ class BoundaryValidationResult:
     reason: str
     confidence: float
     ambiguity_score: float = 0.0
+    target_reason: str = ""
     provider: str = ""
     provider_model: str = ""
     skip_reason: str = ""
@@ -248,6 +256,9 @@ class ProjectData:
                             assembly_rule_family=segment["prefilter"].get("assembly_rule_family", ""),
                             assembly_source_segment_ids=segment["prefilter"].get("assembly_source_segment_ids", []),
                             assembly_source_ranges_sec=segment["prefilter"].get("assembly_source_ranges_sec", []),
+                            transcript_turn_ids=segment["prefilter"].get("transcript_turn_ids", []),
+                            transcript_turn_ranges_sec=segment["prefilter"].get("transcript_turn_ranges_sec", []),
+                            transcript_turn_alignment=segment["prefilter"].get("transcript_turn_alignment", ""),
                         )
                         if segment.get("prefilter") is not None
                         else None

@@ -38,6 +38,14 @@ WORKLOAD_COUNT_KEYS = (
     "transcript_runtime_probe_rejected_asset_count",
     "transcript_excerpt_segment_count",
     "speech_fallback_segment_count",
+    "semantic_boundary_eligible_count",
+    "semantic_boundary_validated_count",
+    "semantic_boundary_skipped_count",
+    "semantic_boundary_fallback_count",
+    "semantic_boundary_threshold_targeted_count",
+    "semantic_boundary_floor_targeted_count",
+    "semantic_boundary_applied_count",
+    "semantic_boundary_noop_count",
     "clip_scored_count",
     "clip_gated_count",
     "ai_live_segment_count",
@@ -71,6 +79,52 @@ class BenchmarkComparison:
     context_differences: list[str]
 
 
+def attach_quality_evaluation(
+    *,
+    benchmark_root: str | Path,
+    run_id: str,
+    evaluation_result: dict[str, Any],
+    summary_path: str | Path | None = None,
+) -> Path:
+    root = Path(benchmark_root)
+    run_dir = root / run_id
+    benchmark_path = run_dir / "benchmark.json"
+    evaluation_path = run_dir / "segmentation-evaluation.json"
+
+    benchmark_payload = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    evaluation_path.write_text(
+        json.dumps(evaluation_result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    benchmark_payload["quality_evaluation"] = evaluation_result
+    artifact_paths = dict(benchmark_payload.get("artifact_paths", {}))
+    artifact_paths["segmentation_evaluation_json"] = str(evaluation_path)
+    if summary_path is not None:
+        artifact_paths["segmentation_evaluation_summary"] = str(Path(summary_path))
+    benchmark_payload["artifact_paths"] = artifact_paths
+    benchmark_path.write_text(
+        json.dumps(benchmark_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    history_path = root / "history.jsonl"
+    if history_path.exists():
+        entries = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        for entry in entries:
+            if entry.get("run_id") == run_id:
+                entry["quality_evaluation_summary"] = {
+                    "fixture_set": evaluation_result.get("fixture_set", ""),
+                    "passed": bool(evaluation_result.get("passed", False)),
+                    "failed_check_count": int((evaluation_result.get("summary") or {}).get("failed_check_count", 0)),
+                    "semantic_validation": dict(evaluation_result.get("semantic_validation") or {}),
+                }
+        history_path.write_text(
+            "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in entries),
+            encoding="utf-8",
+        )
+    return evaluation_path
+
+
 def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[str, Any]:
     provider_status = inspect_ai_provider_status(runtime_probe=True)
     analysis_config = load_ai_analysis_config()
@@ -99,6 +153,10 @@ def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[
         "clip_min_score": analysis_config.clip_min_score if analysis_config.clip_enabled else None,
         "clip_model": analysis_config.clip_model if analysis_config.clip_enabled else None,
         "vlm_budget_pct": analysis_config.vlm_budget_pct,
+        "semantic_boundary_validation_enabled": analysis_config.semantic_boundary_validation_enabled,
+        "semantic_boundary_ambiguity_threshold": analysis_config.semantic_boundary_ambiguity_threshold,
+        "semantic_boundary_floor_threshold": analysis_config.semantic_boundary_floor_threshold,
+        "semantic_boundary_min_targets": analysis_config.semantic_boundary_min_targets,
     }
 
 
@@ -180,6 +238,11 @@ def compare_benchmarks(
     if current_cfg.get("ai_mode") != baseline_cfg.get("ai_mode"):
         differences.append(
             f"AI mode changed ({baseline_cfg.get('ai_mode', 'unknown')} -> {current_cfg.get('ai_mode', 'unknown')})"
+        )
+    if current_cfg.get("semantic_boundary_ambiguity_threshold") != baseline_cfg.get("semantic_boundary_ambiguity_threshold"):
+        differences.append(
+            "semantic ambiguity threshold changed "
+            f"({baseline_cfg.get('semantic_boundary_ambiguity_threshold', 'unknown')} -> {current_cfg.get('semantic_boundary_ambiguity_threshold', 'unknown')})"
         )
     if current_workload.get("asset_count") != baseline_workload.get("asset_count"):
         differences.append(
@@ -379,6 +442,18 @@ def build_process_summary_lines(
         lines.append(f"Transcript cache hits: {analysis_summary.get('transcript_cached_asset_count', 0)}")
         lines.append(f"Transcript excerpt segments: {analysis_summary.get('transcript_excerpt_segment_count', 0)}")
         lines.append(f"Speech fallback segments: {analysis_summary.get('speech_fallback_segment_count', 0)}")
+        lines.append(
+            "Semantic boundary validation: "
+            f"{analysis_summary.get('semantic_boundary_validated_count', 0)} validated, "
+            f"{analysis_summary.get('semantic_boundary_applied_count', 0)} applied, "
+            f"{analysis_summary.get('semantic_boundary_noop_count', 0)} no-op"
+        )
+        lines.append(
+            "Semantic targeting: "
+            f"{analysis_summary.get('semantic_boundary_threshold_targeted_count', 0)} threshold, "
+            f"{analysis_summary.get('semantic_boundary_floor_targeted_count', 0)} floor, "
+            f"{analysis_summary.get('semantic_boundary_skipped_count', 0)} skipped"
+        )
         lines.append(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
         lines.append(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
         lines.append(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")
