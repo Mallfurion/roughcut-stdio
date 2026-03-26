@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from hashlib import md5
 import importlib
 import importlib.util
@@ -7,6 +8,7 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import time
 from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,7 @@ from .ai import (
     default_vision_language_analyzer,
     get_ai_runtime_stats,
     load_ai_analysis_config,
+    validate_segment_boundaries,
 )
 
 # Lazy imports for optional CLIP dependencies
@@ -40,23 +43,28 @@ from .deduplication import (
 )
 from .domain import (
     Asset,
+    BoundaryValidationResult,
     CandidateSegment,
     PrefilterDecision,
     ProjectData,
     ProjectMeta,
+    SegmentReviewState,
     TakeRecommendation,
     Timeline,
     TimelineItem,
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .prefilter import (
+    SeedRegion,
     aggregate_segment_prefilter,
+    build_prefilter_seed_regions,
     build_prefilter_segments,
     sample_asset_signals,
     sample_audio_signals,
     sample_timestamps,
 )
 from .scoring import score_segment
+from .scoring import limiting_factor_labels, top_score_driver_labels
 
 
 class SceneDetector(Protocol):
@@ -68,14 +76,58 @@ class TranscriptProvider(Protocol):
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         ...
 
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list["TranscriptSpan"]:
+        ...
+
 
 StatusCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int, Asset], None]
+
+TAKE_SELECTION_MIN_SCORE = 0.68
+TAKE_SELECTION_ALT_GAP = 0.08
+ASSEMBLY_MERGE_MAX_GAP_SEC = 1.25
+ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC = 0.4
+ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC = 0.9
+ASSEMBLY_SPLIT_MIN_DURATION_SEC = 6.5
+ASSEMBLY_SPLIT_MIN_PART_SEC = 2.0
+ASSEMBLY_SPLIT_TRANSCRIPT_GAP_SEC = 1.25
+ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC = 1.5
+
+
+@dataclass(slots=True)
+class TranscriptSpan:
+    start_sec: float
+    end_sec: float
+    text: str
+
+
+@dataclass(slots=True)
+class RefinedSegmentCandidate:
+    start_sec: float
+    end_sec: float
+    boundary_strategy: str
+    boundary_confidence: float
+    seed_region_ids: list[str]
+    seed_region_sources: list[str]
+    seed_region_ranges_sec: list[list[float]]
+
+
+@dataclass(slots=True)
+class AssemblyContinuitySignals:
+    gap_sec: float
+    transcript_span_count: int
+    transcript_internal_gap_sec: float
+    same_analysis_mode: bool
+    shared_seed_source: bool
+    scene_divider_between: bool
 
 
 class NoOpTranscriptProvider:
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         return ""
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        return []
 
 
 class PySceneDetectAdapter:
@@ -106,29 +158,1045 @@ class FasterWhisperAdapter:
     def __init__(self, model_size: str = "small") -> None:
         self.model_size = model_size
         self._model = None
-        self._cache: dict[str, list[tuple[float, float, str]]] = {}
+        self._cache: dict[str, list[TranscriptSpan]] = {}
 
     def excerpt(self, asset: Asset, start_sec: float, end_sec: float) -> str:
         spec = importlib.util.find_spec("faster_whisper")
         if spec is None:
             return ""
 
+        lines = [
+            span.text
+            for span in self.spans(asset, start_sec, end_sec)
+            if span.text
+        ]
+        return " ".join(lines).strip()
+
+    def spans(self, asset: Asset, start_sec: float, end_sec: float) -> list[TranscriptSpan]:
+        if importlib.util.find_spec("faster_whisper") is None:
+            return []
+        self._ensure_cached(asset)
+        return [
+            TranscriptSpan(
+                start_sec=span.start_sec,
+                end_sec=span.end_sec,
+                text=span.text,
+            )
+            for span in self._cache.get(asset.proxy_path, [])
+            if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text
+        ]
+
+    def _ensure_cached(self, asset: Asset) -> None:
         if self._model is None:
             module = importlib.import_module("faster_whisper")
             self._model = module.WhisperModel(self.model_size)
 
-        if asset.proxy_path not in self._cache:
-            segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
-            self._cache[asset.proxy_path] = [
-                (float(segment.start), float(segment.end), segment.text.strip()) for segment in segments
-            ]
+        if asset.proxy_path in self._cache:
+            return
 
-        lines = [
-            text
-            for segment_start, segment_end, text in self._cache[asset.proxy_path]
-            if segment_end >= start_sec and segment_start <= end_sec and text
+        segments, _info = self._model.transcribe(asset.proxy_path, vad_filter=True)
+        self._cache[asset.proxy_path] = [
+            TranscriptSpan(
+                start_sec=float(segment.start),
+                end_sec=float(segment.end),
+                text=segment.text.strip(),
+            )
+            for segment in segments
+            if segment.text.strip()
         ]
-        return " ".join(lines).strip()
+
+
+def transcript_spans_for_range(
+    transcriber: TranscriptProvider,
+    asset: Asset,
+    start_sec: float,
+    end_sec: float,
+) -> list[TranscriptSpan]:
+    spans_getter = getattr(transcriber, "spans", None)
+    if callable(spans_getter):
+        spans = spans_getter(asset, start_sec, end_sec)
+        return [
+            TranscriptSpan(
+                start_sec=float(getattr(span, "start_sec", 0.0)),
+                end_sec=float(getattr(span, "end_sec", 0.0)),
+                text=str(getattr(span, "text", "")),
+            )
+            for span in spans
+            if float(getattr(span, "end_sec", 0.0)) > float(getattr(span, "start_sec", 0.0))
+        ]
+    return []
+
+
+def transcript_excerpt_for_range(
+    transcriber: TranscriptProvider,
+    asset: Asset,
+    transcript_spans: list[TranscriptSpan],
+    start_sec: float,
+    end_sec: float,
+) -> str:
+    matching = [
+        span.text.strip()
+        for span in transcript_spans
+        if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text.strip()
+    ]
+    if matching:
+        return " ".join(matching).strip()
+    return transcriber.excerpt(asset, start_sec, end_sec).strip()
+
+
+def make_candidate_segment(
+    *,
+    asset: Asset,
+    segment_id: str,
+    start_sec: float,
+    end_sec: float,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    boundary_strategy: str,
+    boundary_confidence: float,
+    seed_region_ids: list[str],
+    seed_region_sources: list[str],
+    seed_region_ranges_sec: list[list[float]],
+    assembly_operation: str = "none",
+    assembly_rule_family: str = "",
+    assembly_source_segment_ids: list[str] | None = None,
+    assembly_source_ranges_sec: list[list[float]] | None = None,
+) -> CandidateSegment:
+    excerpt = (
+        transcript_excerpt_for_range(transcriber, asset, transcript_spans, start_sec, end_sec)
+        if asset.has_speech
+        else ""
+    )
+    analysis_mode = "speech" if excerpt else "visual"
+    prefilter_snapshot = aggregate_segment_prefilter(
+        signals=prefilter_signals,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        audio_signals=audio_signals,
+    )
+    metrics = synthesize_quality_metrics(
+        asset,
+        start_sec,
+        end_sec,
+        analysis_mode,
+        prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
+    )
+    return CandidateSegment(
+        id=segment_id,
+        asset_id=asset.id,
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        analysis_mode=analysis_mode,
+        transcript_excerpt=excerpt,
+        description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
+        quality_metrics=metrics,
+        prefilter=PrefilterDecision(
+            score=float(prefilter_snapshot["score"]),
+            shortlisted=False,
+            filtered_before_vlm=False,
+            selection_reason="Segment has not been evaluated for VLM shortlist yet.",
+            sampled_frame_count=int(prefilter_snapshot["sampled_frame_count"]),
+            sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
+            top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
+            metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
+            boundary_strategy=boundary_strategy,
+            boundary_confidence=boundary_confidence,
+            seed_region_ids=list(seed_region_ids),
+            seed_region_sources=list(seed_region_sources),
+            seed_region_ranges_sec=[list(item) for item in seed_region_ranges_sec],
+            assembly_operation=assembly_operation,
+            assembly_rule_family=assembly_rule_family,
+            assembly_source_segment_ids=list(assembly_source_segment_ids or []),
+            assembly_source_ranges_sec=[list(item) for item in (assembly_source_ranges_sec or [])],
+        ),
+    )
+
+
+def refine_seed_regions(
+    *,
+    asset: Asset,
+    seed_regions: list[SeedRegion],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    audio_signals,
+) -> list[RefinedSegmentCandidate]:
+    if not seed_regions:
+        return []
+
+    refined: list[RefinedSegmentCandidate] = []
+    for seed in seed_regions:
+        candidate = (
+            _refine_seed_with_transcript(asset, seed, transcript_spans)
+            or _refine_seed_with_audio(asset, seed, audio_signals)
+            or _refine_seed_with_scene(asset, seed, base_ranges)
+            or _refine_seed_with_duration(asset, seed)
+        )
+        refined.append(candidate)
+    return _dedupe_refined_candidates(refined)
+
+
+def _refine_seed_with_transcript(
+    asset: Asset,
+    seed: SeedRegion,
+    transcript_spans: list[TranscriptSpan],
+) -> RefinedSegmentCandidate | None:
+    if not transcript_spans:
+        return None
+    margin = 0.75
+    expanded_start = max(0.0, seed.start_sec - margin)
+    expanded_end = min(asset.duration_sec, seed.end_sec + margin)
+    matching = [
+        span
+        for span in transcript_spans
+        if span.end_sec >= expanded_start and span.start_sec <= expanded_end
+    ]
+    if not matching:
+        return None
+    start_sec = max(0.0, min(span.start_sec for span in matching))
+    end_sec = min(asset.duration_sec, max(span.end_sec for span in matching))
+    if end_sec - start_sec < 1.0:
+        return None
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy="transcript-snap",
+        boundary_confidence=0.9,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_audio(
+    asset: Asset,
+    seed: SeedRegion,
+    audio_signals,
+) -> RefinedSegmentCandidate | None:
+    if not audio_signals:
+        return None
+    energetic = [sig for sig in audio_signals if not sig.is_silent and sig.rms_energy >= 0.05]
+    if not energetic:
+        return None
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    nearest_idx = min(range(len(audio_signals)), key=lambda idx: abs(audio_signals[idx].timestamp_sec - center))
+    if audio_signals[nearest_idx].is_silent or audio_signals[nearest_idx].rms_energy < 0.05:
+        nearest_idx = min(range(len(energetic)), key=lambda idx: abs(energetic[idx].timestamp_sec - center))
+        center_signal = energetic[nearest_idx]
+        nearest_idx = next(
+            idx for idx, signal in enumerate(audio_signals)
+            if signal.timestamp_sec == center_signal.timestamp_sec and signal.rms_energy == center_signal.rms_energy
+        )
+
+    left_idx = nearest_idx
+    while left_idx > 0 and not audio_signals[left_idx - 1].is_silent and audio_signals[left_idx - 1].rms_energy >= 0.05:
+        left_idx -= 1
+    right_idx = nearest_idx
+    while right_idx < len(audio_signals) - 1 and not audio_signals[right_idx + 1].is_silent and audio_signals[right_idx + 1].rms_energy >= 0.05:
+        right_idx += 1
+
+    step = _average_signal_step(audio_signals)
+    start_sec = max(0.0, audio_signals[left_idx].timestamp_sec - step / 2.0)
+    end_sec = min(asset.duration_sec, audio_signals[right_idx].timestamp_sec + step / 2.0)
+    if end_sec - start_sec < 1.0:
+        return None
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy="audio-snap",
+        boundary_confidence=0.74,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_scene(
+    asset: Asset,
+    seed: SeedRegion,
+    base_ranges: list[tuple[float, float]],
+) -> RefinedSegmentCandidate | None:
+    if not base_ranges:
+        return None
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    containing = [item for item in base_ranges if item[0] <= center <= item[1]]
+    if containing:
+        scene_start, scene_end = containing[0]
+    else:
+        scene_start, scene_end = max(
+            base_ranges,
+            key=lambda item: min(item[1], seed.end_sec) - max(item[0], seed.start_sec),
+        )
+    if scene_end - scene_start > 8.0:
+        return _refine_seed_with_duration(asset, seed, strategy="scene-duration")
+    return RefinedSegmentCandidate(
+        start_sec=round(max(0.0, scene_start), 3),
+        end_sec=round(min(asset.duration_sec, scene_end), 3),
+        boundary_strategy="scene-snap",
+        boundary_confidence=0.62,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _refine_seed_with_duration(
+    asset: Asset,
+    seed: SeedRegion,
+    *,
+    strategy: str = "duration-rule",
+) -> RefinedSegmentCandidate:
+    center = (seed.start_sec + seed.end_sec) / 2.0
+    duration = max(1.5, min(6.0, seed.end_sec - seed.start_sec))
+    half = duration / 2.0
+    start_sec = max(0.0, center - half)
+    end_sec = min(asset.duration_sec, center + half)
+    return RefinedSegmentCandidate(
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        boundary_strategy=strategy,
+        boundary_confidence=0.48,
+        seed_region_ids=[seed.id],
+        seed_region_sources=[seed.source],
+        seed_region_ranges_sec=[[round(seed.start_sec, 3), round(seed.end_sec, 3)]],
+    )
+
+
+def _average_signal_step(signals) -> float:
+    if len(signals) < 2:
+        return 1.0
+    deltas = [
+        later.timestamp_sec - earlier.timestamp_sec
+        for earlier, later in zip(signals, signals[1:])
+        if later.timestamp_sec > earlier.timestamp_sec
+    ]
+    if not deltas:
+        return 1.0
+    return sum(deltas) / len(deltas)
+
+
+def _dedupe_refined_candidates(candidates: list[RefinedSegmentCandidate]) -> list[RefinedSegmentCandidate]:
+    if not candidates:
+        return []
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item.boundary_confidence, -(item.end_sec - item.start_sec)),
+        reverse=True,
+    )
+    kept: list[RefinedSegmentCandidate] = []
+    for candidate in ordered:
+        if any(_range_overlap_ratio((candidate.start_sec, candidate.end_sec), (existing.start_sec, existing.end_sec)) >= 0.9 for existing in kept):
+            continue
+        kept.append(candidate)
+    return sorted(kept, key=lambda item: item.start_sec)
+
+
+def _range_overlap_ratio(a: tuple[float, float], b: tuple[float, float]) -> float:
+    start = max(a[0], b[0])
+    end = min(a[1], b[1])
+    if end <= start:
+        return 0.0
+    overlap = end - start
+    shorter = min(a[1] - a[0], b[1] - b[0])
+    return overlap / shorter if shorter > 0 else 0.0
+
+
+def assemble_narrative_units(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    if not segments:
+        return []
+
+    split_segments: list[CandidateSegment] = []
+    for segment in sorted(segments, key=lambda item: item.start_sec):
+        split_segments.extend(
+            split_candidate_segment(
+                asset=asset,
+                segment=segment,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
+                transcriber=transcriber,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+            )
+        )
+
+    merged_segments = merge_adjacent_segments(
+        asset=asset,
+        segments=split_segments,
+        base_ranges=base_ranges,
+        transcript_spans=transcript_spans,
+        transcriber=transcriber,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+    )
+
+    return [
+        replace(segment, id=f"{asset.id}-segment-{index:02d}")
+        for index, segment in enumerate(merged_segments, start=1)
+    ]
+
+
+def split_candidate_segment(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    divider, rule_family = _find_segment_split_divider(segment, base_ranges, transcript_spans)
+    if divider is None or not rule_family:
+        return [segment]
+
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return [segment]
+
+    boundary_confidence = round(clamp(max(prefilter.boundary_confidence, 0.45) * 0.92), 4)
+    source_segment_ids = assembly_source_segment_ids(segment)
+    source_ranges = assembly_source_ranges_sec(segment)
+    split_ranges = [(segment.start_sec, divider), (divider, segment.end_sec)]
+    parts: list[CandidateSegment] = []
+    for part_index, (start_sec, end_sec) in enumerate(split_ranges, start=1):
+        if end_sec - start_sec < ASSEMBLY_SPLIT_MIN_PART_SEC:
+            return [segment]
+        parts.append(
+            make_candidate_segment(
+                asset=asset,
+                segment_id=f"{segment.id}-split-{part_index}",
+                start_sec=start_sec,
+                end_sec=end_sec,
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+                boundary_strategy=f"assembly-split:{rule_family}",
+                boundary_confidence=boundary_confidence,
+                seed_region_ids=prefilter.seed_region_ids,
+                seed_region_sources=prefilter.seed_region_sources,
+                seed_region_ranges_sec=prefilter.seed_region_ranges_sec,
+                assembly_operation="split",
+                assembly_rule_family=rule_family,
+                assembly_source_segment_ids=source_segment_ids,
+                assembly_source_ranges_sec=source_ranges,
+            )
+        )
+    return parts
+
+
+def merge_adjacent_segments(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    if not segments:
+        return []
+
+    ordered = sorted(segments, key=lambda item: (item.start_sec, item.end_sec))
+    merged: list[CandidateSegment] = []
+    buffer: list[CandidateSegment] = [ordered[0]]
+    buffer_rules: list[str] = []
+
+    for candidate in ordered[1:]:
+        signals = collect_assembly_continuity_signals(buffer[-1], candidate, transcript_spans, base_ranges)
+        rule_family = merge_rule_family(buffer[-1], candidate, signals)
+        if rule_family:
+            buffer.append(candidate)
+            buffer_rules.append(rule_family)
+            continue
+        merged.append(
+            materialize_merged_segment(
+                asset=asset,
+                segments=buffer,
+                rule_families=buffer_rules,
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+            )
+        )
+        buffer = [candidate]
+        buffer_rules = []
+
+    merged.append(
+        materialize_merged_segment(
+            asset=asset,
+            segments=buffer,
+            rule_families=buffer_rules,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+        )
+    )
+    return merged
+
+
+def collect_assembly_continuity_signals(
+    left: CandidateSegment,
+    right: CandidateSegment,
+    transcript_spans: list[TranscriptSpan],
+    base_ranges: list[tuple[float, float]],
+) -> AssemblyContinuitySignals:
+    gap_sec = round(max(0.0, right.start_sec - left.end_sec), 3)
+    matching_spans = sorted(
+        [
+            span
+            for span in transcript_spans
+            if span.end_sec >= left.start_sec and span.start_sec <= right.end_sec
+        ],
+        key=lambda span: (span.start_sec, span.end_sec),
+    )
+    transcript_gap = largest_transcript_gap(matching_spans)
+    scene_boundaries = scene_boundaries_from_ranges(base_ranges)
+    scene_divider_between = any(left.end_sec <= boundary <= right.start_sec for boundary in scene_boundaries)
+    left_sources = set(left.prefilter.seed_region_sources if left.prefilter is not None else [])
+    right_sources = set(right.prefilter.seed_region_sources if right.prefilter is not None else [])
+    return AssemblyContinuitySignals(
+        gap_sec=gap_sec,
+        transcript_span_count=len(matching_spans),
+        transcript_internal_gap_sec=transcript_gap,
+        same_analysis_mode=left.analysis_mode == right.analysis_mode,
+        shared_seed_source=bool(left_sources.intersection(right_sources)),
+        scene_divider_between=scene_divider_between,
+    )
+
+
+def merge_rule_family(
+    left: CandidateSegment,
+    right: CandidateSegment,
+    signals: AssemblyContinuitySignals,
+) -> str:
+    left_source_ids = assembly_source_segment_ids(left)
+    right_source_ids = assembly_source_segment_ids(right)
+    if (
+        left.prefilter is not None
+        and right.prefilter is not None
+        and left.prefilter.assembly_operation == "split"
+        and right.prefilter.assembly_operation == "split"
+        and left_source_ids == right_source_ids
+    ):
+        return ""
+    if signals.gap_sec > ASSEMBLY_MERGE_MAX_GAP_SEC:
+        return ""
+    if (
+        signals.transcript_span_count >= 2
+        and signals.transcript_internal_gap_sec <= ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC
+        and not signals.scene_divider_between
+    ):
+        return "transcript-continuity"
+    if (
+        signals.gap_sec <= ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC
+        and not signals.scene_divider_between
+        and (
+            signals.same_analysis_mode
+            or signals.shared_seed_source
+            or left.analysis_mode == "speech"
+            or right.analysis_mode == "speech"
+        )
+    ):
+        return "structural-continuity"
+    return ""
+
+
+def materialize_merged_segment(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    rule_families: list[str],
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+) -> CandidateSegment:
+    if len(segments) == 1:
+        return segments[0]
+
+    unique_rule_families = list(dict.fromkeys(rule_families))
+    rule_family = unique_rule_families[0] if len(unique_rule_families) == 1 else "continuity-chain"
+    prefilters = [segment.prefilter for segment in segments if segment.prefilter is not None]
+    boundary_confidence = round(
+        clamp(sum(prefilter.boundary_confidence for prefilter in prefilters) / max(1, len(prefilters))),
+        4,
+    )
+
+    return make_candidate_segment(
+        asset=asset,
+        segment_id=f"{asset.id}-merged-{segments[0].id}-{segments[-1].id}",
+        start_sec=segments[0].start_sec,
+        end_sec=segments[-1].end_sec,
+        transcriber=transcriber,
+        transcript_spans=transcript_spans,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+        boundary_strategy=f"assembly-merge:{rule_family}",
+        boundary_confidence=boundary_confidence,
+        seed_region_ids=flatten_prefilter_lists(segments, "seed_region_ids"),
+        seed_region_sources=flatten_prefilter_lists(segments, "seed_region_sources"),
+        seed_region_ranges_sec=flatten_prefilter_range_lists(segments, "seed_region_ranges_sec"),
+        assembly_operation="merge",
+        assembly_rule_family=rule_family,
+        assembly_source_segment_ids=flatten_source_segment_ids(segments),
+        assembly_source_ranges_sec=flatten_source_ranges(segments),
+    )
+
+
+def _find_segment_split_divider(
+    segment: CandidateSegment,
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+) -> tuple[float | None, str]:
+    if segment.end_sec - segment.start_sec < ASSEMBLY_SPLIT_MIN_DURATION_SEC:
+        return None, ""
+
+    matching_spans = sorted(
+        [
+            span
+            for span in transcript_spans
+            if span.end_sec >= segment.start_sec and span.start_sec <= segment.end_sec
+        ],
+        key=lambda span: (span.start_sec, span.end_sec),
+    )
+    gap_candidates: list[tuple[float, float]] = []
+    for earlier, later in zip(matching_spans, matching_spans[1:]):
+        gap_sec = later.start_sec - earlier.end_sec
+        divider = round((earlier.end_sec + later.start_sec) / 2.0, 3)
+        if (
+            gap_sec >= ASSEMBLY_SPLIT_TRANSCRIPT_GAP_SEC
+            and divider - segment.start_sec >= ASSEMBLY_SPLIT_MIN_PART_SEC
+            and segment.end_sec - divider >= ASSEMBLY_SPLIT_MIN_PART_SEC
+        ):
+            gap_candidates.append((gap_sec, divider))
+    if len(matching_spans) >= 3 and gap_candidates:
+        _gap_sec, divider = max(gap_candidates, key=lambda item: item[0])
+        return divider, "transcript-gap"
+
+    scene_boundaries = scene_boundaries_from_ranges(base_ranges)
+    eligible_boundaries = [
+        boundary
+        for boundary in scene_boundaries
+        if segment.start_sec + ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC
+        <= boundary
+        <= segment.end_sec - ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC
+    ]
+    if not eligible_boundaries:
+        return None, ""
+    if matching_spans:
+        for boundary in eligible_boundaries:
+            has_left = any(span.start_sec < boundary for span in matching_spans)
+            has_right = any(span.end_sec > boundary for span in matching_spans)
+            if has_left and has_right:
+                return round(boundary, 3), "scene-divider"
+        return None, ""
+
+    boundary = min(
+        eligible_boundaries,
+        key=lambda item: abs(item - ((segment.start_sec + segment.end_sec) / 2.0)),
+    )
+    return round(boundary, 3), "scene-divider"
+
+
+def largest_transcript_gap(spans: list[TranscriptSpan]) -> float:
+    largest_gap = 0.0
+    for earlier, later in zip(spans, spans[1:]):
+        largest_gap = max(largest_gap, later.start_sec - earlier.end_sec)
+    return round(max(0.0, largest_gap), 3)
+
+
+def scene_boundaries_from_ranges(base_ranges: list[tuple[float, float]]) -> list[float]:
+    return [round(end_sec, 3) for _start_sec, end_sec in base_ranges[:-1]]
+
+
+def flatten_prefilter_lists(segments: list[CandidateSegment], attribute: str) -> list[str]:
+    values: list[str] = []
+    for segment in segments:
+        prefilter = segment.prefilter
+        if prefilter is None:
+            continue
+        for value in getattr(prefilter, attribute):
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def flatten_prefilter_range_lists(segments: list[CandidateSegment], attribute: str) -> list[list[float]]:
+    values: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for segment in segments:
+        prefilter = segment.prefilter
+        if prefilter is None:
+            continue
+        for item in getattr(prefilter, attribute):
+            normalized = (round(float(item[0]), 3), round(float(item[1]), 3))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append([normalized[0], normalized[1]])
+    return values
+
+
+def assembly_source_segment_ids(segment: CandidateSegment) -> list[str]:
+    prefilter = segment.prefilter
+    if prefilter is not None and prefilter.assembly_source_segment_ids:
+        return list(prefilter.assembly_source_segment_ids)
+    return [segment.id]
+
+
+def assembly_source_ranges_sec(segment: CandidateSegment) -> list[list[float]]:
+    prefilter = segment.prefilter
+    if prefilter is not None and prefilter.assembly_source_ranges_sec:
+        return [list(item) for item in prefilter.assembly_source_ranges_sec]
+    return [[round(segment.start_sec, 3), round(segment.end_sec, 3)]]
+
+
+def flatten_source_segment_ids(segments: list[CandidateSegment]) -> list[str]:
+    values: list[str] = []
+    for segment in segments:
+        for value in assembly_source_segment_ids(segment):
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def flatten_source_ranges(segments: list[CandidateSegment]) -> list[list[float]]:
+    values: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for segment in segments:
+        for item in assembly_source_ranges_sec(segment):
+            normalized = (round(float(item[0]), 3), round(float(item[1]), 3))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append([normalized[0], normalized[1]])
+    return values
+
+
+def semantic_boundary_ambiguity_score(segment: CandidateSegment) -> float:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return 0.0
+
+    score = 1.0 - clamp(prefilter.boundary_confidence)
+    if prefilter.boundary_strategy in {"legacy", "duration-rule", "scene-duration"}:
+        score += 0.18
+    if prefilter.boundary_strategy.startswith("assembly-merge:structural"):
+        score += 0.16
+    if prefilter.assembly_operation == "split":
+        score += 0.2
+    if prefilter.assembly_operation == "merge" and prefilter.assembly_rule_family == "structural-continuity":
+        score += 0.12
+
+    duration = segment.end_sec - segment.start_sec
+    if segment.analysis_mode == "speech" and 2.0 <= duration <= 7.0:
+        score += 0.08
+    if segment.analysis_mode == "visual" and segment.quality_metrics.get("motion_energy", 0.0) >= 0.65:
+        score += 0.06
+
+    return round(clamp(score), 4)
+
+
+def semantic_validation_is_available(analyzer: VisionLanguageAnalyzer) -> bool:
+    return analyzer.requires_keyframes and not isinstance(analyzer, DeterministicVisionLanguageAnalyzer)
+
+
+def select_semantic_boundary_validation_targets(
+    *,
+    segments: list[CandidateSegment],
+    enabled: bool,
+    analyzer_available: bool,
+    ambiguity_threshold: float,
+    budget_pct: int,
+    max_segments: int,
+) -> tuple[dict[str, float], set[str]]:
+    ambiguity_by_id = {
+        segment.id: semantic_boundary_ambiguity_score(segment)
+        for segment in segments
+    }
+    if not enabled or not analyzer_available:
+        return ambiguity_by_id, set()
+
+    eligible = [
+        segment
+        for segment in segments
+        if ambiguity_by_id.get(segment.id, 0.0) >= ambiguity_threshold
+    ]
+    ordered = sorted(
+        eligible,
+        key=lambda segment: (
+            ambiguity_by_id.get(segment.id, 0.0),
+            segment.prefilter.score if segment.prefilter is not None else 0.0,
+        ),
+        reverse=True,
+    )
+    if not ordered or max_segments <= 0 or budget_pct <= 0:
+        return ambiguity_by_id, set()
+
+    pct_limit = max(1, int(len(ordered) * budget_pct / 100.0))
+    effective_limit = min(len(ordered), max_segments, pct_limit)
+    return ambiguity_by_id, {segment.id for segment in ordered[:effective_limit]}
+
+
+def initial_boundary_validation_result(
+    *,
+    segment: CandidateSegment,
+    enabled: bool,
+    analyzer_available: bool,
+    ambiguity_score: float,
+    ambiguity_threshold: float,
+    targeted: bool,
+) -> BoundaryValidationResult:
+    if ambiguity_score < ambiguity_threshold:
+        return BoundaryValidationResult(
+            status="not_eligible",
+            decision="keep",
+            reason="Deterministic boundaries were not ambiguous enough for semantic validation.",
+            confidence=0.0,
+            ambiguity_score=ambiguity_score,
+            original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+            suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        )
+    if not enabled:
+        skip_reason = "disabled"
+        reason = "Semantic boundary validation is disabled."
+    elif not analyzer_available:
+        skip_reason = "ai_unavailable"
+        reason = "Semantic boundary validation is unavailable for the active analyzer."
+    elif not targeted:
+        skip_reason = "over_budget"
+        reason = "Semantic boundary validation was skipped because the runtime budget was exhausted."
+    else:
+        skip_reason = ""
+        reason = "Semantic boundary validation is pending."
+
+    status = "pending" if targeted else "skipped"
+    return BoundaryValidationResult(
+        status=status,
+        decision="keep",
+        reason=reason,
+        confidence=0.0,
+        ambiguity_score=ambiguity_score,
+        provider="deterministic" if not targeted else "",
+        provider_model="fallback-v1" if not targeted else "",
+        skip_reason=skip_reason,
+        applied=False,
+        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+    )
+
+
+def apply_semantic_boundary_validation(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    validation_results: dict[str, BoundaryValidationResult],
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    max_adjustment_sec: float,
+) -> list[CandidateSegment]:
+    updated: list[CandidateSegment] = []
+    next_index = 1
+
+    for segment in segments:
+        result = validation_results.get(segment.id)
+        if result is None or result.status in {"not_eligible", "skipped"}:
+            if result is not None:
+                segment.boundary_validation = result
+            updated.append(segment)
+            next_index += 1
+            continue
+
+        transformed = apply_single_boundary_validation(
+            asset=asset,
+            segment=segment,
+            result=result,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+            max_adjustment_sec=max_adjustment_sec,
+        )
+        for child in transformed:
+            child.id = f"{asset.id}-segment-{next_index:02d}"
+            updated.append(child)
+            next_index += 1
+
+    return updated
+
+
+def apply_single_boundary_validation(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    result: BoundaryValidationResult,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    max_adjustment_sec: float,
+) -> list[CandidateSegment]:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        segment.boundary_validation = result
+        return [segment]
+
+    original_start = segment.start_sec
+    original_end = segment.end_sec
+    bounded_start = clamp_range_value(
+        value=result.suggested_range_sec[0] if result.suggested_range_sec else original_start,
+        current=original_start,
+        minimum=0.0,
+        maximum=min(asset.duration_sec, original_end - 1.5),
+        max_adjustment_sec=max_adjustment_sec,
+    )
+    bounded_end = clamp_range_value(
+        value=result.suggested_range_sec[1] if result.suggested_range_sec else original_end,
+        current=original_end,
+        minimum=max(0.0, bounded_start + 1.5),
+        maximum=asset.duration_sec,
+        max_adjustment_sec=max_adjustment_sec,
+    )
+    if bounded_end - bounded_start < 1.5:
+        bounded_start, bounded_end = original_start, original_end
+
+    if result.decision == "split" and result.split_ranges_sec:
+        split_point = clamp_range_value(
+            value=result.split_ranges_sec[0][1],
+            current=(original_start + original_end) / 2.0,
+            minimum=original_start + 1.5,
+            maximum=original_end - 1.5,
+            max_adjustment_sec=max_adjustment_sec,
+        )
+        if split_point > original_start + 1.5 and original_end - split_point > 1.5:
+            children: list[CandidateSegment] = []
+            for part_index, (start_sec, end_sec) in enumerate(
+                ((original_start, split_point), (split_point, original_end)),
+                start=1,
+            ):
+                child_result = BoundaryValidationResult(
+                    status=result.status,
+                    decision="split",
+                    reason=result.reason,
+                    confidence=result.confidence,
+                    ambiguity_score=result.ambiguity_score,
+                    provider=result.provider,
+                    provider_model=result.provider_model,
+                    skip_reason=result.skip_reason,
+                    applied=True,
+                    original_range_sec=list(result.original_range_sec),
+                    suggested_range_sec=[round(start_sec, 3), round(end_sec, 3)],
+                    split_ranges_sec=[list(item) for item in result.split_ranges_sec],
+                )
+                children.append(
+                    rebuild_segment_with_validation(
+                        asset=asset,
+                        segment=segment,
+                        new_id=f"{segment.id}-semantic-{part_index}",
+                        start_sec=start_sec,
+                        end_sec=end_sec,
+                        transcriber=transcriber,
+                        transcript_spans=transcript_spans,
+                        prefilter_signals=prefilter_signals,
+                        audio_signals=audio_signals,
+                        boundary_validation=child_result,
+                    )
+                )
+            return children
+
+    applied = result.decision in {"extend", "trim"} and (
+        abs(bounded_start - original_start) > 0.01 or abs(bounded_end - original_end) > 0.01
+    )
+    result.applied = applied
+    result.suggested_range_sec = [round(bounded_start, 3), round(bounded_end, 3)]
+    if not applied:
+        segment.boundary_validation = result
+        return [segment]
+
+    return [
+        rebuild_segment_with_validation(
+            asset=asset,
+            segment=segment,
+            new_id=segment.id,
+            start_sec=bounded_start,
+            end_sec=bounded_end,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+            boundary_validation=result,
+        )
+    ]
+
+
+def rebuild_segment_with_validation(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    new_id: str,
+    start_sec: float,
+    end_sec: float,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    boundary_validation: BoundaryValidationResult,
+) -> CandidateSegment:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        segment.boundary_validation = boundary_validation
+        return segment
+
+    rebuilt = make_candidate_segment(
+        asset=asset,
+        segment_id=new_id,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        transcriber=transcriber,
+        transcript_spans=transcript_spans,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+        boundary_strategy=prefilter.boundary_strategy,
+        boundary_confidence=max(prefilter.boundary_confidence, boundary_validation.confidence),
+        seed_region_ids=prefilter.seed_region_ids,
+        seed_region_sources=prefilter.seed_region_sources,
+        seed_region_ranges_sec=prefilter.seed_region_ranges_sec,
+        assembly_operation=prefilter.assembly_operation,
+        assembly_rule_family=prefilter.assembly_rule_family,
+        assembly_source_segment_ids=prefilter.assembly_source_segment_ids,
+        assembly_source_ranges_sec=prefilter.assembly_source_ranges_sec,
+    )
+    rebuilt.boundary_validation = boundary_validation
+    return rebuilt
+
+
+def clamp_range_value(
+    *,
+    value: float,
+    current: float,
+    minimum: float,
+    maximum: float,
+    max_adjustment_sec: float,
+) -> float:
+    bounded = max(minimum, min(maximum, value))
+    delta_bounded = max(current - max_adjustment_sec, min(current + max_adjustment_sec, bounded))
+    return round(max(minimum, min(maximum, delta_bounded)), 3)
 
 
 def inspect_runtime_capabilities() -> dict[str, bool]:
@@ -154,17 +1222,18 @@ def build_project_from_media_roots(
     status_callback: StatusCallback | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> ProjectData:
+    media_discovery_started_at = time.monotonic()
     discovered = discover_media_files(media_roots, probe_runner=probe_runner)
     if status_callback is not None:
         status_callback(f"Discovered {len(discovered)} video files.")
     matches = match_media_files(discovered)
     assets = build_assets_from_matches(matches)
+    media_discovery_duration = time.monotonic() - media_discovery_started_at
     if status_callback is not None:
         status_callback(f"Matched {len(assets)} source assets to process.")
-    project_id = slugify(project_name)
-    return analyze_assets(
+    project_data = analyze_assets(
         project=ProjectMeta(
-            id=project_id,
+            id=slugify(project_name),
             name=project_name,
             story_prompt=story_prompt,
             status="draft",
@@ -178,6 +1247,10 @@ def build_project_from_media_roots(
         status_callback=status_callback,
         progress_callback=progress_callback,
     )
+    phase_timings = dict(project_data.project.analysis_summary.get("phase_timings_sec", {}))
+    phase_timings["media_discovery"] = round(media_discovery_duration, 3)
+    project_data.project.analysis_summary["phase_timings_sec"] = phase_timings
+    return project_data
 
 
 def analyze_assets(
@@ -208,6 +1281,10 @@ def analyze_assets(
     total_deduplicated_segments = 0
     total_clip_scored = 0
     total_clip_gated = 0
+    total_semantic_boundary_eligible = 0
+    total_semantic_boundary_validated = 0
+    total_semantic_boundary_skipped = 0
+    total_semantic_boundary_fallback = 0
     deduplication_enabled = is_deduplication_enabled()
     dedup_threshold = get_dedup_threshold()
     total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
@@ -215,6 +1292,7 @@ def analyze_assets(
 
     total_assets = len(assets)
     all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
+    per_asset_analysis_started_at = time.monotonic()
 
     for asset_index, asset in enumerate(assets, start=1):
         if status_callback is not None:
@@ -225,6 +1303,11 @@ def analyze_assets(
             base_ranges = fallback_segments(asset.duration_sec)
         timestamps = sample_timestamps(asset.duration_sec)
         prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+        transcript_spans = (
+            transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
+            if asset.has_speech
+            else []
+        )
 
         # Audio signal sampling
         audio_signals = sample_audio_signals(asset, timestamps)
@@ -235,55 +1318,185 @@ def analyze_assets(
         if status_callback is not None:
             audio_status = f"audio detected" if has_audio else "silent/no audio"
             status_callback(f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})")
-        segment_ranges = build_prefilter_segments(
-            asset=asset,
-            base_ranges=base_ranges,
-            signals=prefilter_signals,
-            audio_signals=audio_signals,
-            top_windows=2 if ai_config.mode == "fast" else 3,
-        )
-        if not segment_ranges:
-            segment_ranges = fallback_segments(asset.duration_sec)
-
-        asset_segments: list[CandidateSegment] = []
-        for index, (start_sec, end_sec) in enumerate(segment_ranges, start=1):
-            excerpt = transcriber.excerpt(asset, start_sec, end_sec).strip() if asset.has_speech else ""
-            analysis_mode = "speech" if excerpt else "visual"
-            prefilter_snapshot = aggregate_segment_prefilter(
+        top_windows = 2 if ai_config.mode == "fast" else 3
+        refined_candidates: list[RefinedSegmentCandidate] = []
+        if ai_config.boundary_refinement_enabled:
+            seed_regions = build_prefilter_seed_regions(
+                asset=asset,
+                base_ranges=base_ranges,
                 signals=prefilter_signals,
-                start_sec=start_sec,
-                end_sec=end_sec,
+                audio_signals=audio_signals,
+                top_windows=top_windows,
+            )
+            refined_candidates = refine_seed_regions(
+                asset=asset,
+                seed_regions=seed_regions,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
                 audio_signals=audio_signals,
             )
-            metrics = synthesize_quality_metrics(
-                asset,
-                start_sec,
-                end_sec,
-                analysis_mode,
-                prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
+
+        if refined_candidates:
+            segment_inputs = [
+                (
+                    candidate.start_sec,
+                    candidate.end_sec,
+                    candidate.boundary_strategy,
+                    candidate.boundary_confidence,
+                    candidate.seed_region_ids,
+                    candidate.seed_region_sources,
+                    candidate.seed_region_ranges_sec,
+                )
+                for candidate in refined_candidates
+            ]
+        else:
+            segment_ranges = build_prefilter_segments(
+                asset=asset,
+                base_ranges=base_ranges,
+                signals=prefilter_signals,
+                audio_signals=audio_signals,
+                top_windows=top_windows,
             )
+            if not segment_ranges and ai_config.boundary_refinement_enabled and not ai_config.boundary_refinement_legacy_fallback:
+                segment_ranges = []
+            if not segment_ranges:
+                segment_ranges = fallback_segments(asset.duration_sec)
+            segment_inputs = [
+                (start_sec, end_sec, "legacy", 0.0, [], [], [])
+                for start_sec, end_sec in segment_ranges
+            ]
+
+        asset_segments: list[CandidateSegment] = []
+        for index, (
+            start_sec,
+            end_sec,
+            boundary_strategy,
+            boundary_confidence,
+            seed_region_ids,
+            seed_region_sources,
+            seed_region_ranges_sec,
+        ) in enumerate(segment_inputs, start=1):
             asset_segments.append(
-                CandidateSegment(
-                    id=f"{asset.id}-segment-{index:02d}",
-                    asset_id=asset.id,
-                    start_sec=round(start_sec, 3),
-                    end_sec=round(end_sec, 3),
-                    analysis_mode=analysis_mode,
-                    transcript_excerpt=excerpt,
-                    description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
-                    quality_metrics=metrics,
-                    prefilter=PrefilterDecision(
-                        score=float(prefilter_snapshot["score"]),
-                        shortlisted=False,
-                        filtered_before_vlm=False,
-                        selection_reason="Segment has not been evaluated for VLM shortlist yet.",
-                        sampled_frame_count=int(prefilter_snapshot["sampled_frame_count"]),
-                        sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
-                        top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
-                        metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
+                make_candidate_segment(
+                    asset=asset,
+                    segment_id=(
+                        f"{asset.id}-region-{index:02d}"
+                        if ai_config.boundary_refinement_enabled
+                        else f"{asset.id}-segment-{index:02d}"
                     ),
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    transcriber=transcriber,
+                    transcript_spans=transcript_spans,
+                    prefilter_signals=prefilter_signals,
+                    audio_signals=audio_signals,
+                    boundary_strategy=boundary_strategy,
+                    boundary_confidence=boundary_confidence,
+                    seed_region_ids=seed_region_ids,
+                    seed_region_sources=seed_region_sources,
+                    seed_region_ranges_sec=seed_region_ranges_sec,
                 )
             )
+
+        if ai_config.boundary_refinement_enabled and asset_segments:
+            asset_segments = assemble_narrative_units(
+                asset=asset,
+                segments=asset_segments,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
+                transcriber=transcriber,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+            )
+
+        semantic_available = semantic_validation_is_available(analyzer)
+        ambiguity_by_id, semantic_target_ids = select_semantic_boundary_validation_targets(
+            segments=asset_segments,
+            enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
+            analyzer_available=semantic_available,
+            ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
+            budget_pct=ai_config.semantic_boundary_validation_budget_pct,
+            max_segments=ai_config.semantic_boundary_validation_max_segments,
+        )
+        total_semantic_boundary_eligible += sum(
+            1
+            for segment in asset_segments
+            if ambiguity_by_id.get(segment.id, 0.0) >= ai_config.semantic_boundary_ambiguity_threshold
+        )
+        for segment in asset_segments:
+            segment.boundary_validation = initial_boundary_validation_result(
+                segment=segment,
+                enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
+                analyzer_available=semantic_available,
+                ambiguity_score=ambiguity_by_id.get(segment.id, 0.0),
+                ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
+                targeted=segment.id in semantic_target_ids,
+            )
+
+        if semantic_target_ids:
+            semantic_tasks: list[tuple[CandidateSegment, object, str]] = []
+            for index, segment in enumerate(asset_segments):
+                if segment.id not in semantic_target_ids:
+                    continue
+                evidence = build_segment_evidence(
+                    asset=asset,
+                    segment=segment,
+                    asset_segments=asset_segments,
+                    segment_index=index,
+                    story_prompt=project.story_prompt,
+                    artifacts_root=artifacts_root,
+                    extract_keyframes=analyzer.requires_keyframes,
+                    max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
+                    keyframe_max_width=ai_config.keyframe_max_width,
+                )
+                segment.evidence_bundle = evidence
+                semantic_tasks.append((segment, evidence, project.story_prompt))
+
+            semantic_results = validate_segment_boundaries(
+                analyzer=analyzer,
+                asset=asset,
+                tasks=semantic_tasks,
+                concurrency=ai_config.concurrency,
+            )
+            for segment in asset_segments:
+                if segment.id not in semantic_target_ids:
+                    continue
+                result = semantic_results.get(segment.id)
+                if result is None:
+                    result = BoundaryValidationResult(
+                        status="fallback",
+                        decision="keep",
+                        reason="Semantic boundary validation returned no result, so deterministic output was preserved.",
+                        confidence=0.0,
+                        provider="deterministic",
+                        provider_model="fallback-v1",
+                        skip_reason="request_failed",
+                        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+                        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+                    )
+                result.ambiguity_score = ambiguity_by_id.get(segment.id, 0.0)
+                segment.boundary_validation = result
+                if result.status == "validated":
+                    total_semantic_boundary_validated += 1
+                elif result.status == "fallback":
+                    total_semantic_boundary_fallback += 1
+
+            asset_segments = apply_semantic_boundary_validation(
+                asset=asset,
+                segments=asset_segments,
+                validation_results={segment.id: segment.boundary_validation for segment in asset_segments if segment.boundary_validation is not None},
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+                max_adjustment_sec=ai_config.semantic_boundary_max_adjustment_sec,
+            )
+
+        total_semantic_boundary_skipped += sum(
+            1
+            for segment in asset_segments
+            if segment.boundary_validation is not None and segment.boundary_validation.status == "skipped"
+        )
 
         # Deduplication pass: runs after prefilter scoring and before shortlist selection
         if deduplication_enabled and len(asset_segments) > 1:
@@ -500,8 +1713,21 @@ def analyze_assets(
         candidate_segments.extend(asset_segments)
         if progress_callback is not None:
             progress_callback(asset_index, total_assets, asset)
+    per_asset_analysis_duration = time.monotonic() - per_asset_analysis_started_at
+
+    for segment in candidate_segments:
+        segment.review_state = build_segment_review_state(segment)
+
+    take_selection_started_at = time.monotonic()
+    take_recommendations = build_take_recommendations(assets, candidate_segments)
+    take_selection_duration = time.monotonic() - take_selection_started_at
+
+    timeline_assembly_started_at = time.monotonic()
+    timeline = build_timeline(take_recommendations, candidate_segments, assets)
+    timeline_assembly_duration = time.monotonic() - timeline_assembly_started_at
 
     project.analysis_summary = {
+        "asset_count": total_assets,
         "prefilter_sample_count": total_prefilter_samples,
         "candidate_segment_count": len(candidate_segments),
         "deduplicated_segment_count": total_deduplicated_segments if deduplication_enabled else 0,
@@ -514,9 +1740,18 @@ def analyze_assets(
         "audio_silent_asset_count": total_assets - total_audio_signal_assets,
         "clip_scored_count": total_clip_scored if (ai_config.clip_enabled and is_clip_available()) else 0,
         "clip_gated_count": total_clip_gated if (ai_config.clip_enabled and is_clip_available()) else 0,
+        "semantic_boundary_eligible_count": total_semantic_boundary_eligible,
+        "semantic_boundary_validated_count": total_semantic_boundary_validated,
+        "semantic_boundary_skipped_count": total_semantic_boundary_skipped,
+        "semantic_boundary_fallback_count": total_semantic_boundary_fallback,
         "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
         "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
         "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
+        "phase_timings_sec": {
+            "per_asset_analysis": round(per_asset_analysis_duration, 3),
+            "take_selection": round(take_selection_duration, 3),
+            "timeline_assembly": round(timeline_assembly_duration, 3),
+        },
     }
     ai_runtime_stats = get_ai_runtime_stats(analyzer)
     project.analysis_summary.update(
@@ -557,9 +1792,6 @@ def analyze_assets(
         )
         status_callback("═══════════════════════════════════════════════════")
 
-    take_recommendations = build_take_recommendations(assets, candidate_segments)
-    timeline = build_timeline(take_recommendations, candidate_segments, assets)
-
     return ProjectData(
         project=project,
         assets=assets,
@@ -573,32 +1805,60 @@ def build_take_recommendations(
     assets: list[Asset],
     candidate_segments: list[CandidateSegment],
 ) -> list[TakeRecommendation]:
-    asset_by_id = {asset.id: asset for asset in assets}
     takes: list[TakeRecommendation] = []
 
     for asset in assets:
         asset_segments = [segment for segment in candidate_segments if segment.asset_id == asset.id]
-        ranked_segments = sorted(
-            asset_segments,
-            key=lambda segment: score_segment(asset_by_id[segment.asset_id], segment).total,
+        if not asset_segments:
+            continue
+        ranked_segment_data = sorted(
+            ((segment, score_segment(asset, segment)) for segment in asset_segments),
+            key=lambda item: item[1].total,
             reverse=True,
         )
+        ranked_segments = [segment for segment, _breakdown in ranked_segment_data]
+        breakdown_by_segment_id = {segment.id: breakdown for segment, breakdown in ranked_segment_data}
         selected_segments = select_segments_for_asset(asset, ranked_segments)
+        selected_ids = {selected.id for selected in selected_segments}
+        winner_segment = ranked_segments[0]
+        winner_score = breakdown_by_segment_id[winner_segment.id].total
+        rank_by_segment_id = {segment.id: index for index, segment in enumerate(ranked_segments, start=1)}
 
         for index, segment in enumerate(asset_segments, start=1):
-            breakdown = score_segment(asset, segment)
-            is_best_take = segment.id in {selected.id for selected in selected_segments}
+            breakdown = breakdown_by_segment_id[segment.id]
+            is_best_take = segment.id in selected_ids
+            outcome = recommendation_outcome(segment, winner_segment, selected_ids)
+            drivers = top_score_driver_labels(asset, segment)
+            limiting_factors = (
+                []
+                if segment.id == winner_segment.id
+                else limiting_factor_labels(asset, segment, winner_segment)
+            )
             takes.append(
                 TakeRecommendation(
                     id=f"{asset.id}-take-{index:02d}",
                     candidate_segment_id=segment.id,
-                    title=make_take_title(asset, segment, breakdown.analysis_mode, is_best_take),
+                    title=make_take_title(asset, segment, breakdown.analysis_mode, outcome),
                     is_best_take=is_best_take,
-                    selection_reason=make_selection_reason(asset, segment, breakdown.total, is_best_take),
+                    selection_reason=make_selection_reason(
+                        asset=asset,
+                        segment=segment,
+                        total_score=breakdown.total,
+                        outcome=outcome,
+                        winner_score=winner_score,
+                        within_asset_rank=rank_by_segment_id[segment.id],
+                        driver_labels=drivers,
+                        limiting_labels=limiting_factors,
+                    ),
                     score_technical=breakdown.technical,
                     score_semantic=breakdown.semantic,
                     score_story=breakdown.story,
                     score_total=breakdown.total,
+                    outcome=outcome,
+                    within_asset_rank=rank_by_segment_id[segment.id],
+                    score_gap_to_winner=round(max(0.0, winner_score - breakdown.total), 4),
+                    score_driver_labels=drivers,
+                    limiting_factor_labels=limiting_factors,
                 )
             )
 
@@ -764,31 +2024,232 @@ def visual_role(metrics: dict[str, float]) -> str:
     return "transition-ready"
 
 
-def make_take_title(asset: Asset, segment: CandidateSegment, analysis_mode: str, is_best_take: bool) -> str:
-    title_prefix = "Best" if is_best_take else "Candidate"
+def make_take_title(asset: Asset, segment: CandidateSegment, analysis_mode: str, outcome: str) -> str:
+    title_prefix = "Best" if outcome == "best" else "Alternate" if outcome == "alternate" else "Candidate"
     role = "Dialogue" if analysis_mode == "speech" else "Visual"
     return f"{title_prefix} {role}: {asset.name}"
 
 
+def recommendation_outcome(
+    segment: CandidateSegment,
+    winner_segment: CandidateSegment,
+    selected_ids: set[str],
+) -> str:
+    if segment.id == winner_segment.id:
+        return "best"
+    if segment.id in selected_ids:
+        return "alternate"
+    return "backup"
+
+
 def make_selection_reason(
+    *,
     asset: Asset,
     segment: CandidateSegment,
     total_score: float,
-    is_best_take: bool,
+    outcome: str,
+    winner_score: float,
+    within_asset_rank: int,
+    driver_labels: list[str],
+    limiting_labels: list[str],
 ) -> str:
-    if is_best_take and segment.analysis_mode == "speech":
+    score = round(total_score * 100)
+    score_gap = round(max(0.0, (winner_score - total_score) * 100))
+    drivers = human_join(driver_labels[:3])
+    limiting = human_join(limiting_labels[:2])
+
+    if outcome == "best":
+        return f"Won this clip at {score}/100 on {drivers}."
+
+    if outcome == "alternate":
         return (
-            f"Selected because {asset.name} contributes a spoken narrative beat with a {round(total_score * 100):d}/100 composite score."
+            f"Kept as an alternate {score_gap} point{'s' if score_gap != 1 else ''} behind the winner "
+            f"because it still cleared the selection gap on {drivers}."
         )
 
-    if is_best_take:
+    if total_score < TAKE_SELECTION_MIN_SCORE:
         return (
-            f"Selected because {asset.name} works as silent b-roll with strong visual novelty and pacing at {round(total_score * 100):d}/100."
+            f"Usable, but below the {round(TAKE_SELECTION_MIN_SCORE * 100):d}/100 selection threshold. "
+            f"Strongest factors were {drivers}."
+        )
+
+    if asset.duration_sec >= 18 and total_score < winner_score - TAKE_SELECTION_ALT_GAP:
+        return (
+            f"Usable, but {score_gap} points behind the winner and outside the alternate gap, "
+            f"mainly on {limiting or drivers}."
         )
 
     return (
-        f"Kept as a backup candidate; the segment is usable but less distinctive for the story than the higher-ranked alternative in this clip."
+        f"Usable, but ranked #{within_asset_rank} behind the selected take for this clip, "
+        f"mainly on {limiting or drivers}."
     )
+
+
+def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
+    prefilter = segment.prefilter
+    evidence = segment.evidence_bundle
+    understanding = segment.ai_understanding
+    boundary_validation = segment.boundary_validation
+    clip_score = None
+    if prefilter is not None:
+        clip_score = prefilter.metrics_snapshot.get("clip_score")
+
+    model_analyzed = bool(understanding and understanding.provider != "deterministic")
+    deterministic_fallback = bool(understanding and understanding.provider == "deterministic")
+    evidence_keyframe_count = len(evidence.keyframe_timestamps_sec) if evidence is not None else 0
+    blocked_reason = review_blocked_reason(segment)
+
+    return SegmentReviewState(
+        shortlisted=bool(prefilter and prefilter.shortlisted),
+        filtered_before_vlm=bool(prefilter and prefilter.filtered_before_vlm),
+        clip_scored=clip_score is not None,
+        clip_score=round(clip_score, 4) if clip_score is not None else None,
+        clip_gated=bool(prefilter and prefilter.clip_gated),
+        deduplicated=bool(prefilter and prefilter.deduplicated),
+        dedup_group_id=prefilter.dedup_group_id if prefilter is not None else None,
+        vlm_budget_capped=bool(prefilter and prefilter.vlm_budget_capped),
+        model_analyzed=model_analyzed,
+        deterministic_fallback=deterministic_fallback,
+        evidence_keyframe_count=evidence_keyframe_count,
+        analysis_path_summary=describe_analysis_path(segment, evidence_keyframe_count),
+        blocked_reason=blocked_reason,
+        boundary_strategy_label=boundary_strategy_label(segment),
+        boundary_confidence=round(prefilter.boundary_confidence, 4) if prefilter is not None else None,
+        lineage_summary=lineage_summary(segment),
+        semantic_validation_status=boundary_validation.status if boundary_validation is not None else "",
+        semantic_validation_summary=semantic_validation_summary(segment),
+    )
+
+
+def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: int) -> str:
+    prefilter = segment.prefilter
+    understanding = segment.ai_understanding
+    boundary_validation = segment.boundary_validation
+    steps: list[str] = []
+
+    if prefilter and prefilter.shortlisted:
+        steps.append("shortlisted")
+    else:
+        steps.append("screened locally only")
+
+    clip_score = prefilter.metrics_snapshot.get("clip_score") if prefilter is not None else None
+    if clip_score is not None:
+        steps.append(f"CLIP {round(clip_score * 100):d}")
+    if prefilter and prefilter.deduplicated:
+        steps.append(f"deduped in group {prefilter.dedup_group_id}")
+    if prefilter and prefilter.assembly_operation != "none":
+        rule_label = prefilter.assembly_rule_family or prefilter.assembly_operation
+        steps.append(f"{prefilter.assembly_operation} via {rule_label}")
+    if prefilter and prefilter.clip_gated:
+        steps.append("CLIP gated")
+    if prefilter and prefilter.vlm_budget_capped:
+        steps.append("budget capped")
+    if boundary_validation is not None:
+        if boundary_validation.status == "validated":
+            steps.append(f"boundary {boundary_validation.decision}")
+        elif boundary_validation.status == "fallback":
+            steps.append("boundary fallback")
+        elif boundary_validation.status == "skipped":
+            steps.append(f"boundary skipped ({boundary_validation.skip_reason})")
+    if evidence_keyframe_count > 0:
+        steps.append(f"{evidence_keyframe_count} keyframe{'s' if evidence_keyframe_count != 1 else ''}")
+
+    if understanding is not None:
+        if understanding.provider == "deterministic":
+            steps.append("deterministic fallback")
+        else:
+            steps.append(f"VLM {understanding.provider}")
+
+    return " -> ".join(steps)
+
+
+def review_blocked_reason(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    if prefilter.deduplicated:
+        return "duplicate"
+    if prefilter.clip_gated:
+        return "clip_gate"
+    if prefilter.vlm_budget_capped:
+        return "budget_cap"
+    if prefilter.filtered_before_vlm:
+        return "shortlist_filter"
+    return ""
+
+
+def boundary_strategy_label(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    strategy = prefilter.boundary_strategy
+    labels = {
+        "legacy": "Legacy window",
+        "transcript-snap": "Transcript snapped",
+        "audio-snap": "Audio snapped",
+        "scene-snap": "Scene snapped",
+        "scene-duration": "Scene duration rule",
+        "duration-rule": "Duration rule",
+    }
+    if strategy in labels:
+        return labels[strategy]
+    if strategy.startswith("assembly-merge:"):
+        rule = strategy.split(":", 1)[1].replace("-", " ")
+        return f"Assembly merged ({rule})"
+    if strategy.startswith("assembly-split:"):
+        rule = strategy.split(":", 1)[1].replace("-", " ")
+        return f"Assembly split ({rule})"
+    return strategy.replace("-", " ").title()
+
+
+def lineage_summary(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    if prefilter.assembly_operation == "merge" and prefilter.assembly_source_segment_ids:
+        count = len(prefilter.assembly_source_segment_ids)
+        rule = prefilter.assembly_rule_family.replace("-", " ") if prefilter.assembly_rule_family else "continuity"
+        return f"Merged {count} refined regions via {rule}."
+    if prefilter.assembly_operation == "split" and prefilter.assembly_source_segment_ids:
+        source_id = prefilter.assembly_source_segment_ids[0]
+        rule = prefilter.assembly_rule_family.replace("-", " ") if prefilter.assembly_rule_family else "internal divider"
+        return f"Split from {source_id} via {rule}."
+    if prefilter.seed_region_ids:
+        count = len(prefilter.seed_region_ids)
+        sources = human_join([value.replace("-", " ") for value in prefilter.seed_region_sources[:3]])
+        return f"Built from {count} seed region{'s' if count != 1 else ''} ({sources})."
+    return ""
+
+
+def semantic_validation_summary(segment: CandidateSegment) -> str:
+    validation = segment.boundary_validation
+    if validation is None:
+        return ""
+    if validation.status == "validated":
+        if validation.decision == "keep":
+            return f"Semantic validation kept the deterministic boundary at {round(validation.confidence * 100):d}% confidence."
+        if validation.decision == "split":
+            return f"Semantic validation split the segment because {validation.reason.lower()}"
+        return f"Semantic validation suggested {validation.decision} because {validation.reason.lower()}"
+    if validation.status == "fallback":
+        return "Semantic validation fell back to deterministic output."
+    if validation.status == "skipped":
+        reason = validation.skip_reason.replace("_", " ") if validation.skip_reason else "not run"
+        return f"Semantic validation skipped: {reason}."
+    if validation.status == "not_eligible":
+        return validation.reason
+    return ""
+
+
+def human_join(items: list[str]) -> str:
+    values = [item for item in items if item]
+    if not values:
+        return "overall balance"
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
 def select_segments_for_asset(asset: Asset, segments: list[CandidateSegment]) -> list[CandidateSegment]:
@@ -799,9 +2260,9 @@ def select_segments_for_asset(asset: Asset, segments: list[CandidateSegment]) ->
     primary_score = score_segment(asset, segments[0]).total
     for segment in segments:
         breakdown = score_segment(asset, segment)
-        if breakdown.total < 0.68:
+        if breakdown.total < TAKE_SELECTION_MIN_SCORE:
             continue
-        if selected and breakdown.total < primary_score - 0.08:
+        if selected and breakdown.total < primary_score - TAKE_SELECTION_ALT_GAP:
             continue
         selected.append(segment)
         if len(selected) >= (2 if asset.duration_sec >= 18 else 1):

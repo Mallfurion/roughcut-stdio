@@ -67,6 +67,27 @@ class FCPXMLExportTests(unittest.TestCase):
 
         self.assertAlmostEqual(clip_summaries[0].start_sec, (15 * 3600) + (22 * 60) + 18 + 1.5)
 
+    def test_export_is_unchanged_when_review_provenance_is_present(self) -> None:
+        project = load_project(FIXTURE)
+        baseline_xml = export_fcpxml(project)
+        baseline_summaries = parse_fcpxml_timeline(baseline_xml)
+
+        first_segment = project.candidate_segments[0]
+        if first_segment.review_state is not None:
+            first_segment.review_state.boundary_strategy_label = "Transcript snapped"
+            first_segment.review_state.boundary_confidence = 0.87
+            first_segment.review_state.lineage_summary = "Built from 1 seed region (transcript)."
+            first_segment.review_state.semantic_validation_status = "validated"
+            first_segment.review_state.semantic_validation_summary = "Semantic validation kept the deterministic boundary at 87% confidence."
+
+        xml_with_provenance = export_fcpxml(project)
+        summaries_with_provenance = parse_fcpxml_timeline(xml_with_provenance)
+
+        self.assertEqual(
+            [(clip.name, clip.asset_uid, round(clip.offset_sec, 3), round(clip.start_sec, 3), round(clip.duration_sec, 3)) for clip in baseline_summaries],
+            [(clip.name, clip.asset_uid, round(clip.offset_sec, 3), round(clip.start_sec, 3), round(clip.duration_sec, 3)) for clip in summaries_with_provenance],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

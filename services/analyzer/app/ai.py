@@ -17,7 +17,7 @@ import subprocess
 from typing import Any, Protocol
 from urllib import error, request
 
-from .domain import Asset, CandidateSegment, SegmentEvidence, SegmentUnderstanding
+from .domain import Asset, BoundaryValidationResult, CandidateSegment, SegmentEvidence, SegmentUnderstanding
 
 
 SCHEMA_VERSION = "segment-understanding-v1"
@@ -117,6 +117,13 @@ class AIAnalysisConfig:
     vlm_budget_pct: int = 100
     clip_model: str = "ViT-B-32"
     clip_model_pretrained: str = "laion2b_s34b_b79k"
+    boundary_refinement_enabled: bool = False
+    boundary_refinement_legacy_fallback: bool = True
+    semantic_boundary_validation_enabled: bool = False
+    semantic_boundary_ambiguity_threshold: float = 0.7
+    semantic_boundary_validation_budget_pct: int = 100
+    semantic_boundary_validation_max_segments: int = 2
+    semantic_boundary_max_adjustment_sec: float = 1.5
 
 
 @dataclass(slots=True)
@@ -942,6 +949,21 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     max_segments_default = 1 if mode == "fast" else 99
     max_keyframes_default = 1 if mode == "fast" else 4
     max_width_default = 448 if mode == "fast" else 960
+    boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", False)
+    boundary_refinement_legacy_fallback = parse_bool_env("TIMELINE_SEGMENT_LEGACY_FALLBACK", True)
+    semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", False)
+    semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.7)
+    semantic_boundary_ambiguity_threshold = max(0.0, min(1.0, semantic_boundary_ambiguity_threshold))
+    semantic_boundary_validation_budget_pct = parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT", 100)
+    semantic_boundary_validation_budget_pct = max(0, min(100, semantic_boundary_validation_budget_pct))
+    semantic_boundary_validation_max_segments = max(
+        0,
+        parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS", 2),
+    )
+    semantic_boundary_max_adjustment_sec = max(
+        0.25,
+        parse_float_env("TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC", 1.5),
+    )
 
     # CLIP configuration
     clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.35").strip()
@@ -966,6 +988,13 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
         vlm_budget_pct=vlm_budget_pct,
         clip_model=os.environ.get("TIMELINE_AI_CLIP_MODEL", "ViT-B-32").strip() or "ViT-B-32",
         clip_model_pretrained=os.environ.get("TIMELINE_AI_CLIP_MODEL_PRETRAINED", "laion2b_s34b_b79k").strip() or "laion2b_s34b_b79k",
+        boundary_refinement_enabled=boundary_refinement_enabled,
+        boundary_refinement_legacy_fallback=boundary_refinement_legacy_fallback,
+        semantic_boundary_validation_enabled=semantic_boundary_validation_enabled,
+        semantic_boundary_ambiguity_threshold=semantic_boundary_ambiguity_threshold,
+        semantic_boundary_validation_budget_pct=semantic_boundary_validation_budget_pct,
+        semantic_boundary_validation_max_segments=semantic_boundary_validation_max_segments,
+        semantic_boundary_max_adjustment_sec=semantic_boundary_max_adjustment_sec,
     )
 
 
@@ -1486,6 +1515,136 @@ def local_vlm_segment_understanding_prompt(
         f"Transcript: {transcript}\n"
         f"Metrics: {metrics}\n"
         "Focus on whether the segment has a clear subject, usable motion, readable composition, and editorial usefulness."
+    )
+
+
+def boundary_validation_system_prompt() -> str:
+    return (
+        "You validate whether a short video segment starts and ends at a complete editorial beat. "
+        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
+        "Keys required: decision, reason, confidence, suggested_start_sec, suggested_end_sec, split_point_sec. "
+        "decision must be one of: keep, extend, trim, split. "
+        "reason must be one short sentence. confidence must be a number from 0 to 1. "
+        "Use null for split_point_sec unless decision is split. "
+        "When decision is keep, suggested_start_sec and suggested_end_sec should match the current segment bounds."
+    )
+
+
+def boundary_validation_user_prompt(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> str:
+    metrics = ", ".join(
+        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
+    )
+    transcript = evidence.transcript_excerpt or "No transcript excerpt available."
+    boundary_strategy = segment.prefilter.boundary_strategy if segment.prefilter is not None else "unknown"
+    assembly = (
+        f"{segment.prefilter.assembly_operation}:{segment.prefilter.assembly_rule_family}"
+        if segment.prefilter is not None and segment.prefilter.assembly_operation != "none"
+        else "none"
+    )
+    return (
+        "Project story prompt:\n"
+        f"{story_prompt}\n\n"
+        "Segment metadata:\n"
+        f"- Asset: {asset.name}\n"
+        f"- Reel: {asset.interchange_reel_name}\n"
+        f"- Analysis mode: {segment.analysis_mode}\n"
+        f"- Segment: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
+        f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
+        f"- Boundary strategy: {boundary_strategy}\n"
+        f"- Assembly lineage: {assembly}\n"
+        f"- Transcript: {transcript}\n"
+        f"- Metrics: {metrics}\n\n"
+        "Decide whether the current segment is complete as-is, needs a small extend or trim, "
+        "or contains two ideas that should be split once. Keep adjustments local to the current bounds."
+    )
+
+
+def local_vlm_boundary_validation_prompt(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> str:
+    return (
+        "Analyze this stitched contact sheet and decide whether the segment boundaries feel complete. "
+        "Return exactly one compact JSON object only with keys: "
+        "decision, reason, confidence, suggested_start_sec, suggested_end_sec, split_point_sec. "
+        "decision must be keep, extend, trim, or split. "
+        "confidence must be a number between 0 and 1. reason must be one short sentence. "
+        "If the segment is already complete, use decision keep and repeat the current start and end. "
+        "Only suggest nearby changes.\n\n"
+        f"Project story prompt: {story_prompt}\n"
+        f"Asset: {asset.name}\n"
+        f"Reel: {asset.interchange_reel_name}\n"
+        f"Analysis mode: {segment.analysis_mode}\n"
+        f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
+        f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
+        f"Transcript: {evidence.transcript_excerpt or 'No transcript excerpt available.'}\n"
+        "Focus on whether the moment starts too late, ends too early, or bundles two separate beats."
+    )
+
+
+def normalize_boundary_validation_output(
+    payload: dict[str, object],
+    *,
+    provider: str,
+    model: str,
+    segment: CandidateSegment,
+) -> BoundaryValidationResult:
+    decision_raw = str(payload.get("decision", "keep")).strip().lower()
+    decision = decision_raw if decision_raw in {"keep", "extend", "trim", "split"} else "keep"
+    reason = string_or_default(payload.get("reason"), "Semantic validation kept the deterministic boundary.")
+    confidence = rounded_metric(number_or_default(payload.get("confidence"), 0.0))
+    suggested_start_sec = round(float(number_or_default(payload.get("suggested_start_sec"), segment.start_sec)), 3)
+    suggested_end_sec = round(float(number_or_default(payload.get("suggested_end_sec"), segment.end_sec)), 3)
+    split_point_sec = payload.get("split_point_sec")
+    split_ranges_sec: list[list[float]] = []
+    if decision == "split":
+        split_point = number_or_default(split_point_sec, (segment.start_sec + segment.end_sec) / 2.0)
+        split_ranges_sec = [
+            [round(segment.start_sec, 3), round(split_point, 3)],
+            [round(split_point, 3), round(segment.end_sec, 3)],
+        ]
+
+    return BoundaryValidationResult(
+        status="validated",
+        decision=decision,
+        reason=reason,
+        confidence=confidence,
+        provider=provider,
+        provider_model=model,
+        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        suggested_range_sec=[round(suggested_start_sec, 3), round(suggested_end_sec, 3)],
+        split_ranges_sec=split_ranges_sec,
+    )
+
+
+def boundary_validation_fallback_result(
+    *,
+    segment: CandidateSegment,
+    detail: str,
+    provider: str = "deterministic",
+    model: str = "fallback-v1",
+    skip_reason: str = "request_failed",
+) -> BoundaryValidationResult:
+    return BoundaryValidationResult(
+        status="fallback",
+        decision="keep",
+        reason=f"Semantic boundary validation fell back to deterministic output: {detail}",
+        confidence=0.0,
+        provider=provider,
+        provider_model=model,
+        skip_reason=skip_reason,
+        applied=False,
+        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
     )
 
 
@@ -2068,6 +2227,124 @@ def analyze_asset_segments(
     )
 
 
+def validate_segment_boundaries(
+    *,
+    analyzer: VisionLanguageAnalyzer,
+    asset: Asset,
+    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
+    concurrency: int,
+) -> dict[str, BoundaryValidationResult]:
+    if not tasks:
+        return {}
+    expanded = [(asset, segment, evidence, story_prompt) for segment, evidence, story_prompt in tasks]
+    if concurrency <= 1 or len(expanded) == 1:
+        return {
+            segment.id: validate_single_segment_boundary(
+                analyzer=analyzer,
+                asset=asset_item,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            )
+            for asset_item, segment, evidence, story_prompt in expanded
+        }
+
+    results: dict[str, BoundaryValidationResult] = {}
+    with ThreadPoolExecutor(max_workers=min(concurrency, len(expanded))) as executor:
+        future_map = {
+            executor.submit(
+                validate_single_segment_boundary,
+                analyzer=analyzer,
+                asset=asset_item,
+                segment=segment,
+                evidence=evidence,
+                story_prompt=story_prompt,
+            ): segment.id
+            for asset_item, segment, evidence, story_prompt in expanded
+        }
+        for future in as_completed(future_map):
+            results[future_map[future]] = future.result()
+    return results
+
+
+def validate_single_segment_boundary(
+    *,
+    analyzer: VisionLanguageAnalyzer,
+    asset: Asset,
+    segment: CandidateSegment,
+    evidence: SegmentEvidence,
+    story_prompt: str,
+) -> BoundaryValidationResult:
+    if isinstance(analyzer, LMStudioVisionLanguageAnalyzer):
+        try:
+            image_path = batch_image_path_for_evidence(evidence)
+            payload = analyzer.client.create_json_completion(
+                model=analyzer.config.model,
+                system_prompt=boundary_validation_system_prompt(),
+                user_prompt=boundary_validation_user_prompt(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=story_prompt,
+                ),
+                image_paths=[image_path] if image_path else evidence.keyframe_paths,
+                timeout_sec=analyzer.config.timeout_sec,
+            )
+            return normalize_boundary_validation_output(
+                payload,
+                provider="lmstudio",
+                model=analyzer.config.model,
+                segment=segment,
+            )
+        except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            analyzer.last_error_detail = str(exc)
+            return boundary_validation_fallback_result(segment=segment, detail=str(exc), skip_reason="request_failed")
+
+    if isinstance(analyzer, MLXVLMVisionLanguageAnalyzer):
+        image_path = batch_image_path_for_evidence(evidence)
+        if not image_path:
+            return boundary_validation_fallback_result(
+                segment=segment,
+                detail="No image evidence was available for semantic boundary validation.",
+                skip_reason="no_evidence",
+            )
+        try:
+            raw = analyzer.runtime.query_image(
+                image_path=image_path,
+                prompt=local_vlm_boundary_validation_prompt(
+                    asset=asset,
+                    segment=segment,
+                    evidence=evidence,
+                    story_prompt=story_prompt,
+                ),
+            )
+            payload = parse_json_object(raw)
+            if payload is None:
+                raise AIProviderRequestError("MLX-VLM local response did not contain valid JSON.")
+            return normalize_boundary_validation_output(
+                payload,
+                provider="mlx-vlm-local",
+                model=analyzer.config.model,
+                segment=segment,
+            )
+        except (AIProviderRequestError, OSError, ValueError, RuntimeError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
+            analyzer.last_error_detail = str(exc)
+            return boundary_validation_fallback_result(segment=segment, detail=str(exc), skip_reason="request_failed")
+
+    return BoundaryValidationResult(
+        status="skipped",
+        decision="keep",
+        reason="Semantic boundary validation is unavailable for the active analyzer.",
+        confidence=0.0,
+        provider="deterministic",
+        provider_model="fallback-v1",
+        skip_reason="ai_unavailable",
+        applied=False,
+        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+    )
+
+
 def get_ai_runtime_stats(analyzer: VisionLanguageAnalyzer) -> AIRuntimeStats:
     runtime_method = getattr(analyzer, "runtime_stats", None)
     if callable(runtime_method):
@@ -2138,5 +2415,15 @@ def parse_int_env(key: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def parse_float_env(key: str, default: float) -> float:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default

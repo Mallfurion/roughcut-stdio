@@ -35,6 +35,12 @@ context: |
   - OpenSpec is the canonical place for implemented baseline behavior and planned changes.
   - docs/manifesto.md contains the product manifesto and direction.
   - docs/research.md contains tooling research, assumptions, and open questions that are not yet represented as OpenSpec artifacts.
+  - Change chaining metadata lives in each `openspec/changes/<name>/.openspec.yaml` under `x-roughcut`.
+  - `x-roughcut.depends_on` is the canonical dependency list for chaining related changes.
+  - `blocks` is derived from other changes' `depends_on` values and must not be hand-maintained.
+  - Use `x-roughcut.kind=umbrella` for parent roadmap changes and `x-roughcut.kind=implementation` for implementation-ready changes.
+  - Use `x-roughcut.parent` to attach implementation changes to an umbrella change when relevant.
+  - Use `x-roughcut.phase` to describe intended rollout order within a parent chain.
 
 rules:
   proposal:
@@ -42,12 +48,14 @@ rules:
     - State clearly whether the change is documenting shipped behavior or proposing new behavior.
     - Name capabilities by workflow boundary, not by implementation detail.
     - Prefer concise impact lists that mention the affected systems, generated artifacts, and user-visible workflow changes.
+    - When a change is part of a larger sequence, preserve the `x-roughcut` chaining metadata in `.openspec.yaml` and mention the parent/phase relationship in the proposal when it affects scope.
 
   design:
     - Preserve the local-first workflow unless the change explicitly redefines the user interaction model.
     - Call out local-first, Resolve compatibility, deterministic fallback, and silent-footage support when they are relevant.
     - Distinguish editorial intelligence from deterministic guardrails; do not move path integrity, timecode safety, or export correctness into model-only behavior.
     - Explain runtime-cost tradeoffs whenever a design adds AI inference, batching, caching, or concurrency changes.
+    - Respect `x-roughcut.depends_on` ordering when describing rollout or migration plans for chained changes.
 
   specs:
     - Write normative behavior that matches either the shipped system or the exact requested change, not aspirational roadmap language.
@@ -61,3 +69,4 @@ rules:
     - Include verification tasks for the relevant repository commands such as npm run process, npm run view, npm run export, npm run build:desktop, and python3 -m unittest discover services/analyzer/tests -v.
     - Include documentation updates when a change alters the user workflow, environment variables, generated artifacts, or AI/runtime behavior.
     - Keep tasks concrete and implementation-ready; each checkbox should describe something that can be completed and verified in one session.
+    - For chained changes, keep tasks scoped to the current change and do not absorb work that belongs to dependencies listed in `x-roughcut.depends_on`.

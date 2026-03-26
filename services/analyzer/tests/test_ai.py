@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,17 +9,23 @@ from unittest.mock import patch
 
 from services.analyzer.app.ai import (
     AIProviderConfig,
+    AIProviderRequestError,
     DeterministicVisionLanguageAnalyzer,
     LMStudioVisionLanguageAnalyzer,
     MLXVLMRuntime,
     MLXVLMVisionLanguageAnalyzer,
+    boundary_validation_system_prompt,
+    boundary_validation_user_prompt,
     build_segment_evidence,
     encode_image_as_data_url,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
+    load_ai_analysis_config,
     model_matches,
+    normalize_boundary_validation_output,
     normalize_model_output,
     resolve_mlx_device,
+    validate_single_segment_boundary,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment
 
@@ -211,6 +218,86 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertNotIn("short label", understanding.subjects)
         self.assertNotIn("item1", understanding.actions)
         self.assertIn(understanding.keep_label, {"keep", "maybe", "reject"})
+
+    def test_boundary_validation_prompt_and_parser_are_structured(self) -> None:
+        asset = Asset(
+            id="asset-boundary",
+            name="Interview",
+            source_path="/tmp/interview.mov",
+            proxy_path="/tmp/interview.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C900",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=5.0,
+            analysis_mode="speech",
+            transcript_excerpt="We start with the answer.",
+            description="Interview beat.",
+            quality_metrics={"story_alignment": 0.81},
+        )
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segment,
+            asset_segments=[segment],
+            segment_index=0,
+            story_prompt="Build a concise answer-led cut.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+
+        system_prompt = boundary_validation_system_prompt()
+        user_prompt = boundary_validation_user_prompt(
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=evidence.story_prompt,
+        )
+        result = normalize_boundary_validation_output(
+            {
+                "decision": "trim",
+                "reason": "The beat starts a little too early.",
+                "confidence": 0.74,
+                "suggested_start_sec": 1.4,
+                "suggested_end_sec": 4.8,
+                "split_point_sec": None,
+            },
+            provider="lmstudio",
+            model="qwen3.5-9b",
+            segment=segment,
+        )
+
+        self.assertIn("decision", system_prompt)
+        self.assertIn("Boundary strategy", user_prompt)
+        self.assertEqual(result.status, "validated")
+        self.assertEqual(result.decision, "trim")
+        self.assertEqual(result.suggested_range_sec, [1.4, 4.8])
+
+    def test_load_ai_analysis_config_reads_semantic_boundary_fields(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD": "0.82",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT": "40",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS": "3",
+                "TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC": "1.8",
+            },
+            clear=False,
+        ):
+            config = load_ai_analysis_config()
+
+        self.assertTrue(config.semantic_boundary_validation_enabled)
+        self.assertEqual(config.semantic_boundary_ambiguity_threshold, 0.82)
+        self.assertEqual(config.semantic_boundary_validation_budget_pct, 40)
+        self.assertEqual(config.semantic_boundary_validation_max_segments, 3)
+        self.assertEqual(config.semantic_boundary_max_adjustment_sec, 1.8)
 
     def test_provider_status_defaults_to_deterministic(self) -> None:
         status = inspect_ai_provider_status(
@@ -531,6 +618,64 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(stats.cached_segment_count, 0)
         self.assertEqual(stats.fallback_segment_count, 0)
         self.assertEqual(stats.live_request_count, 1)
+
+    def test_validate_single_segment_boundary_falls_back_on_lmstudio_error(self) -> None:
+        class FailingClient:
+            def create_json_completion(self, *, model: str, system_prompt: str, user_prompt: str, image_paths, timeout_sec: float):
+                raise AIProviderRequestError("boom")
+
+        asset = Asset(
+            id="asset-boundary-fallback",
+            name="Boundary Fallback",
+            source_path="/tmp/boundary.mov",
+            proxy_path="/tmp/boundary.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C901",
+        )
+        segment = CandidateSegment(
+            id="segment-boundary-fallback",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=4.0,
+            analysis_mode="speech",
+            transcript_excerpt="Start here.",
+            description="Boundary fallback.",
+            quality_metrics={"story_alignment": 0.77},
+        )
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segment,
+            asset_segments=[segment],
+            segment_index=0,
+            story_prompt="Build a rough cut.",
+            artifacts_root=None,
+            extract_keyframes=False,
+        )
+        analyzer = LMStudioVisionLanguageAnalyzer(
+            config=AIProviderConfig(
+                provider="lmstudio",
+                model="qwen3.5-9b",
+                base_url="http://127.0.0.1:1234/v1",
+                timeout_sec=30.0,
+            ),
+            client=FailingClient(),
+        )
+
+        result = validate_single_segment_boundary(
+            analyzer=analyzer,
+            asset=asset,
+            segment=segment,
+            evidence=evidence,
+            story_prompt=evidence.story_prompt,
+        )
+
+        self.assertEqual(result.status, "fallback")
+        self.assertEqual(result.decision, "keep")
+        self.assertEqual(result.skip_reason, "request_failed")
 
     def test_mlx_vlm_local_analyzer_uses_runtime_and_cache(self) -> None:
         class FakeRuntime:

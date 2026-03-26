@@ -79,7 +79,7 @@ This checks that all required dependencies are available and working.
 npm run view
 ```
 
-This launches the desktop app in development mode.
+This launches the Tauri desktop app in development mode.
 
 ---
 
@@ -144,7 +144,7 @@ Once setup completes:
 1. Open the desktop app: `npm run view`
 2. Click "Choose Media Folder" and select a directory with video files
 3. Click "Process" and wait for analysis to complete
-4. Review the shortlisted segments in the timeline
+4. Review the recommended segments, provenance, and generated timeline
 5. Click "Export" to save a DaVinci Resolve timeline
 
 For detailed configuration options, see [docs/configuration.md](configuration.md).

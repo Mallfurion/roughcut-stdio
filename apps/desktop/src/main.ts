@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
+import { buildSegmentReviewModel } from "./review-model.ts";
 import "./styles.css";
 
 type Step = "choose" | "process" | "results";
@@ -44,6 +45,7 @@ type SegmentEvidence = {
   keyframe_timestamps_sec: number[];
   context_window_start_sec: number;
   context_window_end_sec: number;
+  contact_sheet_path?: string;
 };
 
 type SegmentPrefilter = {
@@ -71,6 +73,27 @@ type SegmentUnderstanding = {
   risk_flags: string[];
 };
 
+type SegmentReviewState = {
+  shortlisted: boolean;
+  filtered_before_vlm: boolean;
+  clip_scored: boolean;
+  clip_score?: number | null;
+  clip_gated?: boolean;
+  deduplicated?: boolean;
+  dedup_group_id?: number | null;
+  vlm_budget_capped?: boolean;
+  model_analyzed?: boolean;
+  deterministic_fallback?: boolean;
+  evidence_keyframe_count?: number;
+  analysis_path_summary?: string;
+  blocked_reason?: string;
+  boundary_strategy_label?: string;
+  boundary_confidence?: number | null;
+  lineage_summary?: string;
+  semantic_validation_status?: string;
+  semantic_validation_summary?: string;
+};
+
 type Asset = {
   id: string;
   name: string;
@@ -92,6 +115,7 @@ type CandidateSegment = {
   evidence_bundle?: SegmentEvidence;
   prefilter?: SegmentPrefilter;
   ai_understanding?: SegmentUnderstanding;
+  review_state?: SegmentReviewState;
 };
 
 type TakeRecommendation = {
@@ -100,7 +124,15 @@ type TakeRecommendation = {
   title: string;
   is_best_take: boolean;
   selection_reason: string;
+  score_technical?: number;
+  score_semantic?: number;
+  score_story?: number;
   score_total: number;
+  outcome?: string;
+  within_asset_rank?: number;
+  score_gap_to_winner?: number;
+  score_driver_labels?: string[];
+  limiting_factor_labels?: string[];
 };
 
 type TimelineItem = {
@@ -251,6 +283,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Missing app root");
 }
+const appRoot = app;
 
 render();
 void bootstrap();
@@ -473,7 +506,7 @@ function goToResultsStep() {
 }
 
 function render() {
-  app.innerHTML = `
+  appRoot.innerHTML = `
     <main class="shell">
       <section class="stepper card">
         <div class="stepper-layout">
@@ -1150,17 +1183,26 @@ function bindTextSetting(id: string, apply: (value: string) => void) {
 }
 
 function resolveClipViews(project: TimelineProject) {
+  const takeBySegmentId = new Map(
+    project.take_recommendations.map((take) => [take.candidate_segment_id, take]),
+  );
   return project.assets
     .map((asset) => ({
       asset,
-      segments: project.candidate_segments.filter((segment) => segment.asset_id === asset.id).sort((left, right) => left.start_sec - right.start_sec)
+      segments: project.candidate_segments
+        .filter((segment) => segment.asset_id === asset.id)
+        .sort((left, right) => left.start_sec - right.start_sec)
+        .map((segment) => ({
+          segment,
+          recommendation: takeBySegmentId.get(segment.id),
+        })),
     }))
     .filter((view) => view.segments.length > 0);
 }
 
-function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
+function renderClipCard(view: { asset: Asset; segments: { segment: CandidateSegment; recommendation?: TakeRecommendation }[] }) {
   const expanded = appState.expandedClipIds.includes(view.asset.id);
-  const dedupCount = view.segments.filter((s) => s.prefilter?.deduplicated).length;
+  const dedupCount = view.segments.filter(({ segment }) => segment.prefilter?.deduplicated).length;
   const activCount = view.segments.length - dedupCount;
 
   return `
@@ -1182,7 +1224,7 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
         expanded
           ? `
       <div class="section-list">
-        ${view.segments.map(renderSegmentCard).join("")}
+        ${view.segments.map((segmentView) => renderSegmentCard(segmentView, view.asset)).join("")}
       </div>`
           : ""
       }
@@ -1190,44 +1232,120 @@ function renderClipCard(view: { asset: Asset; segments: CandidateSegment[] }) {
   `;
 }
 
-function renderSegmentCard(segment: CandidateSegment) {
+function renderSegmentCard(
+  view: { segment: CandidateSegment; recommendation?: TakeRecommendation },
+  asset: Asset,
+) {
+  const { segment, recommendation } = view;
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
   const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
-  const clipGated = segment.prefilter?.clip_gated ?? false;
-  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
   const vlmText = ai?.summary || segment.description;
-  const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
   const isDeduplicated = segment.prefilter?.deduplicated ?? false;
   const dedupGroupId = segment.prefilter?.dedup_group_id;
+  const review = buildSegmentReviewModel(segment, recommendation);
+  const evidence = segment.evidence_bundle;
+  const blockedBadge = resolveBlockedBadge(segment);
+  const providerLabel = formatProviderLabel(ai?.provider);
+  const imageSrc = resolveSegmentImageSrc(evidence);
+  const provenanceFacts = [
+    review.provenance.boundaryLabel
+      ? `${review.provenance.boundaryLabel}${review.provenance.boundaryConfidence ? ` · ${review.provenance.boundaryConfidence}` : ""}`
+      : "",
+    review.provenance.semanticBadge,
+    review.provenance.lineageSummary,
+    review.provenance.semanticSummary,
+  ].filter(Boolean);
+  const sourceFacts = [
+    `Source ${asset.interchange_reel_name}`,
+    asset.source_path,
+  ].filter(Boolean);
+  const quietFacts = [
+    score > 0 ? `Prefilter ${formatScore(score)}` : "",
+    clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
+    evidence ? `${evidence.keyframe_timestamps_sec.length} keyframe${evidence.keyframe_timestamps_sec.length === 1 ? "" : "s"}` : "",
+    evidence ? `Context ${formatSegmentRange(evidence.context_window_start_sec, evidence.context_window_end_sec)}` : "",
+    typeof ai?.confidence === "number" ? `Confidence ${Math.round(ai.confidence * 100)}%` : "",
+    ai?.keep_label && ai.keep_label !== "n/a" ? `VLM ${ai.keep_label}` : "",
+    !isDeduplicated && dedupGroupId !== undefined ? `Dedup keeper G${dedupGroupId}` : "",
+  ].filter(Boolean);
+  const tonalMeta = [ai?.shot_type, ai?.camera_motion, ai?.mood].filter(Boolean);
 
   return `
-    <article class="section-card${isDeduplicated ? " section-card--deduplicated" : ""}">
-      <div class="section-head">
-        <div>
-          <div class="pill-row">
-            <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
-            <span class="pill section-pill">prefilter ${formatScore(score)}</span>
-            ${clipScore !== undefined ? `<span class="pill section-pill" title="CLIP semantic score">CLIP ${formatScore(clipScore)}</span>` : ""}
-            <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
-            ${isDeduplicated ? `<span class="pill pill-dedup">Duplicate (Group ${dedupGroupId})</span>` : ""}
-            ${!isDeduplicated && dedupGroupId !== undefined ? `<span class="pill pill-dedup-kept">Kept (Group ${dedupGroupId})</span>` : ""}
-            ${clipGated ? `<span class="pill" style="background-color: #f97316; color: white;">CLIP Gated</span>` : ""}
-            ${vlmBudgetCapped ? `<span class="pill" style="background-color: #d946ef; color: white;">Budget Capped</span>` : ""}
-            ${formatKeepLabelWithColor(ai?.keep_label)}
-            ${formatConfidenceWithColor(ai?.confidence)}
-          </div>
+    <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}">
+      <div class="section-head section-head--compact">
+        <div class="pill-row pill-row--primary">
+          <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
+          <span class="pill section-pill">${escapeHtml(formatSegmentDuration(segment.start_sec, segment.end_sec))}</span>
+          <span class="pill section-pill section-outcome-pill section-outcome-pill--${escapeHtml(review.outcome)}">${escapeHtml(review.outcomeLabel)}</span>
+          ${providerLabel ? `<span class="pill section-pill">${escapeHtml(providerLabel)}</span>` : ""}
+          ${blockedBadge ? `<span class="pill section-pill ${blockedBadge.className}">${escapeHtml(blockedBadge.label)}</span>` : ""}
         </div>
       </div>
-      <p class="section-summary">${escapeHtml(vlmText)}</p>
-      ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
-      ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
+      ${
+        imageSrc
+          ? `
+      <div class="segment-visual">
+        <img class="segment-visual-image" src="${escapeHtml(imageSrc)}" alt="${escapeHtml(vlmText || "Segment visual summary")}" />
+      </div>`
+          : ""
+      }
+      <p class="section-summary section-summary--hero">${escapeHtml(vlmText)}</p>
+      <div class="score-panel">
+        <div class="score-hero">
+          <span class="score-hero-label">Overall score</span>
+          <strong class="score-hero-value">${escapeHtml(review.scoreValues.total)}</strong>
+          ${review.rankLabel ? `<span class="score-hero-rank">${escapeHtml(review.rankLabel)}</span>` : ""}
+          ${review.scoreGapLabel ? `<span class="score-hero-gap">${escapeHtml(review.scoreGapLabel)}</span>` : ""}
+        </div>
+        <div class="score-bars">
+          ${renderScoreBar("Technical", review.scoreValues.technical)}
+          ${renderScoreBar("Semantic", review.scoreValues.semantic)}
+          ${renderScoreBar("Story", review.scoreValues.story)}
+        </div>
+      </div>
+      ${
+        quietFacts.length > 0
+          ? `<div class="meta-list section-facts">${quietFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+          : ""
+      }
+      ${
+        provenanceFacts.length > 0
+          ? `
+      <section class="section-provenance">
+        <div class="section-provenance-head">
+          <span class="eyebrow section-provenance-eyebrow">Provenance</span>
+        </div>
+        <div class="section-provenance-list">
+          ${provenanceFacts.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
+        </div>
+        <div class="meta-list section-source-facts">
+          ${sourceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}
+        </div>
+      </section>`
+          : ""
+      }
+      ${review.analysisPathSummary ? `<p class="muted section-analysis-path">${escapeHtml(review.analysisPathSummary)}</p>` : ""}
       <div class="meta-list section-meta">
-        ${renderOptionalMeta(ai?.shot_type)}
-        ${renderOptionalMeta(ai?.camera_motion)}
-        ${renderOptionalMeta(ai?.mood)}
+        ${tonalMeta.map(renderOptionalMeta).join("")}
+        ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
       </div>
     </article>
+  `;
+}
+
+function renderScoreBar(label: string, value: string) {
+  const numericValue = Math.max(0, Math.min(100, Number(value) || 0));
+  return `
+    <div class="score-bar">
+      <div class="score-bar-head">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+      <div class="score-bar-track">
+        <span class="score-bar-fill" style="width: ${numericValue}%"></span>
+      </div>
+    </div>
   `;
 }
 
@@ -1235,33 +1353,12 @@ function formatSegmentRange(start: number, end: number) {
   return `${start.toFixed(2)}s - ${end.toFixed(2)}s`;
 }
 
+function formatSegmentDuration(start: number, end: number) {
+  return `${(end - start).toFixed(2)}s`;
+}
+
 function formatScore(value: number) {
   return `${Math.round(value * 100)}`;
-}
-
-function formatConfidenceWithColor(value?: number) {
-  if (typeof value !== "number") {
-    return `<span class="pill section-pill" style="background-color: #ef4444; color: white;">0%</span>`;
-  }
-  const confidence = Math.max(0, Math.min(1, value));
-  const percentage = Math.round(confidence * 100);
-
-  // Create gradient from red (hue 0) to green (hue 120)
-  const hue = confidence * 120;
-  // Use darker background (80% lightness) with white text for better contrast
-  const backgroundColor = `hsl(${hue}, 80%, 40%)`;
-
-  return `<span class="pill section-pill" style="background-color: ${backgroundColor}; color: white;">${percentage}%</span>`;
-}
-
-function formatKeepLabelWithColor(keepLabel?: string) {
-  if (!keepLabel || keepLabel === "n/a") {
-    return `<span class="pill section-pill" style="background-color: #6b7280; color: white;">${escapeHtml(keepLabel || "n/a")}</span>`;
-  }
-
-  // Light green for "keep", light red for "discard"
-  const color = keepLabel.toLowerCase() === "keep" ? "#c2f5d4" : "#ffbfbf";
-  return `<span class="pill section-pill" style="color: ${color};">${escapeHtml(keepLabel)}</span>`;
 }
 
 function toggleAllClips() {
@@ -1289,45 +1386,61 @@ function renderAudioMetrics(metrics: Record<string, number> | undefined) {
   const speechRatio = metrics?.speech_ratio ?? 0;
 
   if (audioEnergy === 0 && speechRatio === 0) {
-    return "";
+    return `<span class="pill section-pill audio-pill audio-pill--silent">🔇 Silent</span>`;
   }
 
   const audioEnergyPercent = Math.round(audioEnergy * 100);
   const speechRatioPercent = Math.round(speechRatio * 100);
-  const isSilent = audioEnergy < 0.01;
+  const speechClassName = speechRatio >= 0.5 ? "audio-pill--speech-strong" : "";
 
-  return `
-    <div class="audio-metrics">
-      <div class="audio-metric">
-        <span class="audio-icon">🔊</span>
-        <div class="audio-metric-content">
-          <span class="audio-label">Energy</span>
-          <div class="audio-bar">
-            <div class="audio-bar-fill" style="width: ${audioEnergyPercent}%"></div>
-          </div>
-          <span class="audio-value">${audioEnergyPercent}%</span>
-        </div>
-      </div>
-      <div class="audio-metric">
-        <span class="audio-icon">🎤</span>
-        <div class="audio-metric-content">
-          <span class="audio-label">Speech</span>
-          <div class="audio-bar">
-            <div class="audio-bar-fill" style="width: ${speechRatioPercent}%"></div>
-          </div>
-          <span class="audio-value">${speechRatioPercent}%</span>
-        </div>
-      </div>
-      ${
-        isSilent
-          ? `<div class="audio-metric audio-metric-silent">
-               <span class="audio-icon">🔇</span>
-               <span class="audio-label">Silent</span>
-             </div>`
-          : ""
-      }
-    </div>
-  `;
+  return [
+    `<span class="pill section-pill audio-pill">🔊 Energy ${audioEnergyPercent}%</span>`,
+    `<span class="pill section-pill audio-pill ${speechClassName}">🎤 Speech ${speechRatioPercent}%</span>`,
+  ].join("");
+}
+
+function resolveBlockedBadge(segment: CandidateSegment) {
+  const isDeduplicated = segment.prefilter?.deduplicated ?? false;
+  const clipGated = segment.prefilter?.clip_gated ?? false;
+  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
+
+  if (isDeduplicated) {
+    return { label: "Duplicate", className: "pill-dedup" };
+  }
+  if (clipGated) {
+    return { label: "CLIP gated", className: "pill-warn" };
+  }
+  if (vlmBudgetCapped) {
+    return { label: "Budget capped", className: "pill-accent" };
+  }
+  return null;
+}
+
+function formatProviderLabel(provider?: string) {
+  if (!provider) {
+    return "";
+  }
+  if (provider === "deterministic") {
+    return "";
+  }
+  if (provider === "mlx-vlm-local") {
+    return "MLX VLM";
+  }
+  if (provider === "lmstudio") {
+    return "LM Studio";
+  }
+  return provider;
+}
+
+function resolveSegmentImageSrc(evidence?: SegmentEvidence) {
+  if (!evidence) {
+    return "";
+  }
+  const sourcePath = evidence.contact_sheet_path || evidence.keyframe_paths[0] || "";
+  if (!sourcePath) {
+    return "";
+  }
+  return convertFileSrc(sourcePath);
 }
 
 function escapeHtml(value: string | undefined | null) {

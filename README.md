@@ -7,8 +7,9 @@ A local-first AI-assisted footage screening and rough-cut tool for video editors
 There is too much footage to watch manually. **Roughcut Stdio** solves this by:
 
 - **Scanning** a large set of videos to find candidate moments
-- **Surfacing** the strongest visual segments using AI analysis
-- **Grading** each segment on visual qualities like subject, motion, composition, and interest
+- **Refining** those moments into more context-complete candidate segments
+- **Surfacing** the strongest segments using deterministic scoring plus optional local AI analysis
+- **Grading** each segment on visual, audio, and editorial qualities
 - **Assembling** those selections into a first-pass rough timeline
 
 The goal is to help editors skip raw footage scrubbing and move directly from media ingestion to usable shot selection.
@@ -32,7 +33,7 @@ npm run view
 
 1. Choose a media folder
 2. Click "Process" (the analyzer screens the footage)
-3. Review shortlisted shots and their grades
+3. Review shortlisted shots, grades, and segment provenance
 4. Click "Export" to save a DaVinci Resolve timeline
 
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
@@ -42,7 +43,7 @@ npm run view
 The analyzer runs in four phases:
 
 1. **Media Discovery** — Find all video files and match sources to proxies
-2. **Per-Asset Analysis** — Extract signals, build candidate segments, score them, run AI analysis
+2. **Per-Asset Analysis** — Extract signals, build seed regions, refine boundaries, assemble narrative units, and run optional AI analysis
 3. **Take Selection** — Score all candidates and pick the best segments per asset
 4. **Timeline Assembly** — Order selected takes into a rough cut
 
@@ -57,7 +58,7 @@ The analyzer runs in four phases:
 - 📖 [docs/architecture.md](docs/architecture.md) — System design & specs
 - 📖 [docs/manifesto.md](docs/manifesto.md) — Project vision & principles
 - 🔍 [docs/research.md](docs/research.md) — Research notes & design decisions
-- ⚙️ [.env.example](.env.example) — All environment variable defaults
+- ⚙️ [.env.example](.env.example) — Baseline environment settings
 
 ## Architecture
 
@@ -66,10 +67,11 @@ The project is split into three layers:
 **Frontend** — `apps/desktop/`
 
 - Native macOS Tauri desktop app with media selection, progress display, and export dialog
+- Review surface for recommended segments, timeline state, and segment provenance
 
 **Backend** — `services/analyzer/` (Python)
 
-- Media discovery, signal extraction, scoring, CLIP deduplication, VLM analysis, FCPXML export
+- Media discovery, signal extraction, deterministic boundary refinement, narrative-unit assembly, optional semantic boundary validation, scoring, CLIP deduplication, VLM analysis, FCPXML export
 
 **Scripts** — `scripts/`
 
@@ -79,6 +81,8 @@ See [docs/architecture.md](docs/architecture.md) for detailed design decisions a
 
 ## Core Features
 
+- **Context-complete segmentation** — Seed regions are deterministically refined, optionally merged or split into better narrative units, and can be semantically validated when boundaries are ambiguous
+- **Review provenance** — Desktop review shows how a segment was formed: boundary strategy, confidence, lineage, and semantic-validation status
 - **CLIP-based deduplication** — Semantic near-duplicate detection using embeddings (cosine similarity >= 0.95)
 - **Audio & visual analysis** — Frame signals (sharpness, motion, distinctiveness) + audio signals (RMS, silence)
 - **Three-stage VLM filtering** — Dedup filter → CLIP gate → per-asset limit for efficient compute
@@ -103,6 +107,7 @@ See [docs/configuration.md](docs/configuration.md) for setup details and example
 npm run dev:desktop    # Launch app in dev mode
 npm run build:desktop  # Build production app
 npm run process        # Run analyzer directly
+npm run check:openspec-graph  # Validate chained OpenSpec change metadata
 npm run test:python    # Run Python tests
 ```
 

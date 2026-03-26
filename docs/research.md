@@ -1,10 +1,17 @@
 # Research
 
+This document is a research notebook, not the source of truth for the shipped product. Some options explored here were intentionally not adopted. For current implementation details, prefer:
+
+- [README.md](../README.md)
+- [docs/analyzer-pipeline.md](./analyzer-pipeline.md)
+- [docs/architecture.md](./architecture.md)
+- [openspec/specs](../openspec/specs)
+
 ## Tooling Research
 
 ### Summary
 
-The stack should be built around proxy-first media analysis, Python-native video processing, and a React review UI.
+The current shipped stack is proxy-first media analysis with a Tauri desktop review app and a Python analyzer. Some sections below capture earlier alternatives that are still useful as design history.
 
 The most practical tool mix is:
 
@@ -13,8 +20,6 @@ The most practical tool mix is:
 - `faster-whisper` as the default local transcription engine
 - `WhisperX` only when word-level alignment or speaker-aware transcripts materially improve selection quality
 - a multimodal LLM for scene descriptions, take rationales, and story assembly
-- `@remotion/player` plus a custom timeline UI for rough-cut preview
-- `wavesurfer.js` for waveform and region interactions
 - `FCPXML` export generation for Resolve import
 
 ### Tool Decisions By Concern
@@ -146,36 +151,35 @@ Why:
 - local models are attractive for private footage and repeated experimentation
 - hosted models may still be useful for stronger narrative planning or evaluation baselines
 
-#### 6. Timeline Preview In The Browser
+#### 6. Timeline Preview Surface
 
-Recommended:
+Current implementation:
 
-- `@remotion/player` for preview composition
-- custom timeline lanes in React for takes and ordering
-- `wavesurfer.js` for audio waveform and region selection
+- a Tauri desktop review workspace
+- custom TypeScript/CSS segment and timeline views
+- generated project review plus FCPXML export handoff
 
 Why:
 
-- you need composition preview, not a full editor at first
-- Remotion is well suited for browser preview plus eventual MP4 rendering
-- waveform regions make trims and review easier without overbuilding the timeline
+- the desktop app is now the primary product surface
+- review focuses on recommended segments, provenance, and timeline inspection rather than browser-based editing
 
 What to avoid initially:
 
 - building a full drag-heavy nonlinear editor from scratch
-- trying to replicate Resolve inside the browser
+- trying to replicate Resolve inside the app
 
 #### 7. Rough-Cut Rendering
 
 Recommended:
 
 - generate a draft preview video with `ffmpeg`
-- keep the authoritative editable state as `timeline.json`
+- keep the authoritative editable state as `generated/project.json`
 
 Why:
 
 - preview renders are easy to share and verify
-- JSON remains the system of record for downstream export logic
+- `generated/project.json` remains the system of record for downstream export logic
 
 #### 8. Storage And Jobs
 
@@ -195,14 +199,14 @@ Why:
 Recommended:
 
 - generate `FCPXML` as the primary interchange export for Resolve import
-- generate a human-readable shot list and machine-readable `timeline.json` alongside it
+- generate a human-readable shot list and rely on `generated/project.json` as the machine-readable source of truth
 - keep `EDL` as a fallback export for simple straight cuts if XML compatibility becomes an issue
 
 Why:
 
 - Resolve supports timeline import/export for XML-based interchange workflows according to Blackmagic documentation
 - `FCPXML` can preserve clip order, source references, and in/out ranges better than a plain shot list
-- `timeline.json` remains the canonical internal state for deterministic regeneration
+- `generated/project.json` remains the canonical internal state for deterministic regeneration
 
 What to avoid initially:
 
@@ -218,10 +222,10 @@ Reason:
 
 Frontend:
 
-- `Next.js`
+- `Tauri`
 - `TypeScript`
-- `@remotion/player`
-- `wavesurfer.js`
+- `Vite`
+- custom desktop review UI
 
 Backend:
 
@@ -250,7 +254,7 @@ Optional AI adapters:
 
 ### Current Assumptions
 
-- the app runs locally as a web app against local media folders
+- the app runs locally as a Tauri desktop app against local media folders
 - DaVinci Resolve proxy media is available and preferred for analysis
 - the user wants AI assistance, not autonomous final editing
 - the first target workflow is footage review, rough-cut creation, and Resolve handoff

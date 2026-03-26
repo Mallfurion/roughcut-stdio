@@ -60,11 +60,16 @@ npm run process
 
 Runs the complete analysis pipeline:
 1. Media discovery
-2. Per-asset analysis (signals, candidates, scoring)
+2. Per-asset analysis (signals, seed regions, deterministic refinement, assembly, optional semantic boundary validation, scoring)
 3. Take selection
 4. Timeline assembly
 
-Generates `generated/project.json` with all results.
+Generates:
+- `generated/project.json` with all results
+- `generated/process.log` with runtime/config diagnostics for the latest run
+- `generated/process-summary.txt` with the latest operational and benchmark summary
+- `generated/process-output.txt` with the exact terminal-facing output from the latest run
+- `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
 **Export to DaVinci Resolve**:
 
@@ -86,13 +91,19 @@ npm run test:python
 
 Runs all unit tests in `services/analyzer/tests/` using unittest. Shows coverage and detailed output.
 
-**Run specific test**:
+**Run specific test module**:
 
 ```bash
-python3 -m unittest services/analyzer/tests.test_deduplication.TestCLIPDeduplicator -v
+python3 -m unittest services.analyzer.tests.test_analysis -v
 ```
 
-Run a single test class or method for focused debugging.
+Run a single test module, class, or method for focused debugging.
+
+**Validate OpenSpec dependency chaining**:
+
+```bash
+npm run check:openspec-graph
+```
 
 **Python linting**:
 
@@ -114,7 +125,7 @@ Set `TIMELINE_AI_PROVIDER=deterministic` to skip VLM calls, then run:
 TIMELINE_AI_PROVIDER=deterministic npm run process
 ```
 
-This runs the full pipeline using only visual quality metrics, making iteration fast.
+This runs the full pipeline without multimodal model calls. If you also want the new segmentation behavior enabled during debugging, add `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true`.
 
 ### Debug CLIP deduplication
 
@@ -153,6 +164,15 @@ cat generated/project.json | jq '.project.analysis_summary | {clip_dedup_group_c
 
 # View all segments with dedup info
 cat generated/project.json | jq '.assets[].segments[] | {id, deduplicated, dedup_group_id}'
+
+# View the latest benchmark summary
+cat generated/process-summary.txt
+
+# View the latest terminal-facing process output
+cat generated/process-output.txt
+
+# View benchmark history
+cat generated/benchmarks/history.jsonl
 ```
 
 ---
