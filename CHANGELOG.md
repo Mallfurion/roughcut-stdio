@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-03-26
+
+### 🚀 Features
+- Add transcript-backed analysis with local faster-whisper support, desktop controls, runtime reporting, and selective transcript probing.
+
+### 🛠 Fixes & Improvements
+- Lower the semantic boundary ambiguity threshold to 0.6 for better validation targeting.
+
 ## [1.3.1] - 2026-03-26
 
 ### 🛠 Fixes & Improvements
