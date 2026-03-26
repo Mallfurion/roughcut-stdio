@@ -67,6 +67,10 @@ class PrefilterDecision:
     seed_region_ids: list[str] = field(default_factory=list)
     seed_region_sources: list[str] = field(default_factory=list)
     seed_region_ranges_sec: list[list[float]] = field(default_factory=list)
+    assembly_operation: str = "none"
+    assembly_rule_family: str = ""
+    assembly_source_segment_ids: list[str] = field(default_factory=list)
+    assembly_source_ranges_sec: list[list[float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -213,6 +217,10 @@ class ProjectData:
                             seed_region_ids=segment["prefilter"].get("seed_region_ids", []),
                             seed_region_sources=segment["prefilter"].get("seed_region_sources", []),
                             seed_region_ranges_sec=segment["prefilter"].get("seed_region_ranges_sec", []),
+                            assembly_operation=segment["prefilter"].get("assembly_operation", "none"),
+                            assembly_rule_family=segment["prefilter"].get("assembly_rule_family", ""),
+                            assembly_source_segment_ids=segment["prefilter"].get("assembly_source_segment_ids", []),
+                            assembly_source_ranges_sec=segment["prefilter"].get("assembly_source_ranges_sec", []),
                         )
                         if segment.get("prefilter") is not None
                         else None

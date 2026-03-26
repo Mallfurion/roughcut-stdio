@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import md5
 import importlib
 import importlib.util
@@ -83,6 +83,13 @@ ProgressCallback = Callable[[int, int, Asset], None]
 
 TAKE_SELECTION_MIN_SCORE = 0.68
 TAKE_SELECTION_ALT_GAP = 0.08
+ASSEMBLY_MERGE_MAX_GAP_SEC = 1.25
+ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC = 0.4
+ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC = 0.9
+ASSEMBLY_SPLIT_MIN_DURATION_SEC = 6.5
+ASSEMBLY_SPLIT_MIN_PART_SEC = 2.0
+ASSEMBLY_SPLIT_TRANSCRIPT_GAP_SEC = 1.25
+ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC = 1.5
 
 
 @dataclass(slots=True)
@@ -101,6 +108,16 @@ class RefinedSegmentCandidate:
     seed_region_ids: list[str]
     seed_region_sources: list[str]
     seed_region_ranges_sec: list[list[float]]
+
+
+@dataclass(slots=True)
+class AssemblyContinuitySignals:
+    gap_sec: float
+    transcript_span_count: int
+    transcript_internal_gap_sec: float
+    same_analysis_mode: bool
+    shared_seed_source: bool
+    scene_divider_between: bool
 
 
 class NoOpTranscriptProvider:
@@ -206,6 +223,93 @@ def transcript_spans_for_range(
             if float(getattr(span, "end_sec", 0.0)) > float(getattr(span, "start_sec", 0.0))
         ]
     return []
+
+
+def transcript_excerpt_for_range(
+    transcriber: TranscriptProvider,
+    asset: Asset,
+    transcript_spans: list[TranscriptSpan],
+    start_sec: float,
+    end_sec: float,
+) -> str:
+    matching = [
+        span.text.strip()
+        for span in transcript_spans
+        if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text.strip()
+    ]
+    if matching:
+        return " ".join(matching).strip()
+    return transcriber.excerpt(asset, start_sec, end_sec).strip()
+
+
+def make_candidate_segment(
+    *,
+    asset: Asset,
+    segment_id: str,
+    start_sec: float,
+    end_sec: float,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    boundary_strategy: str,
+    boundary_confidence: float,
+    seed_region_ids: list[str],
+    seed_region_sources: list[str],
+    seed_region_ranges_sec: list[list[float]],
+    assembly_operation: str = "none",
+    assembly_rule_family: str = "",
+    assembly_source_segment_ids: list[str] | None = None,
+    assembly_source_ranges_sec: list[list[float]] | None = None,
+) -> CandidateSegment:
+    excerpt = (
+        transcript_excerpt_for_range(transcriber, asset, transcript_spans, start_sec, end_sec)
+        if asset.has_speech
+        else ""
+    )
+    analysis_mode = "speech" if excerpt else "visual"
+    prefilter_snapshot = aggregate_segment_prefilter(
+        signals=prefilter_signals,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        audio_signals=audio_signals,
+    )
+    metrics = synthesize_quality_metrics(
+        asset,
+        start_sec,
+        end_sec,
+        analysis_mode,
+        prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
+    )
+    return CandidateSegment(
+        id=segment_id,
+        asset_id=asset.id,
+        start_sec=round(start_sec, 3),
+        end_sec=round(end_sec, 3),
+        analysis_mode=analysis_mode,
+        transcript_excerpt=excerpt,
+        description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
+        quality_metrics=metrics,
+        prefilter=PrefilterDecision(
+            score=float(prefilter_snapshot["score"]),
+            shortlisted=False,
+            filtered_before_vlm=False,
+            selection_reason="Segment has not been evaluated for VLM shortlist yet.",
+            sampled_frame_count=int(prefilter_snapshot["sampled_frame_count"]),
+            sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
+            top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
+            metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
+            boundary_strategy=boundary_strategy,
+            boundary_confidence=boundary_confidence,
+            seed_region_ids=list(seed_region_ids),
+            seed_region_sources=list(seed_region_sources),
+            seed_region_ranges_sec=[list(item) for item in seed_region_ranges_sec],
+            assembly_operation=assembly_operation,
+            assembly_rule_family=assembly_rule_family,
+            assembly_source_segment_ids=list(assembly_source_segment_ids or []),
+            assembly_source_ranges_sec=[list(item) for item in (assembly_source_ranges_sec or [])],
+        ),
+    )
 
 
 def refine_seed_regions(
@@ -396,6 +500,391 @@ def _range_overlap_ratio(a: tuple[float, float], b: tuple[float, float]) -> floa
     return overlap / shorter if shorter > 0 else 0.0
 
 
+def assemble_narrative_units(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    if not segments:
+        return []
+
+    split_segments: list[CandidateSegment] = []
+    for segment in sorted(segments, key=lambda item: item.start_sec):
+        split_segments.extend(
+            split_candidate_segment(
+                asset=asset,
+                segment=segment,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
+                transcriber=transcriber,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+            )
+        )
+
+    merged_segments = merge_adjacent_segments(
+        asset=asset,
+        segments=split_segments,
+        base_ranges=base_ranges,
+        transcript_spans=transcript_spans,
+        transcriber=transcriber,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+    )
+
+    return [
+        replace(segment, id=f"{asset.id}-segment-{index:02d}")
+        for index, segment in enumerate(merged_segments, start=1)
+    ]
+
+
+def split_candidate_segment(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    divider, rule_family = _find_segment_split_divider(segment, base_ranges, transcript_spans)
+    if divider is None or not rule_family:
+        return [segment]
+
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return [segment]
+
+    boundary_confidence = round(clamp(max(prefilter.boundary_confidence, 0.45) * 0.92), 4)
+    source_segment_ids = assembly_source_segment_ids(segment)
+    source_ranges = assembly_source_ranges_sec(segment)
+    split_ranges = [(segment.start_sec, divider), (divider, segment.end_sec)]
+    parts: list[CandidateSegment] = []
+    for part_index, (start_sec, end_sec) in enumerate(split_ranges, start=1):
+        if end_sec - start_sec < ASSEMBLY_SPLIT_MIN_PART_SEC:
+            return [segment]
+        parts.append(
+            make_candidate_segment(
+                asset=asset,
+                segment_id=f"{segment.id}-split-{part_index}",
+                start_sec=start_sec,
+                end_sec=end_sec,
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+                boundary_strategy=f"assembly-split:{rule_family}",
+                boundary_confidence=boundary_confidence,
+                seed_region_ids=prefilter.seed_region_ids,
+                seed_region_sources=prefilter.seed_region_sources,
+                seed_region_ranges_sec=prefilter.seed_region_ranges_sec,
+                assembly_operation="split",
+                assembly_rule_family=rule_family,
+                assembly_source_segment_ids=source_segment_ids,
+                assembly_source_ranges_sec=source_ranges,
+            )
+        )
+    return parts
+
+
+def merge_adjacent_segments(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+    transcriber: TranscriptProvider,
+    prefilter_signals,
+    audio_signals,
+) -> list[CandidateSegment]:
+    if not segments:
+        return []
+
+    ordered = sorted(segments, key=lambda item: (item.start_sec, item.end_sec))
+    merged: list[CandidateSegment] = []
+    buffer: list[CandidateSegment] = [ordered[0]]
+    buffer_rules: list[str] = []
+
+    for candidate in ordered[1:]:
+        signals = collect_assembly_continuity_signals(buffer[-1], candidate, transcript_spans, base_ranges)
+        rule_family = merge_rule_family(buffer[-1], candidate, signals)
+        if rule_family:
+            buffer.append(candidate)
+            buffer_rules.append(rule_family)
+            continue
+        merged.append(
+            materialize_merged_segment(
+                asset=asset,
+                segments=buffer,
+                rule_families=buffer_rules,
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+            )
+        )
+        buffer = [candidate]
+        buffer_rules = []
+
+    merged.append(
+        materialize_merged_segment(
+            asset=asset,
+            segments=buffer,
+            rule_families=buffer_rules,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+        )
+    )
+    return merged
+
+
+def collect_assembly_continuity_signals(
+    left: CandidateSegment,
+    right: CandidateSegment,
+    transcript_spans: list[TranscriptSpan],
+    base_ranges: list[tuple[float, float]],
+) -> AssemblyContinuitySignals:
+    gap_sec = round(max(0.0, right.start_sec - left.end_sec), 3)
+    matching_spans = sorted(
+        [
+            span
+            for span in transcript_spans
+            if span.end_sec >= left.start_sec and span.start_sec <= right.end_sec
+        ],
+        key=lambda span: (span.start_sec, span.end_sec),
+    )
+    transcript_gap = largest_transcript_gap(matching_spans)
+    scene_boundaries = scene_boundaries_from_ranges(base_ranges)
+    scene_divider_between = any(left.end_sec <= boundary <= right.start_sec for boundary in scene_boundaries)
+    left_sources = set(left.prefilter.seed_region_sources if left.prefilter is not None else [])
+    right_sources = set(right.prefilter.seed_region_sources if right.prefilter is not None else [])
+    return AssemblyContinuitySignals(
+        gap_sec=gap_sec,
+        transcript_span_count=len(matching_spans),
+        transcript_internal_gap_sec=transcript_gap,
+        same_analysis_mode=left.analysis_mode == right.analysis_mode,
+        shared_seed_source=bool(left_sources.intersection(right_sources)),
+        scene_divider_between=scene_divider_between,
+    )
+
+
+def merge_rule_family(
+    left: CandidateSegment,
+    right: CandidateSegment,
+    signals: AssemblyContinuitySignals,
+) -> str:
+    left_source_ids = assembly_source_segment_ids(left)
+    right_source_ids = assembly_source_segment_ids(right)
+    if (
+        left.prefilter is not None
+        and right.prefilter is not None
+        and left.prefilter.assembly_operation == "split"
+        and right.prefilter.assembly_operation == "split"
+        and left_source_ids == right_source_ids
+    ):
+        return ""
+    if signals.gap_sec > ASSEMBLY_MERGE_MAX_GAP_SEC:
+        return ""
+    if (
+        signals.transcript_span_count >= 2
+        and signals.transcript_internal_gap_sec <= ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC
+        and not signals.scene_divider_between
+    ):
+        return "transcript-continuity"
+    if (
+        signals.gap_sec <= ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC
+        and not signals.scene_divider_between
+        and (
+            signals.same_analysis_mode
+            or signals.shared_seed_source
+            or left.analysis_mode == "speech"
+            or right.analysis_mode == "speech"
+        )
+    ):
+        return "structural-continuity"
+    return ""
+
+
+def materialize_merged_segment(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    rule_families: list[str],
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+) -> CandidateSegment:
+    if len(segments) == 1:
+        return segments[0]
+
+    unique_rule_families = list(dict.fromkeys(rule_families))
+    rule_family = unique_rule_families[0] if len(unique_rule_families) == 1 else "continuity-chain"
+    prefilters = [segment.prefilter for segment in segments if segment.prefilter is not None]
+    boundary_confidence = round(
+        clamp(sum(prefilter.boundary_confidence for prefilter in prefilters) / max(1, len(prefilters))),
+        4,
+    )
+
+    return make_candidate_segment(
+        asset=asset,
+        segment_id=f"{asset.id}-merged-{segments[0].id}-{segments[-1].id}",
+        start_sec=segments[0].start_sec,
+        end_sec=segments[-1].end_sec,
+        transcriber=transcriber,
+        transcript_spans=transcript_spans,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+        boundary_strategy=f"assembly-merge:{rule_family}",
+        boundary_confidence=boundary_confidence,
+        seed_region_ids=flatten_prefilter_lists(segments, "seed_region_ids"),
+        seed_region_sources=flatten_prefilter_lists(segments, "seed_region_sources"),
+        seed_region_ranges_sec=flatten_prefilter_range_lists(segments, "seed_region_ranges_sec"),
+        assembly_operation="merge",
+        assembly_rule_family=rule_family,
+        assembly_source_segment_ids=flatten_source_segment_ids(segments),
+        assembly_source_ranges_sec=flatten_source_ranges(segments),
+    )
+
+
+def _find_segment_split_divider(
+    segment: CandidateSegment,
+    base_ranges: list[tuple[float, float]],
+    transcript_spans: list[TranscriptSpan],
+) -> tuple[float | None, str]:
+    if segment.end_sec - segment.start_sec < ASSEMBLY_SPLIT_MIN_DURATION_SEC:
+        return None, ""
+
+    matching_spans = sorted(
+        [
+            span
+            for span in transcript_spans
+            if span.end_sec >= segment.start_sec and span.start_sec <= segment.end_sec
+        ],
+        key=lambda span: (span.start_sec, span.end_sec),
+    )
+    gap_candidates: list[tuple[float, float]] = []
+    for earlier, later in zip(matching_spans, matching_spans[1:]):
+        gap_sec = later.start_sec - earlier.end_sec
+        divider = round((earlier.end_sec + later.start_sec) / 2.0, 3)
+        if (
+            gap_sec >= ASSEMBLY_SPLIT_TRANSCRIPT_GAP_SEC
+            and divider - segment.start_sec >= ASSEMBLY_SPLIT_MIN_PART_SEC
+            and segment.end_sec - divider >= ASSEMBLY_SPLIT_MIN_PART_SEC
+        ):
+            gap_candidates.append((gap_sec, divider))
+    if len(matching_spans) >= 3 and gap_candidates:
+        _gap_sec, divider = max(gap_candidates, key=lambda item: item[0])
+        return divider, "transcript-gap"
+
+    scene_boundaries = scene_boundaries_from_ranges(base_ranges)
+    eligible_boundaries = [
+        boundary
+        for boundary in scene_boundaries
+        if segment.start_sec + ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC
+        <= boundary
+        <= segment.end_sec - ASSEMBLY_SPLIT_SCENE_EDGE_BUFFER_SEC
+    ]
+    if not eligible_boundaries:
+        return None, ""
+    if matching_spans:
+        for boundary in eligible_boundaries:
+            has_left = any(span.start_sec < boundary for span in matching_spans)
+            has_right = any(span.end_sec > boundary for span in matching_spans)
+            if has_left and has_right:
+                return round(boundary, 3), "scene-divider"
+        return None, ""
+
+    boundary = min(
+        eligible_boundaries,
+        key=lambda item: abs(item - ((segment.start_sec + segment.end_sec) / 2.0)),
+    )
+    return round(boundary, 3), "scene-divider"
+
+
+def largest_transcript_gap(spans: list[TranscriptSpan]) -> float:
+    largest_gap = 0.0
+    for earlier, later in zip(spans, spans[1:]):
+        largest_gap = max(largest_gap, later.start_sec - earlier.end_sec)
+    return round(max(0.0, largest_gap), 3)
+
+
+def scene_boundaries_from_ranges(base_ranges: list[tuple[float, float]]) -> list[float]:
+    return [round(end_sec, 3) for _start_sec, end_sec in base_ranges[:-1]]
+
+
+def flatten_prefilter_lists(segments: list[CandidateSegment], attribute: str) -> list[str]:
+    values: list[str] = []
+    for segment in segments:
+        prefilter = segment.prefilter
+        if prefilter is None:
+            continue
+        for value in getattr(prefilter, attribute):
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def flatten_prefilter_range_lists(segments: list[CandidateSegment], attribute: str) -> list[list[float]]:
+    values: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for segment in segments:
+        prefilter = segment.prefilter
+        if prefilter is None:
+            continue
+        for item in getattr(prefilter, attribute):
+            normalized = (round(float(item[0]), 3), round(float(item[1]), 3))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append([normalized[0], normalized[1]])
+    return values
+
+
+def assembly_source_segment_ids(segment: CandidateSegment) -> list[str]:
+    prefilter = segment.prefilter
+    if prefilter is not None and prefilter.assembly_source_segment_ids:
+        return list(prefilter.assembly_source_segment_ids)
+    return [segment.id]
+
+
+def assembly_source_ranges_sec(segment: CandidateSegment) -> list[list[float]]:
+    prefilter = segment.prefilter
+    if prefilter is not None and prefilter.assembly_source_ranges_sec:
+        return [list(item) for item in prefilter.assembly_source_ranges_sec]
+    return [[round(segment.start_sec, 3), round(segment.end_sec, 3)]]
+
+
+def flatten_source_segment_ids(segments: list[CandidateSegment]) -> list[str]:
+    values: list[str] = []
+    for segment in segments:
+        for value in assembly_source_segment_ids(segment):
+            if value not in values:
+                values.append(value)
+    return values
+
+
+def flatten_source_ranges(segments: list[CandidateSegment]) -> list[list[float]]:
+    values: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for segment in segments:
+        for item in assembly_source_ranges_sec(segment):
+            normalized = (round(float(item[0]), 3), round(float(item[1]), 3))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append([normalized[0], normalized[1]])
+    return values
+
+
 def inspect_runtime_capabilities() -> dict[str, bool]:
     return {
         "ffprobe": shutil.which("ffprobe") is not None,
@@ -496,6 +985,11 @@ def analyze_assets(
             base_ranges = fallback_segments(asset.duration_sec)
         timestamps = sample_timestamps(asset.duration_sec)
         prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+        transcript_spans = (
+            transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
+            if asset.has_speech
+            else []
+        )
 
         # Audio signal sampling
         audio_signals = sample_audio_signals(asset, timestamps)
@@ -515,10 +1009,6 @@ def analyze_assets(
                 signals=prefilter_signals,
                 audio_signals=audio_signals,
                 top_windows=top_windows,
-            )
-            transcript_spans = (
-                transcript_spans_for_range(transcriber, asset, 0.0, asset.duration_sec)
-                if asset.has_speech else []
             )
             refined_candidates = refine_seed_regions(
                 asset=asset,
@@ -568,47 +1058,37 @@ def analyze_assets(
             seed_region_sources,
             seed_region_ranges_sec,
         ) in enumerate(segment_inputs, start=1):
-            excerpt = transcriber.excerpt(asset, start_sec, end_sec).strip() if asset.has_speech else ""
-            analysis_mode = "speech" if excerpt else "visual"
-            prefilter_snapshot = aggregate_segment_prefilter(
-                signals=prefilter_signals,
-                start_sec=start_sec,
-                end_sec=end_sec,
-                audio_signals=audio_signals,
-            )
-            metrics = synthesize_quality_metrics(
-                asset,
-                start_sec,
-                end_sec,
-                analysis_mode,
-                prefilter_snapshot=prefilter_snapshot["metrics_snapshot"],
-            )
             asset_segments.append(
-                CandidateSegment(
-                    id=f"{asset.id}-segment-{index:02d}",
-                    asset_id=asset.id,
-                    start_sec=round(start_sec, 3),
-                    end_sec=round(end_sec, 3),
-                    analysis_mode=analysis_mode,
-                    transcript_excerpt=excerpt,
-                    description=describe_segment(asset, start_sec, end_sec, excerpt, metrics),
-                    quality_metrics=metrics,
-                    prefilter=PrefilterDecision(
-                        score=float(prefilter_snapshot["score"]),
-                        shortlisted=False,
-                        filtered_before_vlm=False,
-                        selection_reason="Segment has not been evaluated for VLM shortlist yet.",
-                        sampled_frame_count=int(prefilter_snapshot["sampled_frame_count"]),
-                        sampled_frame_timestamps_sec=list(prefilter_snapshot["sampled_frame_timestamps_sec"]),
-                        top_frame_timestamps_sec=list(prefilter_snapshot["top_frame_timestamps_sec"]),
-                        metrics_snapshot=dict(prefilter_snapshot["metrics_snapshot"]),
-                        boundary_strategy=boundary_strategy,
-                        boundary_confidence=boundary_confidence,
-                        seed_region_ids=list(seed_region_ids),
-                        seed_region_sources=list(seed_region_sources),
-                        seed_region_ranges_sec=list(seed_region_ranges_sec),
+                make_candidate_segment(
+                    asset=asset,
+                    segment_id=(
+                        f"{asset.id}-region-{index:02d}"
+                        if ai_config.boundary_refinement_enabled
+                        else f"{asset.id}-segment-{index:02d}"
                     ),
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    transcriber=transcriber,
+                    transcript_spans=transcript_spans,
+                    prefilter_signals=prefilter_signals,
+                    audio_signals=audio_signals,
+                    boundary_strategy=boundary_strategy,
+                    boundary_confidence=boundary_confidence,
+                    seed_region_ids=seed_region_ids,
+                    seed_region_sources=seed_region_sources,
+                    seed_region_ranges_sec=seed_region_ranges_sec,
                 )
+            )
+
+        if ai_config.boundary_refinement_enabled and asset_segments:
+            asset_segments = assemble_narrative_units(
+                asset=asset,
+                segments=asset_segments,
+                base_ranges=base_ranges,
+                transcript_spans=transcript_spans,
+                transcriber=transcriber,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
             )
 
         # Deduplication pass: runs after prefilter scoring and before shortlist selection
@@ -1239,6 +1719,9 @@ def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: i
         steps.append(f"CLIP {round(clip_score * 100):d}")
     if prefilter and prefilter.deduplicated:
         steps.append(f"deduped in group {prefilter.dedup_group_id}")
+    if prefilter and prefilter.assembly_operation != "none":
+        rule_label = prefilter.assembly_rule_family or prefilter.assembly_operation
+        steps.append(f"{prefilter.assembly_operation} via {rule_label}")
     if prefilter and prefilter.clip_gated:
         steps.append("CLIP gated")
     if prefilter and prefilter.vlm_budget_capped:

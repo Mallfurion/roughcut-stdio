@@ -8,8 +8,10 @@ import unittest.mock
 from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer
 from services.analyzer.app.analysis import (
     NoOpTranscriptProvider,
+    RefinedSegmentCandidate,
     TranscriptSpan,
     analyze_assets,
+    assemble_narrative_units,
     build_segment_review_state,
     build_take_recommendations,
     fallback_segments,
@@ -17,7 +19,7 @@ from services.analyzer.app.analysis import (
     select_ai_target_segment_ids,
     select_prefilter_shortlist_ids,
 )
-from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision, ProjectMeta
+from services.analyzer.app.domain import Asset, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, Timeline
 from services.analyzer.app.prefilter import AudioSignal
 from services.analyzer.app.service import load_project
 
@@ -627,6 +629,337 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertIsNotNone(restored_segment.prefilter)
         self.assertIn(restored_segment.prefilter.boundary_strategy, {"transcript-snap", "scene-duration", "scene-snap", "duration-rule"})
         self.assertIsInstance(restored_segment.prefilter.seed_region_ids, list)
+
+    def test_assemble_narrative_units_merges_adjacent_regions_with_transcript_continuity(self) -> None:
+        asset = Asset(
+            id="asset-merge",
+            name="Interview Merge",
+            source_path="/tmp/merge.mov",
+            proxy_path="/tmp/merge.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C116",
+        )
+        segments = [
+            CandidateSegment(
+                id="asset-merge-region-01",
+                asset_id=asset.id,
+                start_sec=1.0,
+                end_sec=3.0,
+                analysis_mode="speech",
+                transcript_excerpt="How do we start?",
+                description="Question",
+                quality_metrics={},
+                prefilter=PrefilterDecision(
+                    score=0.8,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[2.0],
+                    top_frame_timestamps_sec=[2.0],
+                    metrics_snapshot={},
+                    boundary_strategy="transcript-snap",
+                    boundary_confidence=0.9,
+                    seed_region_ids=["seed-1"],
+                    seed_region_sources=["transcript"],
+                    seed_region_ranges_sec=[[1.0, 3.0]],
+                ),
+            ),
+            CandidateSegment(
+                id="asset-merge-region-02",
+                asset_id=asset.id,
+                start_sec=3.2,
+                end_sec=5.4,
+                analysis_mode="speech",
+                transcript_excerpt="We lead with the answer.",
+                description="Answer",
+                quality_metrics={},
+                prefilter=PrefilterDecision(
+                    score=0.78,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[4.0],
+                    top_frame_timestamps_sec=[4.0],
+                    metrics_snapshot={},
+                    boundary_strategy="transcript-snap",
+                    boundary_confidence=0.88,
+                    seed_region_ids=["seed-2"],
+                    seed_region_sources=["transcript"],
+                    seed_region_ranges_sec=[[3.2, 5.4]],
+                ),
+            ),
+        ]
+
+        assembled = assemble_narrative_units(
+            asset=asset,
+            segments=segments,
+            base_ranges=[(0.0, 12.0)],
+            transcript_spans=[
+                TranscriptSpan(1.0, 2.0, "How do we start?"),
+                TranscriptSpan(2.1, 3.0, "Start with the strongest moment."),
+                TranscriptSpan(3.2, 5.4, "Then carry the answer through."),
+            ],
+            transcriber=TimedTranscriptProvider([]),
+            prefilter_signals=[],
+            audio_signals=[],
+        )
+
+        self.assertEqual(len(assembled), 1)
+        segment = assembled[0]
+        self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
+        self.assertEqual(segment.prefilter.assembly_operation, "merge")
+        self.assertEqual(segment.prefilter.assembly_rule_family, "transcript-continuity")
+        self.assertEqual(
+            segment.prefilter.assembly_source_segment_ids,
+            ["asset-merge-region-01", "asset-merge-region-02"],
+        )
+
+    def test_assemble_narrative_units_splits_region_on_transcript_gap(self) -> None:
+        asset = Asset(
+            id="asset-split",
+            name="Interview Split",
+            source_path="/tmp/split.mov",
+            proxy_path="/tmp/split.mov",
+            duration_sec=14.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C117",
+        )
+        segment = CandidateSegment(
+            id="asset-split-region-01",
+            asset_id=asset.id,
+            start_sec=0.0,
+            end_sec=9.0,
+            analysis_mode="speech",
+            transcript_excerpt="One long region.",
+            description="Long region",
+            quality_metrics={},
+            prefilter=PrefilterDecision(
+                score=0.82,
+                shortlisted=False,
+                filtered_before_vlm=False,
+                selection_reason="",
+                sampled_frame_count=1,
+                sampled_frame_timestamps_sec=[4.5],
+                top_frame_timestamps_sec=[4.5],
+                metrics_snapshot={},
+                boundary_strategy="transcript-snap",
+                boundary_confidence=0.9,
+                seed_region_ids=["seed-1"],
+                seed_region_sources=["transcript"],
+                seed_region_ranges_sec=[[0.0, 9.0]],
+            ),
+        )
+
+        assembled = assemble_narrative_units(
+            asset=asset,
+            segments=[segment],
+            base_ranges=[(0.0, 14.0)],
+            transcript_spans=[
+                TranscriptSpan(0.5, 1.5, "Set up."),
+                TranscriptSpan(2.0, 3.0, "Explain it."),
+                TranscriptSpan(5.5, 6.5, "New idea."),
+                TranscriptSpan(7.0, 8.0, "Close it."),
+            ],
+            transcriber=TimedTranscriptProvider([]),
+            prefilter_signals=[],
+            audio_signals=[],
+        )
+
+        self.assertEqual(len(assembled), 2)
+        self.assertTrue(all(item.prefilter.assembly_operation == "split" for item in assembled))
+        self.assertTrue(all(item.prefilter.assembly_rule_family == "transcript-gap" for item in assembled))
+        self.assertTrue(all(item.prefilter.assembly_source_segment_ids == ["asset-split-region-01"] for item in assembled))
+        self.assertLessEqual(assembled[0].end_sec, assembled[1].start_sec)
+
+    def test_narrative_assembly_lineage_round_trips_through_project_data(self) -> None:
+        project = ProjectData(
+            project=ProjectMeta(
+                id="project-assembly",
+                name="Assembly Project",
+                story_prompt="Build a cut",
+                status="draft",
+                media_roots=["/tmp"],
+            ),
+            assets=[],
+            candidate_segments=[
+                CandidateSegment(
+                    id="asset-1-segment-01",
+                    asset_id="asset-1",
+                    start_sec=1.0,
+                    end_sec=5.0,
+                    analysis_mode="speech",
+                    transcript_excerpt="Merged beat.",
+                    description="Merged beat",
+                    quality_metrics={},
+                    prefilter=PrefilterDecision(
+                        score=0.8,
+                        shortlisted=False,
+                        filtered_before_vlm=False,
+                        selection_reason="",
+                        sampled_frame_count=1,
+                        sampled_frame_timestamps_sec=[2.0],
+                        top_frame_timestamps_sec=[2.0],
+                        metrics_snapshot={},
+                        boundary_strategy="assembly-merge:transcript-continuity",
+                        boundary_confidence=0.89,
+                        assembly_operation="merge",
+                        assembly_rule_family="transcript-continuity",
+                        assembly_source_segment_ids=["asset-1-region-01", "asset-1-region-02"],
+                        assembly_source_ranges_sec=[[1.0, 3.0], [3.2, 5.0]],
+                    ),
+                )
+            ],
+            take_recommendations=[],
+            timeline=Timeline(id="timeline-main", version=1, story_summary="", items=[]),
+        )
+
+        restored = ProjectData.from_dict(project.to_dict())
+        prefilter = restored.candidate_segments[0].prefilter
+        self.assertIsNotNone(prefilter)
+        self.assertEqual(prefilter.assembly_operation, "merge")
+        self.assertEqual(prefilter.assembly_rule_family, "transcript-continuity")
+        self.assertEqual(prefilter.assembly_source_segment_ids, ["asset-1-region-01", "asset-1-region-02"])
+
+    def test_analyze_assets_assembles_speech_heavy_regions_before_scoring(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Interview",
+            source_path="/tmp/interview.mov",
+            proxy_path="/tmp/interview.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C118",
+        )
+        transcript_provider = TimedTranscriptProvider(
+            [
+                TranscriptSpan(1.0, 2.0, "How do we start?"),
+                TranscriptSpan(2.1, 3.0, "Start with the strongest moment."),
+                TranscriptSpan(3.2, 5.4, "Then carry the answer through."),
+            ]
+        )
+
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 3.0, "transcript-snap", 0.9, ["seed-1"], ["transcript"], [[1.0, 3.0]]),
+                    RefinedSegmentCandidate(3.2, 5.4, "transcript-snap", 0.88, ["seed-2"], ["transcript"], [[3.2, 5.4]]),
+                ],
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                    transcript_provider=transcript_provider,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        self.assertEqual(len(project.candidate_segments), 1)
+        segment = project.candidate_segments[0]
+        self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
+        self.assertEqual(segment.prefilter.assembly_operation, "merge")
+        self.assertEqual(segment.prefilter.assembly_source_segment_ids, ["asset-1-region-01", "asset-1-region-02"])
+        self.assertEqual(project.take_recommendations[0].candidate_segment_id, segment.id)
+        self.assertEqual(project.timeline.items[0].source_asset_path, asset.source_path)
+
+    def test_analyze_assets_assembles_silent_regions_on_structural_continuity(self) -> None:
+        asset = Asset(
+            id="asset-2",
+            name="Silent Action",
+            source_path="/tmp/action.mov",
+            proxy_path="/tmp/action.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C119",
+        )
+
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(0.0, 2.0, "scene-snap", 0.62, ["seed-1"], ["scene"], [[0.0, 2.0]]),
+                    RefinedSegmentCandidate(2.2, 4.0, "scene-snap", 0.61, ["seed-2"], ["scene"], [[2.2, 4.0]]),
+                ],
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 10.0)]),
+                    transcript_provider=NoOpTranscriptProvider(),
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        self.assertEqual(len(project.candidate_segments), 1)
+        self.assertEqual(project.candidate_segments[0].prefilter.assembly_rule_family, "structural-continuity")
+        self.assertEqual(project.candidate_segments[0].analysis_mode, "visual")
+
+    def test_analyze_assets_assembles_mixed_leadin_into_spoken_unit(self) -> None:
+        asset = Asset(
+            id="asset-3",
+            name="Mixed Lead-in",
+            source_path="/tmp/mixed.mov",
+            proxy_path="/tmp/mixed.mov",
+            duration_sec=8.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C120",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(0.95, 2.6, "We start right here.")])
+
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(0.0, 0.8, "scene-snap", 0.62, ["seed-1"], ["scene"], [[0.0, 0.8]]),
+                    RefinedSegmentCandidate(0.9, 2.6, "transcript-snap", 0.9, ["seed-2"], ["transcript"], [[0.9, 2.6]]),
+                ],
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 8.0)]),
+                    transcript_provider=transcript_provider,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        self.assertEqual(len(project.candidate_segments), 1)
+        self.assertEqual(project.candidate_segments[0].analysis_mode, "speech")
+        self.assertEqual(project.candidate_segments[0].prefilter.assembly_rule_family, "structural-continuity")
 
 
 if __name__ == "__main__":
