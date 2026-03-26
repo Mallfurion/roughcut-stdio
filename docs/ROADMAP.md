@@ -4,6 +4,8 @@
 
 This document tracks the next major improvement areas for Roughcut Stdio beyond the current shipped segmentation foundation. It is intentionally higher level than an implementation proposal. The goal is to keep direction visible after individual changes are split, implemented, archived, or replaced.
 
+The current post-segmentation roadmap is now also represented in OpenSpec under [post-segmentation-intelligence](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/post-segmentation-intelligence/proposal.md) with chained implementation-ready child changes.
+
 ## Current Analyzer Focus
 
 The current segmentation foundation was delivered through four OpenSpec changes:
@@ -37,88 +39,91 @@ After these four changes, the analyzer should be better at:
 
 Even after these four changes, several important analyzer problems remain:
 
-- cross-asset story assembly
-- speaker-aware dialogue structure
-- richer transcript-turn understanding
-- evaluation and benchmarking for segment quality
-- learning from editor corrections and review choices
-- finer-grained temporal evidence when current sampling is too coarse
+- segmentation quality is still hard to measure consistently
+- transcript evidence is still too coarse for many dialogue-heavy clips
+- semantic boundary validation is implemented but underused in real runs
+- cross-asset story assembly is still weak
+- editor review actions are still not captured as reusable feedback
 
-These are the next major improvement areas after the current segmentation work.
+## Current Chained Roadmap
 
-## Next Likely Roadmap Areas
+The next phase after the current shipped segmentation and transcript baseline is now split into the following chained OpenSpec changes:
 
-### 1. Transcript Turn Structure
+1. [segmentation-evaluation-harness](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/segmentation-evaluation-harness/proposal.md)
+2. [transcript-turn-structure](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/transcript-turn-structure/proposal.md)
+3. [semantic-boundary-calibration](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/semantic-boundary-calibration/proposal.md)
+4. [cross-asset-story-assembly](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/cross-asset-story-assembly/proposal.md)
+5. [editor-feedback-learning](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/editor-feedback-learning/proposal.md)
 
-Improve how speech-heavy footage is segmented by working with turn-level transcript structure rather than excerpt text alone.
+This sequence is deliberate:
 
-Likely goals:
+- evaluation comes first so future tuning is measurable
+- transcript-turn structure improves the evidence before deeper semantic retuning
+- semantic calibration happens after turn-aware evidence exists
+- cross-asset story assembly builds on stronger within-asset units
+- feedback learning comes last, once review and assembly behavior are stable enough to learn from
 
-- expose timed transcript spans or turns as a first-class analyzer input
-- detect turn boundaries and speaker alternation where possible
-- improve dialogue-unit grouping beyond silence-gap heuristics
+## Current Planned Changes
 
-Why this matters:
+### 1. Segmentation Evaluation Harness
 
-- many incomplete or awkward cuts in interviews and conversations come from weak turn awareness rather than weak visual boundaries
+Proposal:
+- [segmentation-evaluation-harness](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/segmentation-evaluation-harness/proposal.md)
 
-### 2. Segmentation Evaluation Harness
+Focus:
+- define stable fixture sets
+- persist comparable segmentation-quality metrics
+- make future tuning measurable
 
-Add a repeatable way to measure segmentation quality so future changes can be tuned against something concrete.
+### 2. Transcript Turn Structure
 
-Likely goals:
+Proposal:
+- [transcript-turn-structure](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/transcript-turn-structure/proposal.md)
 
-- define benchmark fixtures for speech-heavy, silent, montage, and mixed-content footage
-- track metrics such as truncation rate, padding rate, merge precision, and narrative-unit completeness
-- make analyzer changes comparable over time
+Focus:
+- expose turn-level transcript structure
+- improve speech-heavy merge and split decisions
+- score spoken segments with turn completeness in mind
 
-Why this matters:
+### 3. Semantic Boundary Calibration
 
-- once segmentation logic becomes more layered, intuition alone is not enough to judge regressions or gains
+Proposal:
+- [semantic-boundary-calibration](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/semantic-boundary-calibration/proposal.md)
 
-### 3. Cross-Asset Story Assembly
+Focus:
+- calibrate ambiguity scoring with real evaluation data
+- activate semantic validation on the right borderline segments
+- keep runtime bounded while making the feature materially useful
 
-Move from producing strong within-asset units to producing stronger project-level story sequences.
+### 4. Cross-Asset Story Assembly
 
-Likely goals:
+Proposal:
+- [cross-asset-story-assembly](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/cross-asset-story-assembly/proposal.md)
 
-- identify relationships across assets, not just within a clip
-- improve ordering and grouping of recommended units in the rough timeline
-- better distinguish “good standalone segment” from “good segment for this sequence”
+Focus:
+- move from good local segments to stronger project-level sequencing
+- score relationships across assets
+- improve rough timeline ordering and grouping
 
-Why this matters:
+### 5. Editor Feedback Learning
 
-- the current segmentation overhaul improves input units, but the rough cut still needs better multi-asset sequencing logic
+Proposal:
+- [editor-feedback-learning](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/editor-feedback-learning/proposal.md)
 
-### 4. Editor Feedback Learning
+Focus:
+- capture editor review and timeline adjustments
+- persist them as local feedback records
+- use repeated patterns to improve later heuristics
 
-Learn from what the editor accepts, rejects, trims, or rearranges.
+## Planned Order
 
-Likely goals:
+The active chained order is:
 
-- capture user corrections and review actions
-- feed those decisions back into segmentation and ranking heuristics
-- gradually improve defaults without removing editor control
-
-Why this matters:
-
-- provenance and review visibility create the foundation for actual feedback-driven improvement
-
-## Suggested Order After The Current Four Changes
-
-The most likely next sequence is:
-
-1. Transcript turn structure
-2. Segmentation evaluation harness
-3. Cross-asset story assembly
-4. Editor feedback learning
-
-This order keeps the project grounded:
-
-- first improve the evidence
-- then improve measurement
-- then improve sequence-level intelligence
-- then learn from editor behavior
+1. Segmentation evaluation harness
+2. Transcript turn structure
+3. Semantic boundary calibration
+4. Cross-asset story assembly
+5. Editor feedback learning
 
 ## Guiding Principle
 

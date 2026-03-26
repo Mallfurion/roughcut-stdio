@@ -1,0 +1,8 @@
+schema: spec-driven
+created: 2026-03-26
+
+x-roughcut:
+  kind: implementation
+  parent: post-segmentation-intelligence
+  phase: 1
+  depends_on: []
