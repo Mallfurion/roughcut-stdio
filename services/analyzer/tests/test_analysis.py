@@ -12,15 +12,18 @@ from services.analyzer.app.analysis import (
     TranscriptSpan,
     analyze_assets,
     assemble_narrative_units,
+    build_timeline,
     build_segment_review_state,
     build_take_recommendations,
     fallback_segments,
     inspect_runtime_capabilities,
+    semantic_boundary_ambiguity_score,
+    suggested_timeline_duration,
     select_ai_target_segment_ids,
     select_prefilter_shortlist_ids,
 )
-from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, Timeline
-from services.analyzer.app.prefilter import AudioSignal
+from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline
+from services.analyzer.app.prefilter import AudioSignal, SeedRegion
 from services.analyzer.app.service import load_project
 
 
@@ -455,6 +458,193 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(review_state.semantic_validation_status, "validated")
         self.assertIn("kept the deterministic boundary", review_state.semantic_validation_summary)
 
+    def test_suggested_timeline_duration_preserves_refined_visual_segments(self) -> None:
+        scene_segment = CandidateSegment(
+            id="seg-scene",
+            asset_id="asset-1",
+            start_sec=0.0,
+            end_sec=6.2,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Scene segment",
+            quality_metrics={},
+            prefilter=PrefilterDecision(
+                score=0.7,
+                shortlisted=True,
+                filtered_before_vlm=False,
+                selection_reason="",
+                sampled_frame_count=1,
+                sampled_frame_timestamps_sec=[3.0],
+                top_frame_timestamps_sec=[3.0],
+                metrics_snapshot={},
+                boundary_strategy="scene-snap",
+                boundary_confidence=0.62,
+            ),
+        )
+        legacy_segment = CandidateSegment(
+            id="seg-legacy",
+            asset_id="asset-1",
+            start_sec=0.0,
+            end_sec=6.2,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Legacy segment",
+            quality_metrics={},
+            prefilter=PrefilterDecision(
+                score=0.7,
+                shortlisted=True,
+                filtered_before_vlm=False,
+                selection_reason="",
+                sampled_frame_count=1,
+                sampled_frame_timestamps_sec=[3.0],
+                top_frame_timestamps_sec=[3.0],
+                metrics_snapshot={},
+                boundary_strategy="legacy",
+                boundary_confidence=0.0,
+            ),
+        )
+        merged_segment = CandidateSegment(
+            id="seg-merged",
+            asset_id="asset-1",
+            start_sec=0.0,
+            end_sec=6.8,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Merged segment",
+            quality_metrics={},
+            prefilter=PrefilterDecision(
+                score=0.7,
+                shortlisted=True,
+                filtered_before_vlm=False,
+                selection_reason="",
+                sampled_frame_count=1,
+                sampled_frame_timestamps_sec=[3.0],
+                top_frame_timestamps_sec=[3.0],
+                metrics_snapshot={},
+                boundary_strategy="assembly-merge:structural-continuity",
+                boundary_confidence=0.62,
+                assembly_operation="merge",
+                assembly_rule_family="structural-continuity",
+            ),
+        )
+        speech_segment = CandidateSegment(
+            id="seg-speech",
+            asset_id="asset-1",
+            start_sec=0.0,
+            end_sec=8.2,
+            analysis_mode="speech",
+            transcript_excerpt="A longer line.",
+            description="Speech segment",
+            quality_metrics={},
+        )
+
+        self.assertEqual(suggested_timeline_duration(scene_segment), 6.2)
+        self.assertEqual(suggested_timeline_duration(legacy_segment), 5.0)
+        self.assertEqual(suggested_timeline_duration(merged_segment), 6.8)
+        self.assertEqual(suggested_timeline_duration(speech_segment), 7.5)
+
+    def test_build_timeline_uses_adaptive_trim_for_refined_visual_segments(self) -> None:
+        assets = [
+            Asset(
+                id="asset-1",
+                name="Scene Clip",
+                source_path="/tmp/scene.mov",
+                proxy_path="/tmp/scene.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C130",
+            ),
+            Asset(
+                id="asset-2",
+                name="Legacy Clip",
+                source_path="/tmp/legacy.mov",
+                proxy_path="/tmp/legacy.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C131",
+            ),
+        ]
+        segments = [
+            CandidateSegment(
+                id="seg-scene",
+                asset_id="asset-1",
+                start_sec=0.0,
+                end_sec=6.2,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Scene segment",
+                quality_metrics={},
+                prefilter=PrefilterDecision(
+                    score=0.7,
+                    shortlisted=True,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[3.0],
+                    top_frame_timestamps_sec=[3.0],
+                    metrics_snapshot={},
+                    boundary_strategy="scene-snap",
+                    boundary_confidence=0.62,
+                ),
+            ),
+            CandidateSegment(
+                id="seg-legacy",
+                asset_id="asset-2",
+                start_sec=0.0,
+                end_sec=6.2,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Legacy segment",
+                quality_metrics={},
+                prefilter=PrefilterDecision(
+                    score=0.7,
+                    shortlisted=True,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[3.0],
+                    top_frame_timestamps_sec=[3.0],
+                    metrics_snapshot={},
+                    boundary_strategy="legacy",
+                    boundary_confidence=0.0,
+                ),
+            ),
+        ]
+        takes = [
+            TakeRecommendation(
+                id="take-1",
+                candidate_segment_id="seg-scene",
+                title="Scene",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.3,
+                score_semantic=0.3,
+                score_story=0.3,
+                score_total=0.6,
+            ),
+            TakeRecommendation(
+                id="take-2",
+                candidate_segment_id="seg-legacy",
+                title="Legacy",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.3,
+                score_semantic=0.3,
+                score_story=0.3,
+                score_total=0.5,
+            ),
+        ]
+
+        timeline = build_timeline(takes, segments, assets)
+
+        self.assertEqual([item.trim_out_sec for item in timeline.items], [6.2, 5.0])
+
     def test_load_project_enriches_review_fixture_with_mixed_segment_states(self) -> None:
         project = load_project(REVIEW_FIXTURE)
         segments = {segment.id: segment for segment in project.candidate_segments}
@@ -530,24 +720,37 @@ class AnalysisPipelineTests(unittest.TestCase):
             AudioSignal(timestamp_sec=5.0, rms_energy=0.45, peak_loudness=0.6, is_silent=False, source="ffmpeg"),
             AudioSignal(timestamp_sec=7.0, rms_energy=0.0, peak_loudness=0.0, is_silent=True, source="ffmpeg"),
         ]
+        seed_regions = [
+            SeedRegion(
+                id="seed-1",
+                source="audio-peak",
+                start_sec=2.5,
+                end_sec=5.0,
+                score_hint=0.82,
+            )
+        ]
         with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
             with unittest.mock.patch(
-                "services.analyzer.app.analysis.sample_audio_signals",
-                return_value=audio_signals,
+                "services.analyzer.app.analysis.build_prefilter_seed_regions",
+                return_value=seed_regions,
             ):
-                project = analyze_assets(
-                    project=ProjectMeta(
-                        id="test-project",
-                        name="Test Project",
-                        story_prompt="Build a rough cut",
-                        status="draft",
-                        media_roots=["/tmp"],
-                    ),
-                    assets=[asset],
-                    scene_detector=StaticSceneDetector([(0.0, 12.0)]),
-                    transcript_provider=NoOpTranscriptProvider(),
-                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
-                )
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.sample_audio_signals",
+                    return_value=audio_signals,
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=[asset],
+                        scene_detector=StaticSceneDetector([(0.0, 12.0)]),
+                        transcript_provider=NoOpTranscriptProvider(),
+                        segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    )
 
         audio_segments = [
             segment for segment in project.candidate_segments
@@ -555,6 +758,61 @@ class AnalysisPipelineTests(unittest.TestCase):
         ]
         self.assertTrue(audio_segments)
         self.assertTrue(any(segment.start_sec <= 2.0 and segment.end_sec >= 6.0 for segment in audio_segments))
+
+    def test_boundary_refinement_rejects_audio_snap_when_drift_is_too_large(self) -> None:
+        asset = Asset(
+            id="asset-1",
+            name="Offscreen Audio",
+            source_path="/tmp/offscreen.mov",
+            proxy_path="/tmp/offscreen.mov",
+            duration_sec=14.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C112B",
+        )
+        audio_signals = [
+            AudioSignal(timestamp_sec=1.0, rms_energy=0.0, peak_loudness=0.0, is_silent=True, source="ffmpeg"),
+            AudioSignal(timestamp_sec=9.0, rms_energy=0.4, peak_loudness=0.5, is_silent=False, source="ffmpeg"),
+            AudioSignal(timestamp_sec=11.0, rms_energy=0.45, peak_loudness=0.6, is_silent=False, source="ffmpeg"),
+            AudioSignal(timestamp_sec=13.0, rms_energy=0.0, peak_loudness=0.0, is_silent=True, source="ffmpeg"),
+        ]
+        seed_regions = [
+            SeedRegion(
+                id="seed-1",
+                source="audio-peak",
+                start_sec=4.5,
+                end_sec=7.0,
+                score_hint=0.8,
+            )
+        ]
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.build_prefilter_seed_regions",
+                return_value=seed_regions,
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.sample_audio_signals",
+                    return_value=audio_signals,
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=[asset],
+                        scene_detector=StaticSceneDetector([(0.0, 14.0)]),
+                        transcript_provider=NoOpTranscriptProvider(),
+                        segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    )
+
+        self.assertTrue(project.candidate_segments)
+        self.assertTrue(all(segment.prefilter.boundary_strategy != "audio-snap" for segment in project.candidate_segments if segment.prefilter))
+        self.assertTrue(any(abs(((segment.start_sec + segment.end_sec) / 2.0) - 5.75) < 1.0 for segment in project.candidate_segments))
 
     def test_boundary_refinement_falls_back_without_transcript_or_audio(self) -> None:
         asset = Asset(
@@ -620,7 +878,7 @@ class AnalysisPipelineTests(unittest.TestCase):
             status="draft",
             media_roots=["/tmp"],
         )
-        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "false"}, clear=False):
             legacy = analyze_assets(
                 project=legacy_project,
                 assets=[asset],
@@ -1037,6 +1295,45 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(project.candidate_segments[0].prefilter.assembly_rule_family, "structural-continuity")
         self.assertEqual(project.candidate_segments[0].analysis_mode, "visual")
 
+    def test_analyze_assets_does_not_structurally_merge_overlong_regions(self) -> None:
+        asset = Asset(
+            id="asset-2b",
+            name="Long Silent Action",
+            source_path="/tmp/action-long.mov",
+            proxy_path="/tmp/action-long.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C119B",
+        )
+
+        with unittest.mock.patch.dict(os.environ, {"TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true"}, clear=False):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(0.0, 5.5, "scene-snap", 0.62, ["seed-1"], ["visual-peak"], [[0.0, 2.5]]),
+                    RefinedSegmentCandidate(3.347, 8.847, "scene-snap", 0.61, ["seed-2"], ["visual-peak"], [[4.774, 7.274]]),
+                ],
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 10.0)]),
+                    transcript_provider=NoOpTranscriptProvider(),
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        self.assertGreaterEqual(len(project.candidate_segments), 2)
+        self.assertFalse(any(segment.prefilter and segment.prefilter.assembly_operation == "merge" for segment in project.candidate_segments))
+
     def test_analyze_assets_assembles_mixed_leadin_into_spoken_unit(self) -> None:
         asset = Asset(
             id="asset-3",
@@ -1077,6 +1374,71 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(len(project.candidate_segments), 1)
         self.assertEqual(project.candidate_segments[0].analysis_mode, "speech")
         self.assertEqual(project.candidate_segments[0].prefilter.assembly_rule_family, "structural-continuity")
+
+    def test_structural_merge_segments_are_semantically_eligible_at_default_threshold(self) -> None:
+        asset = Asset(
+            id="asset-3b",
+            name="Short Merge",
+            source_path="/tmp/short-merge.mov",
+            proxy_path="/tmp/short-merge.mov",
+            duration_sec=8.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C120B",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(0.8, 2.7, "Keep these beats connected.")])
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(0.0, 1.8, "scene-snap", 0.62, ["seed-1"], ["scene"], [[0.0, 1.8]]),
+                    RefinedSegmentCandidate(1.9, 3.9, "scene-snap", 0.62, ["seed-2"], ["scene"], [[1.9, 3.9]]),
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    return_value={
+                        "asset-3b-segment-01": BoundaryValidationResult(
+                            status="validated",
+                            decision="keep",
+                            reason="Keep the merged beat.",
+                            confidence=0.72,
+                            provider="lmstudio",
+                            provider_model="qwen3.5-9b",
+                            original_range_sec=[0.0, 3.9],
+                            suggested_range_sec=[0.0, 3.9],
+                        )
+                    },
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=[asset],
+                        scene_detector=StaticSceneDetector([(0.0, 8.0)]),
+                        transcript_provider=transcript_provider,
+                        segment_analyzer=ExpensiveAnalyzerStub(),
+                    )
+
+        segment = project.candidate_segments[0]
+        self.assertEqual(segment.prefilter.assembly_rule_family, "structural-continuity")
+        self.assertGreaterEqual(semantic_boundary_ambiguity_score(segment), 0.6)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_eligible_count"), 1)
+        self.assertEqual(segment.boundary_validation.status, "validated")
 
     def test_semantic_boundary_validation_skips_when_disabled(self) -> None:
         asset = Asset(

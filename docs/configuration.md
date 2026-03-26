@@ -52,7 +52,7 @@ The analyzer is configured through environment variables loaded from `.env` and 
 - `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` — Enable deterministic seed-region refinement before scoring (default: `true`)
 - `TIMELINE_SEGMENT_LEGACY_FALLBACK` — Keep legacy candidate behavior available when refinement yields nothing (default: `true`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` — Enable optional semantic boundary validation for ambiguous segments (default: `true`)
-- `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` — Ambiguity threshold used to select validation candidates [0–1] (default: `0.7`)
+- `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` — Ambiguity threshold used to select validation candidates [0–1] (default: `0.6`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` — Percentage of eligible ambiguous segments that may be semantically validated (default: `100`)
 - `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` — Hard cap on semantically validated segments per run (default: `2`)
 - `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC` — Max boundary change applied from semantic validation (default: `1.5`)

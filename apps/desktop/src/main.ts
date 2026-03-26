@@ -248,7 +248,7 @@ function createDefaultSettings(): AppSettings {
     segmentBoundaryRefinementEnabled: true,
     segmentLegacyFallbackEnabled: true,
     segmentSemanticValidationEnabled: true,
-    segmentSemanticAmbiguityThreshold: "0.7",
+    segmentSemanticAmbiguityThreshold: "0.6",
     segmentSemanticValidationBudgetPct: "100",
     segmentSemanticValidationMaxSegments: "2",
     segmentSemanticMaxAdjustmentSec: "1.5"

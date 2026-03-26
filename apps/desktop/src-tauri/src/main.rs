@@ -412,7 +412,7 @@ fn default_app_settings() -> AppSettings {
         segment_boundary_refinement_enabled: true,
         segment_legacy_fallback_enabled: true,
         segment_semantic_validation_enabled: true,
-        segment_semantic_ambiguity_threshold: "0.7".into(),
+        segment_semantic_ambiguity_threshold: "0.6".into(),
         segment_semantic_validation_budget_pct: "100".into(),
         segment_semantic_validation_max_segments: "2".into(),
         segment_semantic_max_adjustment_sec: "1.5".into(),

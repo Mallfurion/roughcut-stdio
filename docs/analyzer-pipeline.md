@@ -223,6 +223,8 @@ These roll into a total score used to pick the strongest one or two takes per as
 
 Best takes are assembled into a rough timeline. Ordering uses asset discovery order, segment start time, and score-based tie breaking. Each take becomes a `TimelineItem` with trims, a label, notes, and source references.
 
+Timeline trims now preserve more of refined segment length instead of flattening every visual clip to five seconds. Speech beats may run up to `7.5s`; trusted refined visual beats may run up to `6.5s`, and merged visual beats up to `7.0s`. Legacy/fallback visual windows still cap at `5.0s`.
+
 The analyzer also generates a short story summary for the timeline composition.
 
 ## Final Output
@@ -282,7 +284,7 @@ The main behavior switches are:
 | `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` | `true` | Enable deterministic seed refinement before scoring |
 | `TIMELINE_SEGMENT_LEGACY_FALLBACK` | `true` | Keep legacy fallback available if refinement yields nothing |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` | `true` | Enable semantic boundary validation for ambiguous segments |
-| `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` | `0.7` | Minimum ambiguity needed to be validation-eligible |
+| `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` | `0.6` | Minimum ambiguity needed to be validation-eligible |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` | `100` | Percent of eligible ambiguous segments that may be validated |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` | `2` | Hard cap on validated segments per run |
 | `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC` | `1.5` | Max boundary change applied from semantic validation |

@@ -85,8 +85,13 @@ ProgressCallback = Callable[[int, int, Asset], None]
 
 TAKE_SELECTION_MIN_SCORE = 0.68
 TAKE_SELECTION_ALT_GAP = 0.08
+AUDIO_SNAP_MAX_CENTER_DRIFT_SEC = 2.0
+TIMELINE_VISUAL_BASE_MAX_DURATION_SEC = 5.0
+TIMELINE_VISUAL_REFINED_MAX_DURATION_SEC = 6.5
+TIMELINE_VISUAL_MERGED_MAX_DURATION_SEC = 7.0
 ASSEMBLY_MERGE_MAX_GAP_SEC = 1.25
 ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC = 0.4
+ASSEMBLY_MERGE_STRUCTURAL_MAX_DURATION_SEC = 7.5
 ASSEMBLY_TRANSCRIPT_CONTINUITY_GAP_SEC = 0.9
 ASSEMBLY_SPLIT_MIN_DURATION_SEC = 6.5
 ASSEMBLY_SPLIT_MIN_PART_SEC = 2.0
@@ -399,6 +404,9 @@ def _refine_seed_with_audio(
     step = _average_signal_step(audio_signals)
     start_sec = max(0.0, audio_signals[left_idx].timestamp_sec - step / 2.0)
     end_sec = min(asset.duration_sec, audio_signals[right_idx].timestamp_sec + step / 2.0)
+    snapped_center = (start_sec + end_sec) / 2.0
+    if abs(snapped_center - center) > AUDIO_SNAP_MAX_CENTER_DRIFT_SEC:
+        return None
     if end_sec - start_sec < 1.0:
         return None
     return RefinedSegmentCandidate(
@@ -703,6 +711,7 @@ def merge_rule_family(
         return "transcript-continuity"
     if (
         signals.gap_sec <= ASSEMBLY_MERGE_STRUCTURAL_GAP_SEC
+        and max(left.end_sec, right.end_sec) - min(left.start_sec, right.start_sec) <= ASSEMBLY_MERGE_STRUCTURAL_MAX_DURATION_SEC
         and not signals.scene_divider_between
         and (
             signals.same_analysis_mode
@@ -903,12 +912,35 @@ def semantic_boundary_ambiguity_score(segment: CandidateSegment) -> float:
         score += 0.12
 
     duration = segment.end_sec - segment.start_sec
+    seed_drift_sec = boundary_seed_center_drift(segment)
+    if prefilter.boundary_strategy in {"audio-snap", "scene-snap"} and seed_drift_sec >= 1.0:
+        score += 0.08
+    if prefilter.boundary_strategy == "transcript-snap" and seed_drift_sec >= 0.75:
+        score += 0.04
     if segment.analysis_mode == "speech" and 2.0 <= duration <= 7.0:
         score += 0.08
     if segment.analysis_mode == "visual" and segment.quality_metrics.get("motion_energy", 0.0) >= 0.65:
         score += 0.06
 
     return round(clamp(score), 4)
+
+
+def boundary_seed_center_drift(segment: CandidateSegment) -> float:
+    prefilter = segment.prefilter
+    if prefilter is None or not prefilter.seed_region_ranges_sec:
+        return 0.0
+
+    seed_centers = [
+        (item[0] + item[1]) / 2.0
+        for item in prefilter.seed_region_ranges_sec
+        if len(item) == 2 and item[1] > item[0]
+    ]
+    if not seed_centers:
+        return 0.0
+
+    segment_center = (segment.start_sec + segment.end_sec) / 2.0
+    seed_center = sum(seed_centers) / len(seed_centers)
+    return abs(segment_center - seed_center)
 
 
 def semantic_validation_is_available(analyzer: VisionLanguageAnalyzer) -> bool:
@@ -2387,7 +2419,17 @@ def suggested_timeline_duration(segment: CandidateSegment) -> float:
     duration = max(0.0, segment.end_sec - segment.start_sec)
     if segment.analysis_mode == "speech":
         return min(duration, 7.5)
-    return min(duration, 5.0)
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return min(duration, TIMELINE_VISUAL_BASE_MAX_DURATION_SEC)
+    if prefilter.assembly_operation == "merge" or prefilter.boundary_strategy.startswith("assembly-merge:"):
+        return min(duration, TIMELINE_VISUAL_MERGED_MAX_DURATION_SEC)
+    if (
+        prefilter.boundary_strategy in {"scene-snap", "audio-snap", "transcript-snap"}
+        or prefilter.boundary_confidence >= 0.6
+    ):
+        return min(duration, TIMELINE_VISUAL_REFINED_MAX_DURATION_SEC)
+    return min(duration, TIMELINE_VISUAL_BASE_MAX_DURATION_SEC)
 
 
 def timeline_label(index: int, count: int, analysis_mode: str) -> str:

@@ -120,7 +120,7 @@ class AIAnalysisConfig:
     boundary_refinement_enabled: bool = True
     boundary_refinement_legacy_fallback: bool = True
     semantic_boundary_validation_enabled: bool = True
-    semantic_boundary_ambiguity_threshold: float = 0.7
+    semantic_boundary_ambiguity_threshold: float = 0.6
     semantic_boundary_validation_budget_pct: int = 100
     semantic_boundary_validation_max_segments: int = 2
     semantic_boundary_max_adjustment_sec: float = 1.5
@@ -952,7 +952,7 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", True)
     boundary_refinement_legacy_fallback = parse_bool_env("TIMELINE_SEGMENT_LEGACY_FALLBACK", True)
     semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", True)
-    semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.7)
+    semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.6)
     semantic_boundary_ambiguity_threshold = max(0.0, min(1.0, semantic_boundary_ambiguity_threshold))
     semantic_boundary_validation_budget_pct = parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT", 100)
     semantic_boundary_validation_budget_pct = max(0, min(100, semantic_boundary_validation_budget_pct))
