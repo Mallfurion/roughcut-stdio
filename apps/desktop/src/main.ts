@@ -1230,66 +1230,76 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
   const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
-  const clipGated = segment.prefilter?.clip_gated ?? false;
-  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
   const vlmText = ai?.summary || segment.description;
-  const rationale = ai?.rationale || segment.prefilter?.selection_reason || "";
   const isDeduplicated = segment.prefilter?.deduplicated ?? false;
   const dedupGroupId = segment.prefilter?.dedup_group_id;
   const review = buildSegmentReviewModel(segment, recommendation);
   const evidence = segment.evidence_bundle;
+  const blockedBadge = resolveBlockedBadge(segment);
+  const providerLabel = formatProviderLabel(ai?.provider);
+  const quietFacts = [
+    score > 0 ? `Prefilter ${formatScore(score)}` : "",
+    clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
+    evidence ? `${evidence.keyframe_timestamps_sec.length} keyframe${evidence.keyframe_timestamps_sec.length === 1 ? "" : "s"}` : "",
+    evidence ? `Context ${formatSegmentRange(evidence.context_window_start_sec, evidence.context_window_end_sec)}` : "",
+    typeof ai?.confidence === "number" ? `Confidence ${Math.round(ai.confidence * 100)}%` : "",
+    ai?.keep_label && ai.keep_label !== "n/a" ? `VLM ${ai.keep_label}` : "",
+    !isDeduplicated && dedupGroupId !== undefined ? `Dedup keeper G${dedupGroupId}` : "",
+  ].filter(Boolean);
+  const secondaryRationale = ai?.rationale && ai.rationale !== review.decisionSummary ? ai.rationale : "";
+  const tonalMeta = [ai?.shot_type, ai?.camera_motion, ai?.mood].filter(Boolean);
 
   return `
     <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}">
-      <div class="section-head">
-        <div>
-          <div class="pill-row">
-            <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
-            <span class="pill section-pill section-outcome">${escapeHtml(review.outcomeLabel)}</span>
-            ${review.rankLabel ? `<span class="pill section-pill">${escapeHtml(review.rankLabel)}</span>` : ""}
-            ${review.scoreGapLabel ? `<span class="pill section-pill">${escapeHtml(review.scoreGapLabel)}</span>` : ""}
-            <span class="pill section-pill">prefilter ${formatScore(score)}</span>
-            ${clipScore !== undefined ? `<span class="pill section-pill" title="CLIP semantic score">CLIP ${formatScore(clipScore)}</span>` : ""}
-            <span class="pill section-pill">${escapeHtml(ai?.provider || "deterministic")}</span>
-            ${isDeduplicated ? `<span class="pill pill-dedup">Duplicate (Group ${dedupGroupId})</span>` : ""}
-            ${!isDeduplicated && dedupGroupId !== undefined ? `<span class="pill pill-dedup-kept">Kept (Group ${dedupGroupId})</span>` : ""}
-            ${clipGated ? `<span class="pill" style="background-color: #f97316; color: white;">CLIP Gated</span>` : ""}
-            ${vlmBudgetCapped ? `<span class="pill" style="background-color: #d946ef; color: white;">Budget Capped</span>` : ""}
-            ${formatKeepLabelWithColor(ai?.keep_label)}
-            ${formatConfidenceWithColor(ai?.confidence)}
-          </div>
+      <div class="section-head section-head--compact">
+        <div class="pill-row pill-row--primary">
+          <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
+          <span class="pill section-pill section-outcome-pill section-outcome-pill--${escapeHtml(review.outcome)}">${escapeHtml(review.outcomeLabel)}</span>
+          ${providerLabel ? `<span class="pill section-pill">${escapeHtml(providerLabel)}</span>` : ""}
+          ${blockedBadge ? `<span class="pill section-pill ${blockedBadge.className}">${escapeHtml(blockedBadge.label)}</span>` : ""}
         </div>
       </div>
-      <div class="score-grid">
-        ${renderScoreMetric("Score", review.scoreValues.total, true)}
-        ${renderScoreMetric("Technical", review.scoreValues.technical)}
-        ${renderScoreMetric("Semantic", review.scoreValues.semantic)}
-        ${renderScoreMetric("Story", review.scoreValues.story)}
-      </div>
+      <p class="section-summary section-summary--hero">${escapeHtml(vlmText)}</p>
       ${review.decisionSummary ? `<p class="section-recommendation">${escapeHtml(review.decisionSummary)}</p>` : ""}
-      ${review.analysisPathSummary ? `<p class="muted section-analysis-path">Analyzed: ${escapeHtml(review.analysisPathSummary)}</p>` : ""}
+      <div class="score-panel">
+        <div class="score-hero">
+          <span class="score-hero-label">Overall score</span>
+          <strong class="score-hero-value">${escapeHtml(review.scoreValues.total)}</strong>
+          ${review.rankLabel ? `<span class="score-hero-rank">${escapeHtml(review.rankLabel)}</span>` : ""}
+          ${review.scoreGapLabel ? `<span class="score-hero-gap">${escapeHtml(review.scoreGapLabel)}</span>` : ""}
+        </div>
+        <div class="score-bars">
+          ${renderScoreBar("Technical", review.scoreValues.technical)}
+          ${renderScoreBar("Semantic", review.scoreValues.semantic)}
+          ${renderScoreBar("Story", review.scoreValues.story)}
+        </div>
+      </div>
       ${
-        evidence
-          ? `<p class="muted section-evidence">Evidence: ${evidence.keyframe_timestamps_sec.length} keyframe${evidence.keyframe_timestamps_sec.length === 1 ? "" : "s"} • context ${escapeHtml(formatSegmentRange(evidence.context_window_start_sec, evidence.context_window_end_sec))}</p>`
+        quietFacts.length > 0
+          ? `<div class="meta-list section-facts">${quietFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
           : ""
       }
-      <p class="section-summary">${escapeHtml(vlmText)}</p>
-      ${rationale ? `<p class="muted section-rationale">${escapeHtml(rationale)}</p>` : ""}
-      ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
+      ${review.analysisPathSummary ? `<p class="muted section-analysis-path">${escapeHtml(review.analysisPathSummary)}</p>` : ""}
+      ${secondaryRationale ? `<p class="muted section-rationale">${escapeHtml(secondaryRationale)}</p>` : ""}
       <div class="meta-list section-meta">
-        ${renderOptionalMeta(ai?.shot_type)}
-        ${renderOptionalMeta(ai?.camera_motion)}
-        ${renderOptionalMeta(ai?.mood)}
+        ${tonalMeta.map(renderOptionalMeta).join("")}
+        ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
       </div>
     </article>
   `;
 }
 
-function renderScoreMetric(label: string, value: string, prominent = false) {
+function renderScoreBar(label: string, value: string) {
+  const numericValue = Math.max(0, Math.min(100, Number(value) || 0));
   return `
-    <div class="score-metric${prominent ? " score-metric--prominent" : ""}">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
+    <div class="score-bar">
+      <div class="score-bar-head">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+      <div class="score-bar-track">
+        <span class="score-bar-fill" style="width: ${numericValue}%"></span>
+      </div>
     </div>
   `;
 }
@@ -1300,31 +1310,6 @@ function formatSegmentRange(start: number, end: number) {
 
 function formatScore(value: number) {
   return `${Math.round(value * 100)}`;
-}
-
-function formatConfidenceWithColor(value?: number) {
-  if (typeof value !== "number") {
-    return `<span class="pill section-pill" style="background-color: #ef4444; color: white;">0%</span>`;
-  }
-  const confidence = Math.max(0, Math.min(1, value));
-  const percentage = Math.round(confidence * 100);
-
-  // Create gradient from red (hue 0) to green (hue 120)
-  const hue = confidence * 120;
-  // Use darker background (80% lightness) with white text for better contrast
-  const backgroundColor = `hsl(${hue}, 80%, 40%)`;
-
-  return `<span class="pill section-pill" style="background-color: ${backgroundColor}; color: white;">${percentage}%</span>`;
-}
-
-function formatKeepLabelWithColor(keepLabel?: string) {
-  if (!keepLabel || keepLabel === "n/a") {
-    return `<span class="pill section-pill" style="background-color: #6b7280; color: white;">${escapeHtml(keepLabel || "n/a")}</span>`;
-  }
-
-  // Light green for "keep", light red for "discard"
-  const color = keepLabel.toLowerCase() === "keep" ? "#c2f5d4" : "#ffbfbf";
-  return `<span class="pill section-pill" style="color: ${color};">${escapeHtml(keepLabel)}</span>`;
 }
 
 function toggleAllClips() {
@@ -1352,45 +1337,50 @@ function renderAudioMetrics(metrics: Record<string, number> | undefined) {
   const speechRatio = metrics?.speech_ratio ?? 0;
 
   if (audioEnergy === 0 && speechRatio === 0) {
-    return "";
+    return `<span class="pill section-pill audio-pill audio-pill--silent">🔇 Silent</span>`;
   }
 
   const audioEnergyPercent = Math.round(audioEnergy * 100);
   const speechRatioPercent = Math.round(speechRatio * 100);
-  const isSilent = audioEnergy < 0.01;
+  const speechClassName = speechRatio >= 0.5 ? "audio-pill--speech-strong" : "";
 
-  return `
-    <div class="audio-metrics">
-      <div class="audio-metric">
-        <span class="audio-icon">🔊</span>
-        <div class="audio-metric-content">
-          <span class="audio-label">Energy</span>
-          <div class="audio-bar">
-            <div class="audio-bar-fill" style="width: ${audioEnergyPercent}%"></div>
-          </div>
-          <span class="audio-value">${audioEnergyPercent}%</span>
-        </div>
-      </div>
-      <div class="audio-metric">
-        <span class="audio-icon">🎤</span>
-        <div class="audio-metric-content">
-          <span class="audio-label">Speech</span>
-          <div class="audio-bar">
-            <div class="audio-bar-fill" style="width: ${speechRatioPercent}%"></div>
-          </div>
-          <span class="audio-value">${speechRatioPercent}%</span>
-        </div>
-      </div>
-      ${
-        isSilent
-          ? `<div class="audio-metric audio-metric-silent">
-               <span class="audio-icon">🔇</span>
-               <span class="audio-label">Silent</span>
-             </div>`
-          : ""
-      }
-    </div>
-  `;
+  return [
+    `<span class="pill section-pill audio-pill">🔊 Energy ${audioEnergyPercent}%</span>`,
+    `<span class="pill section-pill audio-pill ${speechClassName}">🎤 Speech ${speechRatioPercent}%</span>`,
+  ].join("");
+}
+
+function resolveBlockedBadge(segment: CandidateSegment) {
+  const isDeduplicated = segment.prefilter?.deduplicated ?? false;
+  const clipGated = segment.prefilter?.clip_gated ?? false;
+  const vlmBudgetCapped = segment.prefilter?.vlm_budget_capped ?? false;
+
+  if (isDeduplicated) {
+    return { label: "Duplicate", className: "pill-dedup" };
+  }
+  if (clipGated) {
+    return { label: "CLIP gated", className: "pill-warn" };
+  }
+  if (vlmBudgetCapped) {
+    return { label: "Budget capped", className: "pill-accent" };
+  }
+  return null;
+}
+
+function formatProviderLabel(provider?: string) {
+  if (!provider) {
+    return "";
+  }
+  if (provider === "deterministic") {
+    return "";
+  }
+  if (provider === "mlx-vlm-local") {
+    return "MLX VLM";
+  }
+  if (provider === "lmstudio") {
+    return "LM Studio";
+  }
+  return provider;
 }
 
 function escapeHtml(value: string | undefined | null) {
