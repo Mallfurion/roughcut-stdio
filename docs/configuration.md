@@ -1,6 +1,6 @@
 # Configuration Guide
 
-The analyzer is configured through environment variables, typically set in `.env.local`:
+The analyzer is configured through environment variables loaded from `.env` and optionally overridden by `.env.local`.
 
 ## Media & Project
 
@@ -38,15 +38,26 @@ The analyzer is configured through environment variables, typically set in `.env
 ## Runtime Tuning
 
 - `TIMELINE_AI_MODE` — `fast` or `full` (default: `fast`); limits VLM targets per asset in fast mode
-- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET` — Max VLM targets per asset in fast mode (default: `3`)
-- `TIMELINE_AI_MAX_KEYFRAMES` — Keyframes to extract per segment (default: `3`)
-- `TIMELINE_AI_KEYFRAME_MAX_WIDTH` — Max width for keyframe/contact sheet (default: `720`)
+- `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET` — Max VLM targets per asset (default: `1` in `fast`, `99` in `full`)
+- `TIMELINE_AI_MAX_KEYFRAMES` — Keyframes to extract per segment (default: `1` in `fast`, `4` in `full`)
+- `TIMELINE_AI_KEYFRAME_MAX_WIDTH` — Max width for keyframe/contact sheet (default: `448` in `fast`, `960` in `full`)
 - `TIMELINE_AI_CONCURRENCY` — Parallel VLM requests (default: `2`)
 - `TIMELINE_AI_CACHE` — Cache VLM responses across runs (default: `true`)
 - `TIMELINE_AI_AUDIO_ENABLED` — Enable audio signal extraction (default: `true`)
 - `TIMELINE_AI_VLM_BUDGET_PCT` — Percentage of shortlisted candidates sent to VLM (default: `100`)
+- `TIMELINE_AI_CLIP_MODEL_PRETRAINED` — CLIP pretrained weights tag (default: `laion2b_s34b_b79k`)
 
-See [.env.example](../.env.example) for the current defaults.
+## Segment Boundary Refinement
+
+- `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` — Enable deterministic seed-region refinement before scoring (default: `false`)
+- `TIMELINE_SEGMENT_LEGACY_FALLBACK` — Keep legacy candidate behavior available when refinement yields nothing (default: `true`)
+- `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` — Enable optional semantic boundary validation for ambiguous segments (default: `false`)
+- `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` — Ambiguity threshold used to select validation candidates [0–1] (default: `0.7`)
+- `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` — Percentage of eligible ambiguous segments that may be semantically validated (default: `100`)
+- `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` — Hard cap on semantically validated segments per run (default: `2`)
+- `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC` — Max boundary change applied from semantic validation (default: `1.5`)
+
+See [.env.example](../.env.example) for the baseline project settings. The analyzer source in [ai.py](../services/analyzer/app/ai.py) is the source of truth for advanced runtime defaults.
 
 ---
 
@@ -61,6 +72,14 @@ TIMELINE_AI_PROVIDER=deterministic
 ```
 
 This mode analyzes footage using frame-level visual signals (sharpness, contrast, motion energy, distinctiveness) without running any neural network models. Good for quick testing or systems without GPU/MLX support.
+
+If you want the current deterministic segmentation stack without any VLM calls, enable boundary refinement while keeping semantic validation off:
+
+```bash
+TIMELINE_AI_PROVIDER=deterministic
+TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true
+TIMELINE_SEGMENT_SEMANTIC_VALIDATION=false
+```
 
 ### Recommended: MLX-VLM Local (Apple Silicon)
 

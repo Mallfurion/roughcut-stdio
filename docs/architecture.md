@@ -18,16 +18,16 @@ roughcut-stdio/
 
 ### Frontend — `apps/desktop/`
 
-Native macOS desktop application built with Tauri (Rust shell + TypeScript/React UI).
+Native macOS desktop application built with Tauri and a Vite-powered TypeScript UI.
 
 **Responsibilities:**
 - File dialog integration for media folder selection
 - Display processing progress and status
-- Timeline review and segment inspection
+- Review recommended segments, provenance, and timeline state
 - Export dialog for saving FCPXML to chosen location
 - Launch and manage backend processes
 
-**Tech:** Tauri, TypeScript, React, CSS
+**Tech:** Tauri, TypeScript, Vite, CSS
 
 ### Backend — `services/analyzer/` (Python)
 
@@ -36,7 +36,9 @@ Complete analysis and export engine that runs the four-phase pipeline.
 **Responsibilities:**
 - Media discovery and proxy matching
 - Frame and audio signal extraction
-- Scene detection and candidate segment building
+- Seed-region generation and deterministic boundary refinement
+- Narrative-unit merge/split assembly
+- Optional semantic boundary validation for ambiguous segments
 - Prefilter scoring and shortlist selection
 - Evidence building (keyframe/contact sheet extraction)
 - CLIP semantic scoring and deduplication
@@ -45,13 +47,14 @@ Complete analysis and export engine that runs the four-phase pipeline.
 
 **Key Modules:**
 - `media.py` — File discovery, asset creation
-- `prefilter.py` — Signal extraction, scoring
+- `prefilter.py` — Signal extraction and low-cost candidate generation
+- `analysis.py` — Boundary refinement, narrative-unit assembly, review-state construction, timeline assembly
 - `clip.py` — CLIP semantic scoring with embedding cache
 - `clip_dedup.py` — CLIP-based deduplication
 - `deduplication.py` — Histogram-based fallback dedup
 - `ai.py` — VLM provider orchestration
 - `scoring.py` — Final segment scoring
-- `export.py` — FCPXML generation
+- `fcpxml.py` — FCPXML generation
 
 **Tech:** Python 3.12+, ffmpeg, PySceneDetect, CLIP, MLX/LLM frameworks
 
@@ -76,7 +79,10 @@ Video Files
 [Per-Asset Analysis]
   ├─ Frame Signals (sharpness, contrast, motion)
   ├─ Audio Signals (RMS energy, silence detection)
-  ├─ Scene Detection → Candidate Segments
+  ├─ Scene Detection + Peaks → Seed Regions
+  ├─ Deterministic Boundary Refinement
+  ├─ Narrative Unit Assembly (merge / split)
+  ├─ Optional Semantic Boundary Validation
   ├─ Prefilter Scoring → Shortlist Selection
   ├─ Evidence Building (keyframes, contact sheets)
   ├─ CLIP Scoring (semantic embeddings)
@@ -108,6 +114,8 @@ User sets env vars
 ├─ TIMELINE_AI_CLIP_ENABLED → Enables CLIP scoring and dedup
 ├─ TIMELINE_AI_MODE → fast (limited VLM) or full (all shortlisted)
 ├─ TIMELINE_AI_MAX_SEGMENTS_PER_ASSET → Per-asset VLM limit
+├─ TIMELINE_SEGMENT_BOUNDARY_REFINEMENT → Enables deterministic seed refinement
+├─ TIMELINE_SEGMENT_SEMANTIC_VALIDATION → Enables optional semantic boundary validation
 └─ TIMELINE_DEDUP_THRESHOLD → Histogram dedup sensitivity
     ↓
 Analyzer applies settings at each phase
@@ -145,6 +153,18 @@ Output reflects configuration choices
 
 **Result:** VLM only analyzes highest-confidence segments; others get deterministic understanding.
 
+### Segmentation Before AI
+
+**Why:** raw scene ranges or peak-centered windows are not reliable edit units.
+
+**Current flow:**
+- low-cost scene and peak signals generate seed regions
+- deterministic snapping uses transcript, audio, scene, and duration cues
+- adjacent refined regions can be merged or split into final narrative units
+- only ambiguous boundaries are eligible for optional semantic validation
+
+**Result:** scoring and review operate on stronger within-asset edit units, not raw signal windows.
+
 ### Local-First, No Network Dependencies
 
 **Why:** User data never leaves the machine. Full control, full privacy.
@@ -171,9 +191,12 @@ Output reflects configuration choices
 
 The project uses OpenSpec format for detailed specifications:
 
+- **context-complete-segmentation** — Segment refinement, assembly, semantic validation, and provenance requirements
 - **segment-deduplication** — Deduplication logic, CLIP vs histogram, thresholds
 - **clip-deduplication-semantic** — CLIP embedding reuse, keeper selection, fallback guarantees
 - **audio-signal-layer** — Audio extraction, silence detection, RMS energy
+- **ai-segment-understanding** — Persisted AI understanding and runtime controls
+- **review-workspace** — Desktop review requirements and provenance display
 - **vision-prefilter-pipeline** — Frame signals, prefilter scoring
 - **processing-workflow** — Pipeline phases, orchestration, phase ordering
 
@@ -203,12 +226,12 @@ if TIMELINE_AI_PROVIDER == "your-provider":
 
 ### Adding a New Signal Type
 
-Frame signals live in `prefilter.py`. Audio signals in `audio.py`. Add a new signal:
+Frame and audio signals live in `prefilter.py`, with orchestration in `analysis.py`. Add a new signal:
 
 1. Define the signal class (e.g., `HotSpotSignal`)
 2. Extract it during phase 2 (per-asset analysis)
 3. Use it in prefilter scoring or downstream phases
-4. Update docs/analyzer-pipeline.md with the new signal
+4. Update `docs/analyzer-pipeline.md` with the new signal
 
 ### Tuning Deduplication Sensitivity
 
@@ -247,7 +270,7 @@ CLIP inference is moderate cost. Mitigate with:
 
 **Signal extraction fails** → Use synthetic fallback values (deterministic hash-based)
 
-**Scene detection unavailable** → Divide into fixed time windows
+**Scene detection unavailable** → Build fallback seed regions and apply deterministic duration rules
 
 **CLIP unavailable** → Histogram dedup continues without error
 

@@ -60,7 +60,7 @@ npm run process
 
 Runs the complete analysis pipeline:
 1. Media discovery
-2. Per-asset analysis (signals, candidates, scoring)
+2. Per-asset analysis (signals, seed regions, deterministic refinement, assembly, optional semantic boundary validation, scoring)
 3. Take selection
 4. Timeline assembly
 
@@ -91,13 +91,19 @@ npm run test:python
 
 Runs all unit tests in `services/analyzer/tests/` using unittest. Shows coverage and detailed output.
 
-**Run specific test**:
+**Run specific test module**:
 
 ```bash
-python3 -m unittest services/analyzer/tests.test_deduplication.TestCLIPDeduplicator -v
+python3 -m unittest services.analyzer.tests.test_analysis -v
 ```
 
-Run a single test class or method for focused debugging.
+Run a single test module, class, or method for focused debugging.
+
+**Validate OpenSpec dependency chaining**:
+
+```bash
+npm run check:openspec-graph
+```
 
 **Python linting**:
 
@@ -119,7 +125,7 @@ Set `TIMELINE_AI_PROVIDER=deterministic` to skip VLM calls, then run:
 TIMELINE_AI_PROVIDER=deterministic npm run process
 ```
 
-This runs the full pipeline using only visual quality metrics, making iteration fast.
+This runs the full pipeline without multimodal model calls. If you also want the new segmentation behavior enabled during debugging, add `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT=true`.
 
 ### Debug CLIP deduplication
 

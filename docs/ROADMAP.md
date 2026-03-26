@@ -2,18 +2,18 @@
 
 ## Purpose
 
-This document tracks the next major improvement areas for Roughcut Stdio beyond the currently active OpenSpec changes. It is intentionally higher level than an implementation proposal. The goal is to keep direction visible after individual changes are split, implemented, archived, or replaced.
+This document tracks the next major improvement areas for Roughcut Stdio beyond the current shipped segmentation foundation. It is intentionally higher level than an implementation proposal. The goal is to keep direction visible after individual changes are split, implemented, archived, or replaced.
 
 ## Current Analyzer Focus
 
-The current segmentation overhaul is split into four OpenSpec changes:
+The current segmentation foundation was delivered through four OpenSpec changes:
 
 1. `deterministic-boundary-refinement`
 2. `narrative-unit-assembly`
 3. `semantic-boundary-validation`
 4. `segment-provenance-review`
 
-Together, these changes are meant to move the analyzer from finding interesting snippets to producing usable within-asset narrative units.
+Those changes are now implemented and archived. Together, they move the analyzer from finding interesting snippets to producing usable within-asset narrative units.
 
 In practical terms, they aim to:
 
@@ -44,7 +44,7 @@ Even after these four changes, several important analyzer problems remain:
 - learning from editor corrections and review choices
 - finer-grained temporal evidence when current sampling is too coarse
 
-These are likely the next major improvement areas once the current segmentation work is implemented and stabilized.
+These are the next major improvement areas after the current segmentation work.
 
 ## Next Likely Roadmap Areas
 
