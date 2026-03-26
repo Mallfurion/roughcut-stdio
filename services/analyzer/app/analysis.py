@@ -21,6 +21,7 @@ from .ai import (
     default_vision_language_analyzer,
     get_ai_runtime_stats,
     load_ai_analysis_config,
+    validate_segment_boundaries,
 )
 
 # Lazy imports for optional CLIP dependencies
@@ -42,6 +43,7 @@ from .deduplication import (
 )
 from .domain import (
     Asset,
+    BoundaryValidationResult,
     CandidateSegment,
     PrefilterDecision,
     ProjectData,
@@ -885,6 +887,318 @@ def flatten_source_ranges(segments: list[CandidateSegment]) -> list[list[float]]
     return values
 
 
+def semantic_boundary_ambiguity_score(segment: CandidateSegment) -> float:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return 0.0
+
+    score = 1.0 - clamp(prefilter.boundary_confidence)
+    if prefilter.boundary_strategy in {"legacy", "duration-rule", "scene-duration"}:
+        score += 0.18
+    if prefilter.boundary_strategy.startswith("assembly-merge:structural"):
+        score += 0.16
+    if prefilter.assembly_operation == "split":
+        score += 0.2
+    if prefilter.assembly_operation == "merge" and prefilter.assembly_rule_family == "structural-continuity":
+        score += 0.12
+
+    duration = segment.end_sec - segment.start_sec
+    if segment.analysis_mode == "speech" and 2.0 <= duration <= 7.0:
+        score += 0.08
+    if segment.analysis_mode == "visual" and segment.quality_metrics.get("motion_energy", 0.0) >= 0.65:
+        score += 0.06
+
+    return round(clamp(score), 4)
+
+
+def semantic_validation_is_available(analyzer: VisionLanguageAnalyzer) -> bool:
+    return analyzer.requires_keyframes and not isinstance(analyzer, DeterministicVisionLanguageAnalyzer)
+
+
+def select_semantic_boundary_validation_targets(
+    *,
+    segments: list[CandidateSegment],
+    enabled: bool,
+    analyzer_available: bool,
+    ambiguity_threshold: float,
+    budget_pct: int,
+    max_segments: int,
+) -> tuple[dict[str, float], set[str]]:
+    ambiguity_by_id = {
+        segment.id: semantic_boundary_ambiguity_score(segment)
+        for segment in segments
+    }
+    if not enabled or not analyzer_available:
+        return ambiguity_by_id, set()
+
+    eligible = [
+        segment
+        for segment in segments
+        if ambiguity_by_id.get(segment.id, 0.0) >= ambiguity_threshold
+    ]
+    ordered = sorted(
+        eligible,
+        key=lambda segment: (
+            ambiguity_by_id.get(segment.id, 0.0),
+            segment.prefilter.score if segment.prefilter is not None else 0.0,
+        ),
+        reverse=True,
+    )
+    if not ordered or max_segments <= 0 or budget_pct <= 0:
+        return ambiguity_by_id, set()
+
+    pct_limit = max(1, int(len(ordered) * budget_pct / 100.0))
+    effective_limit = min(len(ordered), max_segments, pct_limit)
+    return ambiguity_by_id, {segment.id for segment in ordered[:effective_limit]}
+
+
+def initial_boundary_validation_result(
+    *,
+    segment: CandidateSegment,
+    enabled: bool,
+    analyzer_available: bool,
+    ambiguity_score: float,
+    ambiguity_threshold: float,
+    targeted: bool,
+) -> BoundaryValidationResult:
+    if ambiguity_score < ambiguity_threshold:
+        return BoundaryValidationResult(
+            status="not_eligible",
+            decision="keep",
+            reason="Deterministic boundaries were not ambiguous enough for semantic validation.",
+            confidence=0.0,
+            ambiguity_score=ambiguity_score,
+            original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+            suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        )
+    if not enabled:
+        skip_reason = "disabled"
+        reason = "Semantic boundary validation is disabled."
+    elif not analyzer_available:
+        skip_reason = "ai_unavailable"
+        reason = "Semantic boundary validation is unavailable for the active analyzer."
+    elif not targeted:
+        skip_reason = "over_budget"
+        reason = "Semantic boundary validation was skipped because the runtime budget was exhausted."
+    else:
+        skip_reason = ""
+        reason = "Semantic boundary validation is pending."
+
+    status = "pending" if targeted else "skipped"
+    return BoundaryValidationResult(
+        status=status,
+        decision="keep",
+        reason=reason,
+        confidence=0.0,
+        ambiguity_score=ambiguity_score,
+        provider="deterministic" if not targeted else "",
+        provider_model="fallback-v1" if not targeted else "",
+        skip_reason=skip_reason,
+        applied=False,
+        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+    )
+
+
+def apply_semantic_boundary_validation(
+    *,
+    asset: Asset,
+    segments: list[CandidateSegment],
+    validation_results: dict[str, BoundaryValidationResult],
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    max_adjustment_sec: float,
+) -> list[CandidateSegment]:
+    updated: list[CandidateSegment] = []
+    next_index = 1
+
+    for segment in segments:
+        result = validation_results.get(segment.id)
+        if result is None or result.status in {"not_eligible", "skipped"}:
+            if result is not None:
+                segment.boundary_validation = result
+            updated.append(segment)
+            next_index += 1
+            continue
+
+        transformed = apply_single_boundary_validation(
+            asset=asset,
+            segment=segment,
+            result=result,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+            max_adjustment_sec=max_adjustment_sec,
+        )
+        for child in transformed:
+            child.id = f"{asset.id}-segment-{next_index:02d}"
+            updated.append(child)
+            next_index += 1
+
+    return updated
+
+
+def apply_single_boundary_validation(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    result: BoundaryValidationResult,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    max_adjustment_sec: float,
+) -> list[CandidateSegment]:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        segment.boundary_validation = result
+        return [segment]
+
+    original_start = segment.start_sec
+    original_end = segment.end_sec
+    bounded_start = clamp_range_value(
+        value=result.suggested_range_sec[0] if result.suggested_range_sec else original_start,
+        current=original_start,
+        minimum=0.0,
+        maximum=min(asset.duration_sec, original_end - 1.5),
+        max_adjustment_sec=max_adjustment_sec,
+    )
+    bounded_end = clamp_range_value(
+        value=result.suggested_range_sec[1] if result.suggested_range_sec else original_end,
+        current=original_end,
+        minimum=max(0.0, bounded_start + 1.5),
+        maximum=asset.duration_sec,
+        max_adjustment_sec=max_adjustment_sec,
+    )
+    if bounded_end - bounded_start < 1.5:
+        bounded_start, bounded_end = original_start, original_end
+
+    if result.decision == "split" and result.split_ranges_sec:
+        split_point = clamp_range_value(
+            value=result.split_ranges_sec[0][1],
+            current=(original_start + original_end) / 2.0,
+            minimum=original_start + 1.5,
+            maximum=original_end - 1.5,
+            max_adjustment_sec=max_adjustment_sec,
+        )
+        if split_point > original_start + 1.5 and original_end - split_point > 1.5:
+            children: list[CandidateSegment] = []
+            for part_index, (start_sec, end_sec) in enumerate(
+                ((original_start, split_point), (split_point, original_end)),
+                start=1,
+            ):
+                child_result = BoundaryValidationResult(
+                    status=result.status,
+                    decision="split",
+                    reason=result.reason,
+                    confidence=result.confidence,
+                    ambiguity_score=result.ambiguity_score,
+                    provider=result.provider,
+                    provider_model=result.provider_model,
+                    skip_reason=result.skip_reason,
+                    applied=True,
+                    original_range_sec=list(result.original_range_sec),
+                    suggested_range_sec=[round(start_sec, 3), round(end_sec, 3)],
+                    split_ranges_sec=[list(item) for item in result.split_ranges_sec],
+                )
+                children.append(
+                    rebuild_segment_with_validation(
+                        asset=asset,
+                        segment=segment,
+                        new_id=f"{segment.id}-semantic-{part_index}",
+                        start_sec=start_sec,
+                        end_sec=end_sec,
+                        transcriber=transcriber,
+                        transcript_spans=transcript_spans,
+                        prefilter_signals=prefilter_signals,
+                        audio_signals=audio_signals,
+                        boundary_validation=child_result,
+                    )
+                )
+            return children
+
+    applied = result.decision in {"extend", "trim"} and (
+        abs(bounded_start - original_start) > 0.01 or abs(bounded_end - original_end) > 0.01
+    )
+    result.applied = applied
+    result.suggested_range_sec = [round(bounded_start, 3), round(bounded_end, 3)]
+    if not applied:
+        segment.boundary_validation = result
+        return [segment]
+
+    return [
+        rebuild_segment_with_validation(
+            asset=asset,
+            segment=segment,
+            new_id=segment.id,
+            start_sec=bounded_start,
+            end_sec=bounded_end,
+            transcriber=transcriber,
+            transcript_spans=transcript_spans,
+            prefilter_signals=prefilter_signals,
+            audio_signals=audio_signals,
+            boundary_validation=result,
+        )
+    ]
+
+
+def rebuild_segment_with_validation(
+    *,
+    asset: Asset,
+    segment: CandidateSegment,
+    new_id: str,
+    start_sec: float,
+    end_sec: float,
+    transcriber: TranscriptProvider,
+    transcript_spans: list[TranscriptSpan],
+    prefilter_signals,
+    audio_signals,
+    boundary_validation: BoundaryValidationResult,
+) -> CandidateSegment:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        segment.boundary_validation = boundary_validation
+        return segment
+
+    rebuilt = make_candidate_segment(
+        asset=asset,
+        segment_id=new_id,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        transcriber=transcriber,
+        transcript_spans=transcript_spans,
+        prefilter_signals=prefilter_signals,
+        audio_signals=audio_signals,
+        boundary_strategy=prefilter.boundary_strategy,
+        boundary_confidence=max(prefilter.boundary_confidence, boundary_validation.confidence),
+        seed_region_ids=prefilter.seed_region_ids,
+        seed_region_sources=prefilter.seed_region_sources,
+        seed_region_ranges_sec=prefilter.seed_region_ranges_sec,
+        assembly_operation=prefilter.assembly_operation,
+        assembly_rule_family=prefilter.assembly_rule_family,
+        assembly_source_segment_ids=prefilter.assembly_source_segment_ids,
+        assembly_source_ranges_sec=prefilter.assembly_source_ranges_sec,
+    )
+    rebuilt.boundary_validation = boundary_validation
+    return rebuilt
+
+
+def clamp_range_value(
+    *,
+    value: float,
+    current: float,
+    minimum: float,
+    maximum: float,
+    max_adjustment_sec: float,
+) -> float:
+    bounded = max(minimum, min(maximum, value))
+    delta_bounded = max(current - max_adjustment_sec, min(current + max_adjustment_sec, bounded))
+    return round(max(minimum, min(maximum, delta_bounded)), 3)
+
+
 def inspect_runtime_capabilities() -> dict[str, bool]:
     return {
         "ffprobe": shutil.which("ffprobe") is not None,
@@ -967,6 +1281,10 @@ def analyze_assets(
     total_deduplicated_segments = 0
     total_clip_scored = 0
     total_clip_gated = 0
+    total_semantic_boundary_eligible = 0
+    total_semantic_boundary_validated = 0
+    total_semantic_boundary_skipped = 0
+    total_semantic_boundary_fallback = 0
     deduplication_enabled = is_deduplication_enabled()
     dedup_threshold = get_dedup_threshold()
     total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
@@ -1090,6 +1408,95 @@ def analyze_assets(
                 prefilter_signals=prefilter_signals,
                 audio_signals=audio_signals,
             )
+
+        semantic_available = semantic_validation_is_available(analyzer)
+        ambiguity_by_id, semantic_target_ids = select_semantic_boundary_validation_targets(
+            segments=asset_segments,
+            enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
+            analyzer_available=semantic_available,
+            ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
+            budget_pct=ai_config.semantic_boundary_validation_budget_pct,
+            max_segments=ai_config.semantic_boundary_validation_max_segments,
+        )
+        total_semantic_boundary_eligible += sum(
+            1
+            for segment in asset_segments
+            if ambiguity_by_id.get(segment.id, 0.0) >= ai_config.semantic_boundary_ambiguity_threshold
+        )
+        for segment in asset_segments:
+            segment.boundary_validation = initial_boundary_validation_result(
+                segment=segment,
+                enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
+                analyzer_available=semantic_available,
+                ambiguity_score=ambiguity_by_id.get(segment.id, 0.0),
+                ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
+                targeted=segment.id in semantic_target_ids,
+            )
+
+        if semantic_target_ids:
+            semantic_tasks: list[tuple[CandidateSegment, object, str]] = []
+            for index, segment in enumerate(asset_segments):
+                if segment.id not in semantic_target_ids:
+                    continue
+                evidence = build_segment_evidence(
+                    asset=asset,
+                    segment=segment,
+                    asset_segments=asset_segments,
+                    segment_index=index,
+                    story_prompt=project.story_prompt,
+                    artifacts_root=artifacts_root,
+                    extract_keyframes=analyzer.requires_keyframes,
+                    max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
+                    keyframe_max_width=ai_config.keyframe_max_width,
+                )
+                segment.evidence_bundle = evidence
+                semantic_tasks.append((segment, evidence, project.story_prompt))
+
+            semantic_results = validate_segment_boundaries(
+                analyzer=analyzer,
+                asset=asset,
+                tasks=semantic_tasks,
+                concurrency=ai_config.concurrency,
+            )
+            for segment in asset_segments:
+                if segment.id not in semantic_target_ids:
+                    continue
+                result = semantic_results.get(segment.id)
+                if result is None:
+                    result = BoundaryValidationResult(
+                        status="fallback",
+                        decision="keep",
+                        reason="Semantic boundary validation returned no result, so deterministic output was preserved.",
+                        confidence=0.0,
+                        provider="deterministic",
+                        provider_model="fallback-v1",
+                        skip_reason="request_failed",
+                        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+                        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
+                    )
+                result.ambiguity_score = ambiguity_by_id.get(segment.id, 0.0)
+                segment.boundary_validation = result
+                if result.status == "validated":
+                    total_semantic_boundary_validated += 1
+                elif result.status == "fallback":
+                    total_semantic_boundary_fallback += 1
+
+            asset_segments = apply_semantic_boundary_validation(
+                asset=asset,
+                segments=asset_segments,
+                validation_results={segment.id: segment.boundary_validation for segment in asset_segments if segment.boundary_validation is not None},
+                transcriber=transcriber,
+                transcript_spans=transcript_spans,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+                max_adjustment_sec=ai_config.semantic_boundary_max_adjustment_sec,
+            )
+
+        total_semantic_boundary_skipped += sum(
+            1
+            for segment in asset_segments
+            if segment.boundary_validation is not None and segment.boundary_validation.status == "skipped"
+        )
 
         # Deduplication pass: runs after prefilter scoring and before shortlist selection
         if deduplication_enabled and len(asset_segments) > 1:
@@ -1333,6 +1740,10 @@ def analyze_assets(
         "audio_silent_asset_count": total_assets - total_audio_signal_assets,
         "clip_scored_count": total_clip_scored if (ai_config.clip_enabled and is_clip_available()) else 0,
         "clip_gated_count": total_clip_gated if (ai_config.clip_enabled and is_clip_available()) else 0,
+        "semantic_boundary_eligible_count": total_semantic_boundary_eligible,
+        "semantic_boundary_validated_count": total_semantic_boundary_validated,
+        "semantic_boundary_skipped_count": total_semantic_boundary_skipped,
+        "semantic_boundary_fallback_count": total_semantic_boundary_fallback,
         "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
         "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
         "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
@@ -1678,6 +2089,7 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
     prefilter = segment.prefilter
     evidence = segment.evidence_bundle
     understanding = segment.ai_understanding
+    boundary_validation = segment.boundary_validation
     clip_score = None
     if prefilter is not None:
         clip_score = prefilter.metrics_snapshot.get("clip_score")
@@ -1701,12 +2113,18 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
         evidence_keyframe_count=evidence_keyframe_count,
         analysis_path_summary=describe_analysis_path(segment, evidence_keyframe_count),
         blocked_reason=blocked_reason,
+        boundary_strategy_label=boundary_strategy_label(segment),
+        boundary_confidence=round(prefilter.boundary_confidence, 4) if prefilter is not None else None,
+        lineage_summary=lineage_summary(segment),
+        semantic_validation_status=boundary_validation.status if boundary_validation is not None else "",
+        semantic_validation_summary=semantic_validation_summary(segment),
     )
 
 
 def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: int) -> str:
     prefilter = segment.prefilter
     understanding = segment.ai_understanding
+    boundary_validation = segment.boundary_validation
     steps: list[str] = []
 
     if prefilter and prefilter.shortlisted:
@@ -1726,6 +2144,13 @@ def describe_analysis_path(segment: CandidateSegment, evidence_keyframe_count: i
         steps.append("CLIP gated")
     if prefilter and prefilter.vlm_budget_capped:
         steps.append("budget capped")
+    if boundary_validation is not None:
+        if boundary_validation.status == "validated":
+            steps.append(f"boundary {boundary_validation.decision}")
+        elif boundary_validation.status == "fallback":
+            steps.append("boundary fallback")
+        elif boundary_validation.status == "skipped":
+            steps.append(f"boundary skipped ({boundary_validation.skip_reason})")
     if evidence_keyframe_count > 0:
         steps.append(f"{evidence_keyframe_count} keyframe{'s' if evidence_keyframe_count != 1 else ''}")
 
@@ -1750,6 +2175,69 @@ def review_blocked_reason(segment: CandidateSegment) -> str:
         return "budget_cap"
     if prefilter.filtered_before_vlm:
         return "shortlist_filter"
+    return ""
+
+
+def boundary_strategy_label(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    strategy = prefilter.boundary_strategy
+    labels = {
+        "legacy": "Legacy window",
+        "transcript-snap": "Transcript snapped",
+        "audio-snap": "Audio snapped",
+        "scene-snap": "Scene snapped",
+        "scene-duration": "Scene duration rule",
+        "duration-rule": "Duration rule",
+    }
+    if strategy in labels:
+        return labels[strategy]
+    if strategy.startswith("assembly-merge:"):
+        rule = strategy.split(":", 1)[1].replace("-", " ")
+        return f"Assembly merged ({rule})"
+    if strategy.startswith("assembly-split:"):
+        rule = strategy.split(":", 1)[1].replace("-", " ")
+        return f"Assembly split ({rule})"
+    return strategy.replace("-", " ").title()
+
+
+def lineage_summary(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None:
+        return ""
+    if prefilter.assembly_operation == "merge" and prefilter.assembly_source_segment_ids:
+        count = len(prefilter.assembly_source_segment_ids)
+        rule = prefilter.assembly_rule_family.replace("-", " ") if prefilter.assembly_rule_family else "continuity"
+        return f"Merged {count} refined regions via {rule}."
+    if prefilter.assembly_operation == "split" and prefilter.assembly_source_segment_ids:
+        source_id = prefilter.assembly_source_segment_ids[0]
+        rule = prefilter.assembly_rule_family.replace("-", " ") if prefilter.assembly_rule_family else "internal divider"
+        return f"Split from {source_id} via {rule}."
+    if prefilter.seed_region_ids:
+        count = len(prefilter.seed_region_ids)
+        sources = human_join([value.replace("-", " ") for value in prefilter.seed_region_sources[:3]])
+        return f"Built from {count} seed region{'s' if count != 1 else ''} ({sources})."
+    return ""
+
+
+def semantic_validation_summary(segment: CandidateSegment) -> str:
+    validation = segment.boundary_validation
+    if validation is None:
+        return ""
+    if validation.status == "validated":
+        if validation.decision == "keep":
+            return f"Semantic validation kept the deterministic boundary at {round(validation.confidence * 100):d}% confidence."
+        if validation.decision == "split":
+            return f"Semantic validation split the segment because {validation.reason.lower()}"
+        return f"Semantic validation suggested {validation.decision} because {validation.reason.lower()}"
+    if validation.status == "fallback":
+        return "Semantic validation fell back to deterministic output."
+    if validation.status == "skipped":
+        reason = validation.skip_reason.replace("_", " ") if validation.skip_reason else "not run"
+        return f"Semantic validation skipped: {reason}."
+    if validation.status == "not_eligible":
+        return validation.reason
     return ""
 
 

@@ -110,6 +110,27 @@ class SegmentReviewState:
     evidence_keyframe_count: int = 0
     analysis_path_summary: str = ""
     blocked_reason: str = ""
+    boundary_strategy_label: str = ""
+    boundary_confidence: float | None = None
+    lineage_summary: str = ""
+    semantic_validation_status: str = ""
+    semantic_validation_summary: str = ""
+
+
+@dataclass(slots=True)
+class BoundaryValidationResult:
+    status: str
+    decision: str
+    reason: str
+    confidence: float
+    ambiguity_score: float = 0.0
+    provider: str = ""
+    provider_model: str = ""
+    skip_reason: str = ""
+    applied: bool = False
+    original_range_sec: list[float] = field(default_factory=list)
+    suggested_range_sec: list[float] = field(default_factory=list)
+    split_ranges_sec: list[list[float]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -126,6 +147,7 @@ class CandidateSegment:
     evidence_bundle: SegmentEvidence | None = None
     ai_understanding: SegmentUnderstanding | None = None
     review_state: SegmentReviewState | None = None
+    boundary_validation: BoundaryValidationResult | None = None
 
 
 @dataclass(slots=True)
@@ -238,6 +260,11 @@ class ProjectData:
                     review_state=(
                         SegmentReviewState(**segment["review_state"])
                         if segment.get("review_state") is not None
+                        else None
+                    ),
+                    boundary_validation=(
+                        BoundaryValidationResult(**segment["boundary_validation"])
+                        if segment.get("boundary_validation") is not None
                         else None
                     ),
                 )

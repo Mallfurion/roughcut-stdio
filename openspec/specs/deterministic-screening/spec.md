@@ -15,17 +15,25 @@ The analyzer SHALL discover video files from the configured media roots, classif
 - **THEN** the asset SHALL still be included as source-only media
 
 ### Requirement: System SHALL generate candidate segments for each valid asset
-The analyzer SHALL generate candidate segments for each valid asset using scene detection when available and SHALL refine those candidates with a low-cost visual prefilter stage that uses sampled frame or window evidence to identify promising regions. When scene detection is not available or yields no segments, the analyzer SHALL still produce fallback regions, but shortlist construction SHALL prefer feature-driven promising regions over arbitrary fixed windows alone.
+The analyzer SHALL generate candidate segments for each valid asset using scene detection when available and SHALL refine those candidates with a low-cost visual prefilter stage that uses sampled frame or window evidence to identify promising regions. The analyzer SHALL first construct seed regions, SHALL deterministically refine those seed regions, SHALL assemble the refined regions into final narrative units when continuity evidence exists, and SHALL use those assembled units as the candidate segments that reach downstream shortlist and recommendation logic.
 
 #### Scenario: Scene detection is available
 - **WHEN** the runtime can use `PySceneDetect`
-- **THEN** initial candidate regions SHALL be derived from detected scene boundaries
-- **THEN** those regions SHALL be further screened by low-cost visual scoring before downstream shortlist decisions are made
+- **THEN** initial seed regions SHALL be derived from detected scene boundaries and other promising low-cost signals
+- **THEN** those seed regions SHALL be deterministically refined into candidate segments before downstream shortlist decisions are made
 
 #### Scenario: Scene detection is unavailable
 - **WHEN** `PySceneDetect` is unavailable or produces no scenes
-- **THEN** the analyzer SHALL generate fallback candidate windows for the asset
-- **THEN** the analyzer SHALL still apply low-cost visual screening to determine which fallback regions are most promising
+- **THEN** the analyzer SHALL generate fallback seed regions for the asset
+- **THEN** the analyzer SHALL still refine those fallback seed regions into bounded candidate segments using available local structure
+
+#### Scenario: Continuity evidence exists between adjacent refined regions
+- **WHEN** adjacent refined regions from the same asset satisfy the assembly rules for one narrative unit
+- **THEN** the analyzer SHALL merge them before candidate scoring and shortlist selection
+
+#### Scenario: No continuity evidence exists
+- **WHEN** refined regions do not satisfy merge or split rules
+- **THEN** the analyzer SHALL keep the deterministically refined regions as the final candidate segments
 
 ### Requirement: System SHALL produce deterministic take recommendations from candidate segments
 The analyzer SHALL compute deterministic quality metrics for candidate segments using `audio_energy` and `speech_ratio` as continuous inputs in place of the binary `speech_presence` metric. Deterministic recommendation behavior SHALL remain available even when no VLM provider is used and SHALL behave identically for silent assets.
@@ -54,4 +62,3 @@ The analyzer SHALL build a timeline from recommended segments, preserve source r
 #### Scenario: Silent footage dominates the project
 - **WHEN** selected segments are primarily visual and transcript-free
 - **THEN** the timeline summary SHALL still describe the cut as a visual progression rather than requiring speech-led structure
-

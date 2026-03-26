@@ -12,6 +12,11 @@ export type ReviewState = {
   evidence_keyframe_count?: number;
   analysis_path_summary?: string;
   blocked_reason?: string;
+  boundary_strategy_label?: string;
+  boundary_confidence?: number | null;
+  lineage_summary?: string;
+  semantic_validation_status?: string;
+  semantic_validation_summary?: string;
 };
 
 export type ReviewSegment = {
@@ -72,6 +77,13 @@ export type SegmentReviewModel = {
     story: string;
   };
   driverSummary: string;
+  provenance: {
+    boundaryLabel: string;
+    boundaryConfidence: string;
+    lineageSummary: string;
+    semanticSummary: string;
+    semanticBadge: string;
+  };
 };
 
 export function buildSegmentReviewModel(
@@ -99,6 +111,13 @@ export function buildSegmentReviewModel(
       story: formatScoreValue(recommendation?.score_story),
     },
     driverSummary: limitingFactors.length > 0 ? limitingFactors.join(", ") : scoreDrivers.join(", "),
+    provenance: {
+      boundaryLabel: segment.review_state?.boundary_strategy_label || "",
+      boundaryConfidence: formatBoundaryConfidence(segment.review_state?.boundary_confidence),
+      lineageSummary: segment.review_state?.lineage_summary || "",
+      semanticSummary: segment.review_state?.semantic_validation_summary || "",
+      semanticBadge: semanticValidationBadge(segment.review_state?.semantic_validation_status),
+    },
   };
 }
 
@@ -139,6 +158,32 @@ export function deriveAnalysisPath(segment: ReviewSegment): string {
 
 export function formatScoreValue(value?: number): string {
   return `${Math.round((value ?? 0) * 100)}`;
+}
+
+function formatBoundaryConfidence(value?: number | null): string {
+  if (typeof value !== "number") {
+    return "";
+  }
+  return `${Math.round(value * 100)}% confidence`;
+}
+
+function semanticValidationBadge(status?: string): string {
+  if (!status) {
+    return "";
+  }
+  if (status === "validated") {
+    return "Semantic validated";
+  }
+  if (status === "fallback") {
+    return "Semantic fallback";
+  }
+  if (status === "skipped") {
+    return "Semantic skipped";
+  }
+  if (status === "not_eligible") {
+    return "Semantic not needed";
+  }
+  return status;
 }
 
 function outcomeLabel(outcome: string): string {

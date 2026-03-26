@@ -87,6 +87,11 @@ type SegmentReviewState = {
   evidence_keyframe_count?: number;
   analysis_path_summary?: string;
   blocked_reason?: string;
+  boundary_strategy_label?: string;
+  boundary_confidence?: number | null;
+  lineage_summary?: string;
+  semantic_validation_status?: string;
+  semantic_validation_summary?: string;
 };
 
 type Asset = {
@@ -278,6 +283,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
   throw new Error("Missing app root");
 }
+const appRoot = app;
 
 render();
 void bootstrap();
@@ -500,7 +506,7 @@ function goToResultsStep() {
 }
 
 function render() {
-  app.innerHTML = `
+  appRoot.innerHTML = `
     <main class="shell">
       <section class="stepper card">
         <div class="stepper-layout">
@@ -1218,7 +1224,7 @@ function renderClipCard(view: { asset: Asset; segments: { segment: CandidateSegm
         expanded
           ? `
       <div class="section-list">
-        ${view.segments.map(renderSegmentCard).join("")}
+        ${view.segments.map((segmentView) => renderSegmentCard(segmentView, view.asset)).join("")}
       </div>`
           : ""
       }
@@ -1226,7 +1232,10 @@ function renderClipCard(view: { asset: Asset; segments: { segment: CandidateSegm
   `;
 }
 
-function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: TakeRecommendation }) {
+function renderSegmentCard(
+  view: { segment: CandidateSegment; recommendation?: TakeRecommendation },
+  asset: Asset,
+) {
   const { segment, recommendation } = view;
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
@@ -1239,6 +1248,18 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
   const blockedBadge = resolveBlockedBadge(segment);
   const providerLabel = formatProviderLabel(ai?.provider);
   const imageSrc = resolveSegmentImageSrc(evidence);
+  const provenanceFacts = [
+    review.provenance.boundaryLabel
+      ? `${review.provenance.boundaryLabel}${review.provenance.boundaryConfidence ? ` · ${review.provenance.boundaryConfidence}` : ""}`
+      : "",
+    review.provenance.semanticBadge,
+    review.provenance.lineageSummary,
+    review.provenance.semanticSummary,
+  ].filter(Boolean);
+  const sourceFacts = [
+    `Source ${asset.interchange_reel_name}`,
+    asset.source_path,
+  ].filter(Boolean);
   const quietFacts = [
     score > 0 ? `Prefilter ${formatScore(score)}` : "",
     clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
@@ -1286,6 +1307,22 @@ function renderSegmentCard(view: { segment: CandidateSegment; recommendation?: T
       ${
         quietFacts.length > 0
           ? `<div class="meta-list section-facts">${quietFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+          : ""
+      }
+      ${
+        provenanceFacts.length > 0
+          ? `
+      <section class="section-provenance">
+        <div class="section-provenance-head">
+          <span class="eyebrow section-provenance-eyebrow">Provenance</span>
+        </div>
+        <div class="section-provenance-list">
+          ${provenanceFacts.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
+        </div>
+        <div class="meta-list section-source-facts">
+          ${sourceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}
+        </div>
+      </section>`
           : ""
       }
       ${review.analysisPathSummary ? `<p class="muted section-analysis-path">${escapeHtml(review.analysisPathSummary)}</p>` : ""}

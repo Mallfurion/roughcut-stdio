@@ -678,6 +678,41 @@ h2 {
   margin-top: 14px;
 }
 
+.section-provenance {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(95, 209, 166, 0.14);
+  background:
+    linear-gradient(180deg, rgba(95, 209, 166, 0.08), transparent),
+    rgba(255, 255, 255, 0.02);
+}
+
+.section-provenance-head {
+  margin-bottom: 10px;
+}
+
+.section-provenance-eyebrow {
+  margin-bottom: 0;
+  font-size: 0.72rem;
+}
+
+.section-provenance-list {
+  display: grid;
+  gap: 8px;
+}
+
+.section-provenance-item {
+  margin: 0;
+  color: #e8f6f0;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.section-source-facts {
+  margin-top: 12px;
+}
+
 .section-facts span,
 .section-meta span {
   display: inline-flex;

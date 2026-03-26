@@ -79,3 +79,34 @@ test("deriveAnalysisPath covers blocked deterministic segments", () => {
   assert.match(path, /CLIP gated/);
   assert.match(path, /deterministic fallback/);
 });
+
+test("buildSegmentReviewModel exposes provenance summaries", () => {
+  const model = buildSegmentReviewModel(
+    {
+      start_sec: 1,
+      end_sec: 5,
+      review_state: {
+        shortlisted: true,
+        filtered_before_vlm: false,
+        clip_scored: false,
+        boundary_strategy_label: "Transcript snapped",
+        boundary_confidence: 0.84,
+        lineage_summary: "Merged 2 refined regions via transcript continuity.",
+        semantic_validation_status: "validated",
+        semantic_validation_summary: "Semantic validation kept the deterministic boundary at 81% confidence.",
+      },
+    },
+    {
+      is_best_take: false,
+      selection_reason: "Kept as an alternate.",
+      score_total: 0.64,
+      outcome: "alternate",
+      within_asset_rank: 2,
+    },
+  );
+
+  assert.equal(model.provenance.boundaryLabel, "Transcript snapped");
+  assert.equal(model.provenance.boundaryConfidence, "84% confidence");
+  assert.match(model.provenance.lineageSummary, /Merged 2 refined regions/);
+  assert.equal(model.provenance.semanticBadge, "Semantic validated");
+});
