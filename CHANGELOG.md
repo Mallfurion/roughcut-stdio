@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-03-28
+
+### 🚀 Features
+
+- Optimize analyzer runtime with run-scoped semantic validation budgets, evidence reuse, batched keyframe extraction, and clearer MLX execution reporting.
+- Cache deterministic prefilter artifacts and batch deterministic frame and audio screening work to accelerate repeated process runs.
+
+### 🛠 Fixes & Improvements
+
+- Restyle the results header and make provenance and sequence sections collapsible in the review UI.
+- Archive the completed performance proposals, sync the resulting OpenSpec specs, and refresh roadmap and proposal docs.
+- Refresh the README app imagery.
+
 ## [2.0.1] - 2026-03-27
 
 ### 🚀 Features
