@@ -17,7 +17,7 @@ The goal is to help editors skip raw footage scrubbing and move directly from me
 
 📖 **Read the full vision:** [docs/manifesto.md](docs/manifesto.md)
 
-![Roughcut Stdio desktop app](docs/images/app.png)
+![Roughcut Stdio desktop app](docs/images/app-160.png)
 
 ## Quick Start
 
@@ -36,8 +36,8 @@ npm run view
 
 1. Choose a media folder
 2. Click "Process" (the analyzer screens the footage)
-3. Review shortlisted shots, grades, and segment provenance
-4. Click "Export" to save a DaVinci Resolve timeline
+3. Review shortlisted shots, grades, and segment provenance, and optionally mark a segment as the best take for its clip
+4. Click "Export" to save a DaVinci Resolve timeline that follows the active desktop review timeline
 
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
 

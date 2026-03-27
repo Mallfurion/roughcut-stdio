@@ -186,6 +186,9 @@ class TakeRecommendation:
     score_gap_to_winner: float = 0.0
     score_driver_labels: list[str] = field(default_factory=list)
     limiting_factor_labels: list[str] = field(default_factory=list)
+    baseline_is_best_take: bool = False
+    editor_override: bool = False
+    editor_cleared: bool = False
 
 
 @dataclass(slots=True)

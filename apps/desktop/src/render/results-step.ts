@@ -1,7 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import type { AppState, TimelineProject } from "../app/types.ts";
-import { formatSegmentRange } from "../lib/format.ts";
 import { escapeHtml } from "../lib/html.ts";
 import { renderMetric } from "./shared.ts";
 import { resolveClipViews } from "./view-models.ts";
@@ -83,7 +82,7 @@ export function renderResultsStep(appState: AppState) {
       </div>
 
       <div class="clip-grid">
-        ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds)).join("")}
+        ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds, appState.project?.source === "generated", appState.reviewBusy)).join("")}
       </div>
     </section>
   `;

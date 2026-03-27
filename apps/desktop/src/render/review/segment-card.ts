@@ -14,6 +14,7 @@ import {
 export function renderSegmentCard(
   view: { segment: CandidateSegment; recommendation?: TakeRecommendation; timelineItem?: { sequence_group?: string; sequence_role?: string; sequence_score?: number; sequence_rationale?: string[] } },
   asset: Asset,
+  options: { allowOverrides: boolean; reviewBusy: boolean } = { allowOverrides: false, reviewBusy: false },
 ) {
   const { segment, recommendation, timelineItem } = view;
   const ai = segment.ai_understanding;
@@ -43,8 +44,15 @@ export function renderSegmentCard(
     timelineItem?.sequence_role ? `Role ${timelineItem.sequence_role}` : "",
     typeof timelineItem?.sequence_score === "number" ? `Sequence ${formatScore(timelineItem.sequence_score)}` : "",
   ].filter(Boolean);
+  const canSetBestTake = options.allowOverrides && Boolean(recommendation) && !recommendation?.is_best_take;
+  const canClearBestTake = options.allowOverrides && Boolean(recommendation?.is_best_take && !recommendation?.editor_override);
+  const canClearBestTakeOverride =
+    options.allowOverrides && Boolean(recommendation?.is_best_take && recommendation?.editor_override);
   const detailPanels: string[] = [];
   const quietFacts = [
+    recommendation?.editor_override && recommendation.is_best_take ? "Editor override" : "",
+    recommendation?.editor_cleared ? "Cleared from timeline" : "",
+    recommendation?.baseline_is_best_take && !recommendation.is_best_take ? "Analyzer pick" : "",
     score > 0 ? `Prefilter ${formatScore(score)}` : "",
     clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
     evidence ? `${evidence.keyframe_timestamps_sec.length} keyframe${evidence.keyframe_timestamps_sec.length === 1 ? "" : "s"}` : "",
@@ -97,6 +105,44 @@ export function renderSegmentCard(
           ${providerLabel ? `<span class="pill section-pill">${escapeHtml(providerLabel)}</span>` : ""}
           ${blockedBadge ? `<span class="pill section-pill ${blockedBadge.className}">${escapeHtml(blockedBadge.label)}</span>` : ""}
         </div>
+        ${
+          canSetBestTake || canClearBestTake || canClearBestTakeOverride
+            ? `
+        <div class="action-row section-card-actions">
+          ${
+            canSetBestTake
+              ? `<button
+                  data-action="set-best-take"
+                  data-asset-id="${escapeHtml(asset.id)}"
+                  data-segment-id="${escapeHtml(segment.id)}"
+                  class="button"
+                  ${options.reviewBusy ? "disabled" : ""}
+                >Mark As Best Take</button>`
+              : ""
+          }
+          ${
+            canClearBestTake
+              ? `<button
+                  data-action="clear-best-take"
+                  data-asset-id="${escapeHtml(asset.id)}"
+                  class="button button-danger-soft"
+                  ${options.reviewBusy ? "disabled" : ""}
+                >Clear Best Take</button>`
+              : ""
+          }
+          ${
+            canClearBestTakeOverride
+              ? `<button
+                  data-action="clear-best-take-override"
+                  data-asset-id="${escapeHtml(asset.id)}"
+                  class="button button-warning-soft"
+                  ${options.reviewBusy ? "disabled" : ""}
+                >Clear Override</button>`
+              : ""
+          }
+        </div>`
+            : ""
+        }
       </div>
       ${
         imageSrc

@@ -5,7 +5,7 @@ import unittest
 from xml.etree import ElementTree as ET
 
 from services.analyzer.app.fcpxml import export_fcpxml, parse_fcpxml_timeline
-from services.analyzer.app.service import export_project_fcpxml, load_project
+from services.analyzer.app.service import CLEAR_BEST_TAKE_SENTINEL, export_project_fcpxml, load_project
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -87,6 +87,32 @@ class FCPXMLExportTests(unittest.TestCase):
             [(clip.name, clip.asset_uid, round(clip.offset_sec, 3), round(clip.start_sec, 3), round(clip.duration_sec, 3)) for clip in baseline_summaries],
             [(clip.name, clip.asset_uid, round(clip.offset_sec, 3), round(clip.start_sec, 3), round(clip.duration_sec, 3)) for clip in summaries_with_provenance],
         )
+
+    def test_export_respects_best_take_overrides(self) -> None:
+        override = {"asset-review": "segment-clip-gated"}
+        fixture = ROOT / "fixtures" / "review-states-project.json"
+
+        project = load_project(fixture, best_take_overrides=override)
+        xml_payload = export_project_fcpxml(fixture, best_take_overrides=override)
+        clip_summaries = parse_fcpxml_timeline(xml_payload)
+
+        self.assertEqual(len(clip_summaries), len(project.timeline.items))
+        self.assertEqual(len(clip_summaries), 1)
+        self.assertAlmostEqual(
+            clip_summaries[0].duration_sec,
+            project.timeline.items[0].trim_out_sec - project.timeline.items[0].trim_in_sec,
+        )
+
+    def test_export_omits_asset_when_best_take_is_cleared(self) -> None:
+        override = {"asset-review": CLEAR_BEST_TAKE_SENTINEL}
+        fixture = ROOT / "fixtures" / "review-states-project.json"
+
+        project = load_project(fixture, best_take_overrides=override)
+        xml_payload = export_project_fcpxml(fixture, best_take_overrides=override)
+        clip_summaries = parse_fcpxml_timeline(xml_payload)
+
+        self.assertEqual(len(project.timeline.items), 0)
+        self.assertEqual(len(clip_summaries), 0)
 
 
 if __name__ == "__main__":

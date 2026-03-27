@@ -26,6 +26,18 @@ export function loadActiveProject() {
   return invoke<LoadedProject>("load_active_project");
 }
 
+export function selectBestTake(assetId: string, segmentId: string) {
+  return invoke<LoadedProject>("select_best_take", { assetId, segmentId });
+}
+
+export function clearBestTake(assetId: string) {
+  return invoke<LoadedProject>("clear_best_take", { assetId });
+}
+
+export function clearBestTakeOverride(assetId: string) {
+  return invoke<LoadedProject>("clear_best_take_override", { assetId });
+}
+
 export function inspectMediaFolder(path: string) {
   return invoke<MediaFolderSummary>("inspect_media_folder", { path });
 }

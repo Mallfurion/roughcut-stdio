@@ -34,7 +34,7 @@ from services.analyzer.app.analysis import (
 )
 from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
 from services.analyzer.app.prefilter import AudioSignal, FrameSignal, SeedRegion
-from services.analyzer.app.service import load_project
+from services.analyzer.app.service import CLEAR_BEST_TAKE_SENTINEL, load_project, load_project_with_override_file
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -1466,6 +1466,60 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertTrue(segments["segment-best"].review_state.model_analyzed)
         self.assertTrue(segments["segment-clip-gated"].review_state.deterministic_fallback)
         self.assertIn("budget capped", segments["segment-budget-capped"].review_state.analysis_path_summary)
+
+    def test_load_project_applies_best_take_override_and_rebuilds_timeline(self) -> None:
+        project = load_project(
+            REVIEW_FIXTURE,
+            best_take_overrides={"asset-review": "segment-clip-gated"},
+        )
+        takes = {take.candidate_segment_id: take for take in project.take_recommendations}
+        overridden_take = takes["segment-clip-gated"]
+        replaced_take = takes["segment-best"]
+
+        self.assertTrue(overridden_take.is_best_take)
+        self.assertTrue(overridden_take.editor_override)
+        self.assertFalse(overridden_take.baseline_is_best_take)
+        self.assertFalse(replaced_take.is_best_take)
+        self.assertTrue(replaced_take.baseline_is_best_take)
+        self.assertIn("desktop override replaced it", replaced_take.selection_reason)
+        self.assertEqual(len(project.timeline.items), 1)
+        self.assertEqual(project.timeline.items[0].take_recommendation_id, overridden_take.id)
+
+    def test_load_project_can_clear_pipeline_selected_best_take_for_asset(self) -> None:
+        project = load_project(
+            REVIEW_FIXTURE,
+            best_take_overrides={"asset-review": CLEAR_BEST_TAKE_SENTINEL},
+        )
+        takes = {take.candidate_segment_id: take for take in project.take_recommendations}
+        cleared_take = takes["segment-best"]
+
+        self.assertFalse(any(take.is_best_take for take in project.take_recommendations))
+        self.assertTrue(cleared_take.baseline_is_best_take)
+        self.assertTrue(cleared_take.editor_cleared)
+        self.assertFalse(cleared_take.editor_override)
+        self.assertIn("Editor cleared this clip from the timeline", cleared_take.selection_reason)
+        self.assertEqual(len(project.timeline.items), 0)
+
+    def test_load_project_with_override_file_ignores_stale_override_payload(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            override_path = Path(temp_dir) / "best-take-overrides.json"
+            override_path.write_text(
+                """
+                {
+                  "project_id": "wrong-project",
+                  "candidate_segment_ids": ["segment-best"],
+                  "overrides": {"asset-review": "segment-clip-gated"}
+                }
+                """.strip(),
+                encoding="utf-8",
+            )
+
+            project = load_project_with_override_file(REVIEW_FIXTURE, override_path)
+            takes = {take.candidate_segment_id: take for take in project.take_recommendations}
+
+            self.assertTrue(takes["segment-best"].is_best_take)
+            self.assertFalse(takes["segment-best"].editor_override)
+            self.assertFalse(takes["segment-clip-gated"].is_best_take)
 
     def test_boundary_refinement_uses_transcript_spans_when_enabled(self) -> None:
         asset = Asset(

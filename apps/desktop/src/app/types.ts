@@ -118,6 +118,9 @@ export type TakeRecommendation = {
   candidate_segment_id: string;
   title: string;
   is_best_take: boolean;
+  baseline_is_best_take?: boolean;
+  editor_override?: boolean;
+  editor_cleared?: boolean;
   selection_reason: string;
   score_technical?: number;
   score_semantic?: number;
@@ -217,6 +220,7 @@ export type AppState = {
   expandedClipIds: string[];
   allClipsExpanded: boolean;
   project: LoadedProject | null;
+  reviewBusy: boolean;
   exportPath: string;
   exportBusy: boolean;
   exportMessage: string;

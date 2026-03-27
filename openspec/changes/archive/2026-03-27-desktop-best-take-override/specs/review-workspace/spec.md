@@ -1,14 +1,4 @@
-# review-workspace Specification
-
-## Purpose
-TBD - created by archiving change init-deterministic-pass. Update Purpose after archive.
-## Requirements
-### Requirement: Web app SHALL load the active generated project for review
-The current generated project review capability SHALL be preserved, but the primary review surface for the product SHALL become the desktop application rather than the standalone browser app.
-
-#### Scenario: User completes a desktop process run
-- **WHEN** processing completes successfully in the desktop app
-- **THEN** the desktop review surface SHALL load the active generated project state for review
+## MODIFIED Requirements
 
 ### Requirement: Web app SHALL expose recommended segments and timeline state
 The review experience SHALL present recommended takes, segment descriptions, scoring context, asset metadata, and rough timeline state in the desktop application as the primary product surface. The desktop review surface SHALL also let the editor promote a candidate segment to the active best take for its asset, clear the active best take for an asset, SHALL refresh the active timeline state to reflect that editorial state, and SHALL display concise sequence-level rationale and override state for editor inspection.
@@ -32,10 +22,3 @@ The review experience SHALL present recommended takes, segment descriptions, sco
 - **THEN** the desktop review surface SHALL remove that asset from the active timeline preview
 - **THEN** the review surface SHALL show that the previously selected analyzer take was cleared from the timeline
 - **THEN** the editor SHALL still be able to promote another candidate segment for that asset
-
-### Requirement: Web app SHALL surface AI segment annotations when present
-Provider-backed segment understanding and evidence details SHALL remain reviewable, but the primary place they are displayed SHALL become the desktop review workspace.
-
-#### Scenario: Desktop review shows AI understanding
-- **WHEN** a candidate segment includes `ai_understanding`
-- **THEN** the desktop UI SHALL show provider, keep label, confidence, rationale, and role-oriented details for that segment

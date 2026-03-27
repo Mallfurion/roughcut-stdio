@@ -2,7 +2,7 @@ import type { ClipView } from "../../app/types.ts";
 import { escapeHtml } from "../../lib/html.ts";
 import { renderSegmentCard } from "./segment-card.ts";
 
-export function renderClipCard(view: ClipView, expandedClipIds: string[]) {
+export function renderClipCard(view: ClipView, expandedClipIds: string[], allowOverrides: boolean, reviewBusy: boolean) {
   const expanded = expandedClipIds.includes(view.asset.id);
   const dedupCount = view.segments.filter(({ segment }) => segment.prefilter?.deduplicated).length;
   const activeCount = view.segments.length - dedupCount;
@@ -26,7 +26,7 @@ export function renderClipCard(view: ClipView, expandedClipIds: string[]) {
         expanded
           ? `
       <div class="section-list">
-        ${view.segments.map((segmentView) => renderSegmentCard(segmentView, view.asset)).join("")}
+        ${view.segments.map((segmentView) => renderSegmentCard(segmentView, view.asset, { allowOverrides, reviewBusy })).join("")}
       </div>`
           : ""
       }

@@ -281,6 +281,18 @@ h2 {
   border: 1px solid var(--border);
 }
 
+.button.button-danger-soft {
+  background: rgba(255, 128, 128, 0.16);
+  color: #ffd1d1;
+  border: 1px solid rgba(255, 128, 128, 0.3);
+}
+
+.button.button-warning-soft {
+  background: rgba(255, 202, 107, 0.16);
+  color: #ffe6b8;
+  border: 1px solid rgba(255, 202, 107, 0.3);
+}
+
 .icon-button {
   width: 44px;
   height: 44px;
@@ -747,6 +759,16 @@ h2 {
 .section-facts {
   gap: 8px;
   margin-top: 14px;
+}
+
+.section-card-actions {
+  justify-content: flex-end;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.section-card-actions .button {
+  padding: 10px 16px;
 }
 
 .section-detail-grid {

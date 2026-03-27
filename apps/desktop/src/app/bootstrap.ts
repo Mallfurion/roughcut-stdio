@@ -11,6 +11,7 @@ import { stringifyError } from "../lib/format.ts";
 import { renderAppShell } from "../render/app-shell.ts";
 import { resolveClipViews } from "../render/view-models.ts";
 import {
+  clearBestTake,
   chooseTimelineExportPath,
   cleanGenerated,
   confirmWorkflowReset,
@@ -18,10 +19,12 @@ import {
   getProcessState,
   inspectMediaFolder,
   listenProcessUpdate,
+  clearBestTakeOverride,
   loadActiveProject,
   loadAppSettings,
   pickMediaDirectory,
   saveAppSettings,
+  selectBestTake,
   startProcess,
 } from "../platform/desktop-api.ts";
 
@@ -169,6 +172,21 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
           toggleClip(element.dataset.clipId);
         }
         return;
+      case "set-best-take":
+        if (element.dataset.assetId && element.dataset.segmentId) {
+          await handleSetBestTake(element.dataset.assetId, element.dataset.segmentId);
+        }
+        return;
+      case "clear-best-take":
+        if (element.dataset.assetId) {
+          await handleClearBestTake(element.dataset.assetId);
+        }
+        return;
+      case "clear-best-take-override":
+        if (element.dataset.assetId) {
+          await handleClearBestTakeOverride(element.dataset.assetId);
+        }
+        return;
       case "save-settings":
         await handleSaveSettings();
         return;
@@ -304,6 +322,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     appState.expandedClipIds = [];
     appState.allClipsExpanded = false;
     appState.project = null;
+    appState.reviewBusy = false;
     appState.exportPath = "";
     appState.exportBusy = false;
     appState.exportMessage = "";
@@ -404,6 +423,60 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
       appState.exportMessage = `Export failed: ${stringifyError(error)}`;
     } finally {
       appState.exportBusy = false;
+      render();
+    }
+  }
+
+  async function handleSetBestTake(assetId: string, segmentId: string) {
+    appState.reviewBusy = true;
+    appState.exportMessage = "";
+    render();
+
+    try {
+      appState.project = await selectBestTake(assetId, segmentId);
+      appState.exportMessage = "Updated the timeline with the editor-selected best take.";
+      ensureFirstExpandedClip();
+      syncAllClipsExpanded();
+    } catch (error) {
+      appState.exportMessage = `Best-take update failed: ${stringifyError(error)}`;
+    } finally {
+      appState.reviewBusy = false;
+      render();
+    }
+  }
+
+  async function handleClearBestTake(assetId: string) {
+    appState.reviewBusy = true;
+    appState.exportMessage = "";
+    render();
+
+    try {
+      appState.project = await clearBestTake(assetId);
+      appState.exportMessage = "Removed this clip's selected take from the timeline.";
+      ensureFirstExpandedClip();
+      syncAllClipsExpanded();
+    } catch (error) {
+      appState.exportMessage = `Best-take clear failed: ${stringifyError(error)}`;
+    } finally {
+      appState.reviewBusy = false;
+      render();
+    }
+  }
+
+  async function handleClearBestTakeOverride(assetId: string) {
+    appState.reviewBusy = true;
+    appState.exportMessage = "";
+    render();
+
+    try {
+      appState.project = await clearBestTakeOverride(assetId);
+      appState.exportMessage = "Restored analyzer-selected takes for this clip.";
+      ensureFirstExpandedClip();
+      syncAllClipsExpanded();
+    } catch (error) {
+      appState.exportMessage = `Best-take reset failed: ${stringifyError(error)}`;
+    } finally {
+      appState.reviewBusy = false;
       render();
     }
   }

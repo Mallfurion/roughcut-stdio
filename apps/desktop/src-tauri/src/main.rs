@@ -1,6 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -141,6 +141,15 @@ struct LoadedProjectPayload {
     file_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct BestTakeOverrideStore {
+    project_id: String,
+    candidate_segment_ids: Vec<String>,
+    overrides: HashMap<String, String>,
+}
+
+const CLEAR_BEST_TAKE_SENTINEL: &str = "__roughcut_clear_best_take__";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProcessRunState {
     running: bool,
@@ -203,7 +212,10 @@ fn get_process_state(state: State<ProcessController>) -> Result<ProcessRunState,
 fn check_runtime_ready(config: RuntimeConfig) -> Result<RuntimeCheckResult, String> {
     let root = workspace_root()?;
     let output = run_script_capture(&root, "scripts/check_ai.sh", &build_env(&config, None))?;
-    Ok(parse_runtime_check_output(&output.stdout, output.status.success()))
+    Ok(parse_runtime_check_output(
+        &output.stdout,
+        output.status.success(),
+    ))
 }
 
 #[tauri::command]
@@ -211,22 +223,23 @@ fn run_setup(config: RuntimeConfig) -> Result<RuntimeCheckResult, String> {
     let root = workspace_root()?;
     let setup_output = run_script_capture(&root, "scripts/setup.sh", &build_env(&config, None))?;
     let check_output = run_script_capture(&root, "scripts/check_ai.sh", &build_env(&config, None))?;
-    let mut result = parse_runtime_check_output(&check_output.stdout, check_output.status.success());
+    let mut result =
+        parse_runtime_check_output(&check_output.stdout, check_output.status.success());
     let mut combined = String::new();
     if !setup_output.stdout.trim().is_empty() {
-      combined.push_str(&setup_output.stdout);
+        combined.push_str(&setup_output.stdout);
     }
     if !setup_output.stderr.trim().is_empty() {
-      if !combined.is_empty() {
-        combined.push_str("\n---\n");
-      }
-      combined.push_str(&setup_output.stderr);
+        if !combined.is_empty() {
+            combined.push_str("\n---\n");
+        }
+        combined.push_str(&setup_output.stderr);
     }
     if !check_output.stdout.trim().is_empty() {
-      if !combined.is_empty() {
-        combined.push_str("\n---\n");
-      }
-      combined.push_str(&check_output.stdout);
+        if !combined.is_empty() {
+            combined.push_str("\n---\n");
+        }
+        combined.push_str(&check_output.stdout);
     }
     result.output = combined;
     Ok(result)
@@ -313,27 +326,25 @@ fn start_process(
 #[tauri::command]
 fn load_active_project() -> Result<LoadedProjectPayload, String> {
     let root = workspace_root()?;
-    let generated_path = root.join("generated/project.json");
-    let sample_path = root.join("fixtures/sample-project.json");
-    let (path, source) = if generated_path.exists() {
-        (generated_path, "generated")
-    } else {
-        (sample_path, "sample")
-    };
-    let text = fs::read_to_string(&path).map_err(|error| format!("Failed to read project JSON: {error}"))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| format!("Failed to parse project JSON: {error}"))?;
-    Ok(LoadedProjectPayload {
-        project: value,
-        source: source.into(),
-        file_path: path.to_string_lossy().into_owned(),
-    })
+    load_active_project_payload(&root)
 }
 
 #[tauri::command]
 fn export_timeline(target_path: String) -> Result<String, String> {
     let root = workspace_root()?;
-    let output = run_script_capture(&root, "scripts/export.sh", &[])?;
+    let generated_path = generated_project_path(&root);
+    if !generated_path.exists() {
+        return Err("Missing generated project at generated/project.json".into());
+    }
+
+    let mut args = vec![generated_path.to_string_lossy().into_owned()];
+    let override_path = best_take_override_path(&root);
+    if override_path.exists() {
+        args.push(override_path.to_string_lossy().into_owned());
+    }
+
+    let output =
+        run_python_script_capture(&root, "services/analyzer/scripts/export_fcpxml.py", &args)?;
     if !output.status.success() {
         return Err(format!(
             "Export script failed:\n{}\n{}",
@@ -341,27 +352,49 @@ fn export_timeline(target_path: String) -> Result<String, String> {
         ));
     }
     let source_path = root.join("generated/timeline.fcpxml");
-    if !source_path.exists() {
-        return Err("Export did not produce generated/timeline.fcpxml".into());
-    }
+    fs::write(&source_path, &output.stdout)
+        .map_err(|error| format!("Failed to write {}: {error}", source_path.display()))?;
     let target = PathBuf::from(target_path);
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("Failed to create export directory: {error}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create export directory: {error}"))?;
     }
-    fs::copy(&source_path, &target).map_err(|error| format!("Failed to write export target: {error}"))?;
+    fs::copy(&source_path, &target)
+        .map_err(|error| format!("Failed to write export target: {error}"))?;
     Ok(target.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn select_best_take(asset_id: String, segment_id: String) -> Result<LoadedProjectPayload, String> {
+    let root = workspace_root()?;
+    update_best_take_override(&root, asset_id.trim(), Some(segment_id.trim()))?;
+    load_active_project_payload(&root)
+}
+
+#[tauri::command]
+fn clear_best_take_override(asset_id: String) -> Result<LoadedProjectPayload, String> {
+    let root = workspace_root()?;
+    update_best_take_override(&root, asset_id.trim(), None)?;
+    load_active_project_payload(&root)
+}
+
+#[tauri::command]
+fn clear_best_take(asset_id: String) -> Result<LoadedProjectPayload, String> {
+    let root = workspace_root()?;
+    update_best_take_override(&root, asset_id.trim(), Some(CLEAR_BEST_TAKE_SENTINEL))?;
+    load_active_project_payload(&root)
 }
 
 #[tauri::command]
 fn clean_generated() -> Result<(), String> {
     let root = workspace_root()?;
     let generated_dir = root.join("generated");
-    
+
     if generated_dir.exists() {
         fs::remove_dir_all(&generated_dir)
             .map_err(|error| format!("Failed to remove generated folder: {error}"))?;
     }
-    
+
     Ok(())
 }
 
@@ -371,6 +404,160 @@ fn workspace_root() -> Result<PathBuf, String> {
         .join("../../..")
         .canonicalize()
         .map_err(|error| format!("Failed to resolve workspace root: {error}"))
+}
+
+fn generated_project_path(root: &Path) -> PathBuf {
+    root.join("generated/project.json")
+}
+
+fn sample_project_path(root: &Path) -> PathBuf {
+    root.join("fixtures/sample-project.json")
+}
+
+fn best_take_override_path(root: &Path) -> PathBuf {
+    root.join("generated/best-take-overrides.json")
+}
+
+fn load_active_project_payload(root: &Path) -> Result<LoadedProjectPayload, String> {
+    let generated_path = generated_project_path(root);
+    let sample_path = sample_project_path(root);
+    let (path, source) = if generated_path.exists() {
+        (generated_path, "generated")
+    } else {
+        (sample_path, "sample")
+    };
+
+    let mut args = vec![path.to_string_lossy().into_owned()];
+    let override_path = best_take_override_path(root);
+    if source == "generated" && override_path.exists() {
+        args.push(override_path.to_string_lossy().into_owned());
+    }
+    let output =
+        run_python_script_capture(root, "services/analyzer/scripts/resolve_project.py", &args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "Project resolve failed:\n{}\n{}",
+            output.stdout, output.stderr
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|error| format!("Failed to parse resolved project JSON: {error}"))?;
+    Ok(LoadedProjectPayload {
+        project: value,
+        source: source.into(),
+        file_path: path.to_string_lossy().into_owned(),
+    })
+}
+
+fn load_project_signature(root: &Path) -> Result<BestTakeOverrideStore, String> {
+    let path = generated_project_path(root);
+    if !path.exists() {
+        return Err("Missing generated project at generated/project.json".into());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("Failed to parse generated project JSON: {error}"))?;
+    let project_id = value
+        .get("project")
+        .and_then(|project| project.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Generated project is missing project.id".to_string())?
+        .to_string();
+    let candidate_segments = value
+        .get("candidate_segments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Generated project is missing candidate_segments".to_string())?;
+    let mut candidate_segment_ids = Vec::with_capacity(candidate_segments.len());
+    for segment in candidate_segments {
+        let segment_id = segment
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Candidate segment is missing id".to_string())?;
+        candidate_segment_ids.push(segment_id.to_string());
+    }
+    candidate_segment_ids.sort();
+    Ok(BestTakeOverrideStore {
+        project_id,
+        candidate_segment_ids,
+        overrides: HashMap::new(),
+    })
+}
+
+fn update_best_take_override(
+    root: &Path,
+    asset_id: &str,
+    segment_id: Option<&str>,
+) -> Result<(), String> {
+    if asset_id.is_empty() {
+        return Err("Missing asset id for best-take override.".into());
+    }
+
+    let mut signature = load_project_signature(root)?;
+    let generated_text = fs::read_to_string(generated_project_path(root))
+        .map_err(|error| format!("Failed to read generated project JSON: {error}"))?;
+    let generated_value: serde_json::Value = serde_json::from_str(&generated_text)
+        .map_err(|error| format!("Failed to parse generated project JSON: {error}"))?;
+    let candidate_segments = generated_value
+        .get("candidate_segments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Generated project is missing candidate_segments".to_string())?;
+
+    let segment_matches_asset = |candidate_segment_id: &str, expected_asset_id: &str| -> bool {
+        candidate_segments.iter().any(|segment| {
+            segment.get("id").and_then(serde_json::Value::as_str) == Some(candidate_segment_id)
+                && segment.get("asset_id").and_then(serde_json::Value::as_str)
+                    == Some(expected_asset_id)
+        })
+    };
+
+    let override_path = best_take_override_path(root);
+    if override_path.exists() {
+        if let Ok(text) = fs::read_to_string(&override_path) {
+            if let Ok(existing) = serde_json::from_str::<BestTakeOverrideStore>(&text) {
+                if existing.project_id == signature.project_id
+                    && existing.candidate_segment_ids == signature.candidate_segment_ids
+                {
+                    signature.overrides = existing.overrides;
+                }
+            }
+        }
+    }
+
+    match segment_id {
+        Some(value) => {
+            if value.is_empty() {
+                return Err("Missing segment id for best-take override.".into());
+            }
+            if value != CLEAR_BEST_TAKE_SENTINEL && !segment_matches_asset(value, asset_id) {
+                return Err("Selected segment does not belong to the requested asset.".into());
+            }
+            signature
+                .overrides
+                .insert(asset_id.to_string(), value.to_string());
+        }
+        None => {
+            signature.overrides.remove(asset_id);
+        }
+    }
+
+    if signature.overrides.is_empty() {
+        if override_path.exists() {
+            fs::remove_file(&override_path).map_err(|error| {
+                format!("Failed to remove {}: {error}", override_path.display())
+            })?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = override_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(&signature)
+        .map_err(|error| format!("Failed to serialize override state: {error}"))?;
+    fs::write(&override_path, content)
+        .map_err(|error| format!("Failed to write {}: {error}", override_path.display()))
 }
 
 fn count_video_files(root: &Path) -> Result<usize, String> {
@@ -409,7 +596,8 @@ fn default_app_settings() -> AppSettings {
     AppSettings {
         ai_provider: "deterministic".into(),
         project_name: "Roughcut Stdio Project".into(),
-        story_prompt: "Build a coherent rough cut from the strongest visual and spoken beats.".into(),
+        story_prompt: "Build a coherent rough cut from the strongest visual and spoken beats."
+            .into(),
         ai_mode: "fast".into(),
         ai_timeout_sec: "45".into(),
         ai_model: "qwen3.5-9b".into(),
@@ -592,28 +780,65 @@ fn write_app_settings(root: &Path, settings: &AppSettings) -> Result<(), String>
 
 fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)> {
     vec![
-        ("TIMELINE_AI_PROVIDER".into(), sanitize_single_line(&settings.ai_provider)),
-        ("TIMELINE_PROJECT_NAME".into(), sanitize_single_line(&settings.project_name)),
-        ("TIMELINE_STORY_PROMPT".into(), sanitize_single_line(&settings.story_prompt)),
-        ("TIMELINE_AI_MODE".into(), sanitize_single_line(&settings.ai_mode)),
-        ("TIMELINE_AI_TIMEOUT_SEC".into(), sanitize_single_line(&settings.ai_timeout_sec)),
-        ("TIMELINE_AI_MODEL".into(), sanitize_single_line(&settings.ai_model)),
-        ("TIMELINE_AI_BASE_URL".into(), sanitize_single_line(&settings.ai_base_url)),
-        ("TIMELINE_AI_MODEL_ID".into(), sanitize_single_line(&settings.ai_model_id)),
-        ("TIMELINE_AI_DEVICE".into(), sanitize_single_line(&settings.ai_device)),
+        (
+            "TIMELINE_AI_PROVIDER".into(),
+            sanitize_single_line(&settings.ai_provider),
+        ),
+        (
+            "TIMELINE_PROJECT_NAME".into(),
+            sanitize_single_line(&settings.project_name),
+        ),
+        (
+            "TIMELINE_STORY_PROMPT".into(),
+            sanitize_single_line(&settings.story_prompt),
+        ),
+        (
+            "TIMELINE_AI_MODE".into(),
+            sanitize_single_line(&settings.ai_mode),
+        ),
+        (
+            "TIMELINE_AI_TIMEOUT_SEC".into(),
+            sanitize_single_line(&settings.ai_timeout_sec),
+        ),
+        (
+            "TIMELINE_AI_MODEL".into(),
+            sanitize_single_line(&settings.ai_model),
+        ),
+        (
+            "TIMELINE_AI_BASE_URL".into(),
+            sanitize_single_line(&settings.ai_base_url),
+        ),
+        (
+            "TIMELINE_AI_MODEL_ID".into(),
+            sanitize_single_line(&settings.ai_model_id),
+        ),
+        (
+            "TIMELINE_AI_DEVICE".into(),
+            sanitize_single_line(&settings.ai_device),
+        ),
         (
             "TIMELINE_AI_MAX_SEGMENTS_PER_ASSET".into(),
             sanitize_single_line(&settings.ai_max_segments_per_asset),
         ),
-        ("TIMELINE_AI_MAX_KEYFRAMES".into(), sanitize_single_line(&settings.ai_max_keyframes)),
+        (
+            "TIMELINE_AI_MAX_KEYFRAMES".into(),
+            sanitize_single_line(&settings.ai_max_keyframes),
+        ),
         (
             "TIMELINE_AI_KEYFRAME_MAX_WIDTH".into(),
             sanitize_single_line(&settings.ai_keyframe_max_width),
         ),
-        ("TIMELINE_AI_CONCURRENCY".into(), sanitize_single_line(&settings.ai_concurrency)),
+        (
+            "TIMELINE_AI_CONCURRENCY".into(),
+            sanitize_single_line(&settings.ai_concurrency),
+        ),
         (
             "TIMELINE_AI_CACHE".into(),
-            if settings.ai_cache_enabled { "true".into() } else { "false".into() },
+            if settings.ai_cache_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
         (
             "TIMELINE_TRANSCRIPT_PROVIDER".into(),
@@ -625,30 +850,63 @@ fn managed_app_settings_entries(settings: &AppSettings) -> Vec<(String, String)>
         ),
         (
             "TIMELINE_AI_AUDIO_ENABLED".into(),
-            if settings.audio_enabled { "true".into() } else { "false".into() },
+            if settings.audio_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
         (
             "TIMELINE_DEDUPLICATION_ENABLED".into(),
-            if settings.deduplication_enabled { "true".into() } else { "false".into() },
+            if settings.deduplication_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
-        ("TIMELINE_DEDUP_THRESHOLD".into(), sanitize_single_line(&settings.dedup_threshold)),
+        (
+            "TIMELINE_DEDUP_THRESHOLD".into(),
+            sanitize_single_line(&settings.dedup_threshold),
+        ),
         (
             "TIMELINE_AI_CLIP_ENABLED".into(),
-            if settings.clip_enabled { "true".into() } else { "false".into() },
+            if settings.clip_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
-        ("TIMELINE_AI_CLIP_MIN_SCORE".into(), sanitize_single_line(&settings.clip_min_score)),
-        ("TIMELINE_AI_VLM_BUDGET_PCT".into(), sanitize_single_line(&settings.vlm_budget_pct)),
+        (
+            "TIMELINE_AI_CLIP_MIN_SCORE".into(),
+            sanitize_single_line(&settings.clip_min_score),
+        ),
+        (
+            "TIMELINE_AI_VLM_BUDGET_PCT".into(),
+            sanitize_single_line(&settings.vlm_budget_pct),
+        ),
         (
             "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT".into(),
-            if settings.segment_boundary_refinement_enabled { "true".into() } else { "false".into() },
+            if settings.segment_boundary_refinement_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
         (
             "TIMELINE_SEGMENT_LEGACY_FALLBACK".into(),
-            if settings.segment_legacy_fallback_enabled { "true".into() } else { "false".into() },
+            if settings.segment_legacy_fallback_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
         (
             "TIMELINE_SEGMENT_SEMANTIC_VALIDATION".into(),
-            if settings.segment_semantic_validation_enabled { "true".into() } else { "false".into() },
+            if settings.segment_semantic_validation_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
         ),
         (
             "TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD".into(),
@@ -735,8 +993,14 @@ fn build_env(config: &RuntimeConfig, media_dir: Option<&str>) -> Vec<(String, St
         }
         "mlx-vlm-local" => {
             envs.push(("TIMELINE_AI_MODEL_ID".into(), config.ai_model_id.clone()));
-            envs.push(("TIMELINE_AI_MODEL_REVISION".into(), config.ai_model_revision.clone()));
-            envs.push(("TIMELINE_AI_MODEL_CACHE_DIR".into(), config.ai_model_cache_dir.clone()));
+            envs.push((
+                "TIMELINE_AI_MODEL_REVISION".into(),
+                config.ai_model_revision.clone(),
+            ));
+            envs.push((
+                "TIMELINE_AI_MODEL_CACHE_DIR".into(),
+                config.ai_model_cache_dir.clone(),
+            ));
             envs.push(("TIMELINE_AI_DEVICE".into(), config.ai_device.clone()));
         }
         _ => {}
@@ -764,6 +1028,30 @@ fn run_script_capture(
     let output = command
         .output()
         .map_err(|error| format!("Failed to run {script}: {error}"))?;
+    Ok(ScriptOutput {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn run_python_script_capture(
+    root: &Path,
+    script: &str,
+    args: &[String],
+) -> Result<ScriptOutput, String> {
+    let bundled_python = root.join(".venv/bin/python3");
+    let python = if bundled_python.exists() {
+        bundled_python
+    } else {
+        PathBuf::from("python3")
+    };
+
+    let mut command = Command::new(&python);
+    command.arg(script).args(args).current_dir(root);
+    let output = command
+        .output()
+        .map_err(|error| format!("Failed to run {} {}: {error}", python.display(), script))?;
     Ok(ScriptOutput {
         status: output.status,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -800,7 +1088,9 @@ fn parse_runtime_check_output(output: &str, success: bool) -> RuntimeCheckResult
                 "degraded" => result.degraded = value == "yes",
                 "runtime_summary" => result.runtime_summary = value,
                 "degraded_reasons" => result.degraded_reasons = parse_runtime_list_field(&value),
-                "intentional_skip_reasons" => result.intentional_skip_reasons = parse_runtime_list_field(&value),
+                "intentional_skip_reasons" => {
+                    result.intentional_skip_reasons = parse_runtime_list_field(&value)
+                }
                 _ => {}
             }
         }
@@ -840,8 +1130,14 @@ fn spawn_process_run(
         .spawn()
         .map_err(|error| format!("Failed to start process script: {error}"))?;
 
-    let stdout = child.stdout.take().ok_or_else(|| "Missing process stdout".to_string())?;
-    let stderr = child.stderr.take().ok_or_else(|| "Missing process stderr".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Missing process stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Missing process stderr".to_string())?;
 
     let stdout_state = state.clone();
     let stderr_state = state.clone();
@@ -867,12 +1163,18 @@ fn spawn_process_run(
     current.running = false;
     if status.success() {
         current.status = "completed".into();
-        current.output_path = Some(root.join("generated/project.json").to_string_lossy().into_owned());
+        current.output_path = Some(
+            root.join("generated/project.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
         current.logs.push("Process completed successfully.".into());
     } else {
         current.status = "failed".into();
         current.error = Some(format!("Process exited with status {status}"));
-        current.logs.push(format!("Process exited with status {status}"));
+        current
+            .logs
+            .push(format!("Process exited with status {status}"));
     }
     drop(current);
     emit_process_state(app, state);
@@ -988,6 +1290,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_runtime_ready,
             clean_generated,
+            clear_best_take,
+            clear_best_take_override,
             export_timeline,
             get_process_state,
             inspect_media_folder,
@@ -995,6 +1299,7 @@ pub fn run() {
             load_active_project,
             run_setup,
             save_app_settings,
+            select_best_take,
             start_process,
         ])
         .run(tauri::generate_context!())

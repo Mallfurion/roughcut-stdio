@@ -68,6 +68,7 @@ export function createInitialAppState(): AppState {
     expandedClipIds: [],
     allClipsExpanded: false,
     project: null,
+    reviewBusy: false,
     exportPath: "",
     exportBusy: false,
     exportMessage: "",
