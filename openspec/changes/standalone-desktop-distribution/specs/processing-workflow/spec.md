@@ -16,9 +16,17 @@ The repository workflow SHALL continue to support preparing and validating the c
 ## ADDED Requirements
 
 ### Requirement: Packaged process workflow SHALL preserve generated artifacts and diagnostics
-The packaged desktop workflow SHALL preserve the same project-level generated state, processing diagnostics, and export-oriented artifacts that the repository workflow exposes, even when those artifacts are written to app-managed storage.
+The packaged desktop workflow SHALL preserve the same project-level generated state, processing diagnostics, benchmark artifacts, and export-oriented artifacts that the repository workflow exposes, even when those artifacts are written to app-managed storage.
 
 #### Scenario: Packaged process run completes
 - **WHEN** the user completes a process run from an installed desktop build
-- **THEN** the app SHALL persist a generated project document, process diagnostics, and exportable timeline state
+- **THEN** the app SHALL persist a generated project document, process diagnostics, benchmark history, and exportable timeline state
 - **THEN** those artifacts SHALL remain inspectable to the desktop workflow even if their storage location differs from the repository `generated/` path
+
+### Requirement: Packaged process workflow SHALL translate packaged settings into runtime configuration
+The packaged desktop workflow SHALL persist packaged settings outside repo `.env` files and SHALL translate those settings into analyzer/runtime configuration when packaged commands execute.
+
+#### Scenario: Packaged app runs with saved settings
+- **WHEN** the user saves runtime settings in an installed desktop build
+- **THEN** the app SHALL persist those settings in app-managed configuration storage
+- **THEN** a subsequent packaged process or export run SHALL use those persisted settings without requiring a repository `.env` file
