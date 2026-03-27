@@ -5,7 +5,7 @@ Define the persistent benchmark artifacts and run-to-run comparison behavior for
 
 ## Requirements
 ### Requirement: Process runs SHALL persist structured benchmark records
-Each successful `npm run process` invocation SHALL persist a structured benchmark record under `generated/benchmarks/` for that run. The record SHALL include a unique run identifier, start and completion timestamps, total elapsed runtime, major pipeline phase durations, workload counts, and effective runtime configuration needed to compare runs. When segmentation-quality evaluation or semantic boundary validation is active, the benchmark record SHALL also preserve the resulting quality and semantic-impact metrics for that run.
+Each successful `npm run process` invocation SHALL persist a structured benchmark record under `generated/benchmarks/` for that run. The record SHALL include a unique run identifier, start and completion timestamps, total elapsed runtime, major pipeline phase durations, workload counts, and effective runtime configuration needed to compare runs. When segmentation-quality evaluation or semantic boundary validation is active, the benchmark record SHALL also preserve the resulting quality and semantic-impact metrics for that run, including any sequence-level quality summary produced by the evaluation harness.
 
 #### Scenario: Successful process run creates benchmark artifacts
 - **WHEN** `npm run process` completes successfully
@@ -23,6 +23,7 @@ Each successful `npm run process` invocation SHALL persist a structured benchmar
 - **WHEN** a benchmark record is written for a process or evaluation run that collects segmentation-quality metrics
 - **THEN** the record SHALL include transcript-targeting, transcript-probing, transcript-excerpt, speech-fallback, and semantic-validation counters when available
 - **THEN** the record SHALL preserve any fixture-set identifier used for that run
+- **THEN** the record SHALL preserve any sequence-level evaluation summary produced for that run
 
 #### Scenario: Benchmark record captures semantic-validation activation
 - **WHEN** semantic boundary validation is enabled for a completed run
@@ -41,3 +42,24 @@ The benchmark system SHALL compare a completed process run with prior benchmark 
 - **WHEN** `npm run process` completes successfully and no prior completed benchmark record exists
 - **THEN** the process summary SHALL indicate that no prior benchmark is available for comparison
 - **THEN** the absence of a prior benchmark SHALL not cause the process run to fail or warn
+
+### Requirement: Benchmark comparisons SHALL include quality context
+When a benchmarked run includes evaluation results, the comparison workflow SHALL preserve enough quality context to explain whether a faster or slower run also changed output quality.
+
+#### Scenario: Compared runs include evaluation output
+- **WHEN** the system compares a completed benchmarked run against prior history and both runs have quality-evaluation data
+- **THEN** the comparison output SHALL include the fixture set and high-level quality result for each run
+- **THEN** the comparison SHALL not reduce the run summary to runtime deltas alone
+
+### Requirement: Benchmark artifacts SHALL preserve runtime-stability context
+Benchmark artifacts SHALL preserve enough runtime-stability context to explain why a run changed in cost or capability, including cache usage, degraded-mode activation, and major gating decisions when available.
+
+#### Scenario: Run uses cache or degraded fallback
+- **WHEN** a completed run uses meaningful cache reuse or enters a degraded fallback mode for an optional capability
+- **THEN** the benchmark artifacts SHALL preserve that context
+- **THEN** the run summary SHALL be able to distinguish those cases from a fully fresh or fully healthy run
+
+#### Scenario: Expensive path is gated off
+- **WHEN** a completed run skips a major optional path because of readiness, budget, or gating rules
+- **THEN** the benchmark artifacts SHALL preserve the gating context that explains the skip
+- **THEN** runtime comparisons SHALL not reduce the difference to elapsed time alone

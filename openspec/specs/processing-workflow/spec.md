@@ -21,6 +21,14 @@ The process step SHALL read footage from `TIMELINE_MEDIA_DIR` when set and SHALL
 - **WHEN** `npm run process` finishes with story-assembly logic enabled
 - **THEN** `generated/project.json` SHALL preserve sequence-level rationale or grouping metadata for the final timeline
 
+### Requirement: Process SHALL preserve richer story-assembly diagnostics
+When project-level story assembly is active, generated process artifacts SHALL preserve more than the final order alone. They SHALL also preserve the assembly rationale or diagnostics needed to understand why the final sequence was chosen.
+
+#### Scenario: Process completes with enhanced story assembly
+- **WHEN** `npm run process` finishes with richer story-assembly logic enabled
+- **THEN** `generated/project.json` SHALL preserve sequence-level rationale for the final timeline
+- **THEN** the generated diagnostics or summaries SHALL preserve enough assembly context to explain major sequencing tradeoffs
+
 ### Requirement: Process SHALL report operational status during long runs
 The process workflow SHALL report benchmark timing statistics in addition to existing prefilter, deduplication, audio, and VLM reduction statistics. This reporting SHALL be included in `generated/process-summary.txt`, in the terminal-facing output saved to `generated/process-output.txt`, and in the benchmark artifacts for the completed run.
 
@@ -54,3 +62,15 @@ The process workflow SHALL report transcript runtime configuration and transcrip
 - **THEN** process output SHALL disclose that transcript extraction is unavailable and that fallback behavior will be used
 - **THEN** generated process artifacts SHALL preserve that transcript-unavailable status after the run
 
+### Requirement: Process SHALL preserve explicit degraded-runtime reporting
+The process workflow SHALL preserve explicit status for degraded or fallback runtime behavior rather than only reporting successful activation paths.
+
+#### Scenario: Optional runtime path is unavailable
+- **WHEN** a configured optional runtime path cannot be used during processing
+- **THEN** generated process artifacts SHALL preserve a named degraded or fallback status for that path
+- **THEN** processing SHALL continue when deterministic fallback is supported
+
+#### Scenario: Optional runtime path is skipped by gating
+- **WHEN** the analyzer intentionally skips an expensive optional path because of gating, budget, or readiness rules
+- **THEN** generated process artifacts SHALL preserve that skip or gating reason
+- **THEN** the skip SHALL remain distinguishable from a hard failure

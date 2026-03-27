@@ -86,3 +86,24 @@ The processing step SHALL report configured provider details, effective provider
 #### Scenario: Segment is skipped by fast-mode shortlisting
 - **WHEN** a segment is not sent to LM Studio because of fast-mode shortlisting
 - **THEN** its structured understanding SHALL indicate that AI was skipped in fast mode
+
+### Requirement: System SHALL persist richer speech-structure context when available
+When transcript-backed analysis derives richer spoken-structure signals beyond basic transcript excerpts or turns, the generated project SHALL preserve enough evidence or review metadata to distinguish those segments from generic speech fallback or simple turn alignment.
+
+#### Scenario: Segment uses richer spoken-structure evidence
+- **WHEN** a candidate segment is shaped or scored using richer spoken-structure context
+- **THEN** the generated project SHALL preserve enough speech-aware evidence or metadata to make that decision reviewable
+- **THEN** downstream inspection SHALL be able to distinguish that case from simple excerpt-backed or turn-aligned speech handling
+
+### Requirement: System SHALL make AI-path activation and fallback explicit
+The analyzer SHALL preserve explicit state for whether expensive AI-related paths activated, were skipped, were gated, or degraded to fallback behavior during a run.
+
+#### Scenario: Optional AI path is gated or skipped
+- **WHEN** an optional AI-related path does not run because of shortlisting, readiness, or runtime gating
+- **THEN** generated project state or process diagnostics SHALL preserve that reason
+- **THEN** downstream inspection SHALL be able to distinguish intentional gating from failure
+
+#### Scenario: Optional AI path degrades to fallback
+- **WHEN** a configured AI-related path cannot complete and the analyzer falls back to deterministic behavior
+- **THEN** generated state or diagnostics SHALL preserve the degraded-to-fallback status
+- **THEN** the run SHALL remain inspectable enough to explain that change in behavior

@@ -5,7 +5,7 @@ Define how local transcript extraction participates in analyzer processing witho
 
 ## Requirements
 ### Requirement: System SHALL support local transcript-backed analysis during processing
-The analyzer SHALL support an optional local transcript backend during process runs and SHALL extract timed transcript spans and transcript excerpts for assets when that backend is enabled and available. The analyzer SHALL also be allowed to use selective transcript targeting and short transcript probes so it does not need to fully transcribe every audio-bearing asset. When transcript evidence is available, the analyzer SHALL be able to derive turn-level transcript structure from that evidence for downstream segmentation and scoring.
+The analyzer SHALL support an optional local transcript backend during process runs and SHALL extract timed transcript spans and transcript excerpts for assets when that backend is enabled and available. The analyzer SHALL also be allowed to use selective transcript targeting and short transcript probes so it does not need to fully transcribe every audio-bearing asset. When transcript evidence is available, the analyzer SHALL be able to derive turn-level transcript structure from that evidence for downstream segmentation and scoring, and it SHALL be allowed to derive richer spoken-structure signals such as continuous monologue flow or question/answer continuity from that same evidence.
 
 #### Scenario: Transcript backend is enabled and available
 - **WHEN** a process run starts with transcript support enabled and a supported local transcript backend is available
@@ -26,6 +26,11 @@ The analyzer SHALL support an optional local transcript backend during process r
 - **WHEN** transcript spans are available for an asset and the analyzer can derive turn structure from them
 - **THEN** the analyzer SHALL preserve turn timing information as a first-class transcript input
 - **THEN** downstream segmentation and scoring stages SHALL be able to use that turn structure
+
+#### Scenario: Transcript-backed asset yields richer spoken structure
+- **WHEN** transcript spans and turns provide enough continuity to identify a larger spoken beat
+- **THEN** the analyzer SHALL be allowed to preserve that spoken structure as downstream evidence
+- **THEN** downstream segmentation or scoring SHALL be able to distinguish that case from a simple isolated turn
 
 #### Scenario: Transcript backend is disabled
 - **WHEN** transcript support is explicitly disabled for a process run

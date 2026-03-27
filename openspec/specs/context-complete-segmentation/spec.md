@@ -38,6 +38,16 @@ The analyzer SHALL treat low-cost candidate windows as seed regions and SHALL de
 - **THEN** the analyzer SHALL be allowed to split that region at the turn break before downstream scoring
 - **THEN** the resulting segments SHALL preserve lineage to the source region
 
+#### Scenario: Adjacent turns form one continuous spoken beat
+- **WHEN** adjacent transcript turns from the same asset form one continuous spoken beat such as a monologue continuation or tightly linked question/answer exchange
+- **THEN** the analyzer SHALL be allowed to keep or assemble them as one candidate segment
+- **THEN** the resulting candidate SHALL preserve speech-aware lineage for review
+
+#### Scenario: Speech-heavy segment ends before the spoken beat completes
+- **WHEN** a speech-heavy segment is turn-aligned but still cuts off a larger spoken beat that can be inferred from transcript structure
+- **THEN** the analyzer SHALL be allowed to refine or reassemble that segment to preserve the fuller spoken beat
+- **THEN** deterministic fallback SHALL remain available if the richer speech structure is weak or unavailable
+
 #### Scenario: Ambiguous segment is semantically validated
 - **WHEN** a refined or assembled segment is marked ambiguous, semantic boundary validation is enabled, and runtime budget remains
 - **THEN** the analyzer SHALL submit that segment to the configured AI backend for boundary validation
