@@ -116,7 +116,7 @@ class AIAnalysisConfig:
     transcript_provider: str = "auto"
     transcript_model_size: str = "small"
     clip_enabled: bool = True
-    clip_min_score: float = 0.35
+    clip_min_score: float = 0.1
     vlm_budget_pct: int = 100
     clip_model: str = "ViT-B-32"
     clip_model_pretrained: str = "laion2b_s34b_b79k"
@@ -925,7 +925,7 @@ def load_ai_provider_config() -> AIProviderConfig:
     except ValueError:
         timeout_sec = 30.0
 
-    provider = os.environ.get("TIMELINE_AI_PROVIDER", "deterministic").strip().lower()
+    provider = os.environ.get("TIMELINE_AI_PROVIDER", "mlx-vlm-local").strip().lower()
     requested_model = os.environ.get("TIMELINE_AI_MODEL", "").strip()
     model_id = os.environ.get("TIMELINE_AI_MODEL_ID", "").strip()
     revision = os.environ.get("TIMELINE_AI_MODEL_REVISION", "").strip()
@@ -950,9 +950,9 @@ def load_ai_provider_config() -> AIProviderConfig:
 
 
 def load_ai_analysis_config() -> AIAnalysisConfig:
-    mode = os.environ.get("TIMELINE_AI_MODE", "fast").strip().lower() or "fast"
+    mode = os.environ.get("TIMELINE_AI_MODE", "full").strip().lower() or "full"
     if mode not in {"fast", "full"}:
-        mode = "fast"
+        mode = "full"
     transcript_provider = os.environ.get("TIMELINE_TRANSCRIPT_PROVIDER", "auto").strip().lower() or "auto"
     if transcript_provider not in {"auto", "disabled", "faster-whisper"}:
         transcript_provider = "auto"
@@ -986,12 +986,12 @@ def load_ai_analysis_config() -> AIAnalysisConfig:
     )
 
     # CLIP configuration
-    clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.35").strip()
+    clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.1").strip()
     try:
         clip_min_score = float(clip_min_score_raw)
         clip_min_score = max(0.0, min(1.0, clip_min_score))  # Clamp to [0, 1]
     except ValueError:
-        clip_min_score = 0.35
+        clip_min_score = 0.1
 
     vlm_budget_pct = parse_int_env("TIMELINE_AI_VLM_BUDGET_PCT", 100)
     vlm_budget_pct = max(0, min(100, vlm_budget_pct))  # Clamp to [0, 100]

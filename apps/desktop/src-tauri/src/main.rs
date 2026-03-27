@@ -1079,11 +1079,11 @@ fn count_video_files(root: &Path) -> Result<usize, String> {
 
 fn default_app_settings() -> AppSettings {
     AppSettings {
-        ai_provider: "deterministic".into(),
+        ai_provider: "mlx-vlm-local".into(),
         project_name: "Roughcut Stdio Project".into(),
         story_prompt: "Build a coherent rough cut from the strongest visual and spoken beats."
             .into(),
-        ai_mode: "fast".into(),
+        ai_mode: "full".into(),
         ai_timeout_sec: "45".into(),
         ai_model: "qwen3.5-9b".into(),
         ai_base_url: "http://127.0.0.1:1234/v1".into(),
@@ -1100,7 +1100,7 @@ fn default_app_settings() -> AppSettings {
         deduplication_enabled: true,
         dedup_threshold: "0.85".into(),
         clip_enabled: true,
-        clip_min_score: "0.35".into(),
+        clip_min_score: "0.1".into(),
         vlm_budget_pct: "100".into(),
         segment_boundary_refinement_enabled: true,
         segment_legacy_fallback_enabled: true,

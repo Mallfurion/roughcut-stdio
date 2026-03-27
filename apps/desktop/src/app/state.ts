@@ -4,10 +4,10 @@ export const MEDIA_STORAGE_KEY = "roughcut-stdio.desktop.media-dir.v1";
 
 export function createDefaultSettings(): AppSettings {
   return {
-    aiProvider: "deterministic",
+    aiProvider: "mlx-vlm-local",
     projectName: "Roughcut Stdio Project",
     storyPrompt: "Build a coherent rough cut from the strongest visual and spoken beats.",
-    aiMode: "fast",
+    aiMode: "full",
     aiTimeoutSec: "45",
     aiModel: "qwen3.5-9b",
     aiBaseUrl: "http://127.0.0.1:1234/v1",
@@ -24,7 +24,7 @@ export function createDefaultSettings(): AppSettings {
     deduplicationEnabled: true,
     dedupThreshold: "0.85",
     clipEnabled: true,
-    clipMinScore: "0.35",
+    clipMinScore: "0.1",
     vlmBudgetPct: "100",
     segmentBoundaryRefinementEnabled: true,
     segmentLegacyFallbackEnabled: true,
@@ -55,7 +55,7 @@ export function createInitialAppState(): AppState {
   return {
     currentStep: "choose",
     mediaDir: localStorage.getItem(MEDIA_STORAGE_KEY) ?? "",
-    aiMode: "fast",
+    aiMode: "full",
     settings: null,
     settingsDraft: null,
     settingsOpen: false,

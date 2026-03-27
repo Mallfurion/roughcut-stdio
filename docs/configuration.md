@@ -11,13 +11,13 @@ The analyzer is configured through environment variables loaded from `.env` and 
 
 ## AI Provider Selection
 
-- `TIMELINE_AI_PROVIDER` — One of: `deterministic`, `lmstudio`, `mlx-vlm-local` (default: `deterministic`)
+- `TIMELINE_AI_PROVIDER` — One of: `deterministic`, `lmstudio`, `mlx-vlm-local` (default: `mlx-vlm-local`)
 - `TIMELINE_AI_TIMEOUT_SEC` — Timeout for VLM requests
 
 ## CLIP Semantic Scoring
 
 - `TIMELINE_AI_CLIP_ENABLED` — Enable CLIP embedding-based semantic scoring (default: `true`)
-- `TIMELINE_AI_CLIP_MIN_SCORE` — Score threshold for CLIP-gating [0–1] (default: `0.35`)
+- `TIMELINE_AI_CLIP_MIN_SCORE` — Score threshold for CLIP-gating [0–1] (default: `0.1`)
 - `TIMELINE_AI_CLIP_MODEL` — CLIP model name from `open-clip-torch` (default: `ViT-B-32`)
 - `TIMELINE_DEDUP_THRESHOLD` — Histogram similarity threshold for dedup when CLIP unavailable (default: `0.85`)
 - `TIMELINE_DEDUPLICATION_ENABLED` — Enable near-duplicate segment removal (default: `true`)
@@ -37,7 +37,7 @@ The analyzer is configured through environment variables loaded from `.env` and 
 
 ## Runtime Tuning
 
-- `TIMELINE_AI_MODE` — `fast` or `full` (default: `fast`); limits VLM targets per asset in fast mode
+- `TIMELINE_AI_MODE` — `fast` or `full` (default: `full`); limits VLM targets per asset in fast mode
 - `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET` — Max VLM targets per asset (default: `1` in `fast`, `99` in `full`)
 - `TIMELINE_AI_MAX_KEYFRAMES` — Keyframes to extract per segment (default: `1` in `fast`, `4` in `full`)
 - `TIMELINE_AI_KEYFRAME_MAX_WIDTH` — Max width for keyframe/contact sheet (default: `448` in `fast`, `960` in `full`)
@@ -104,8 +104,8 @@ Fast inference on Mac using embedded MLX runtime:
 ```bash
 TIMELINE_AI_PROVIDER=mlx-vlm-local
 TIMELINE_AI_MODEL_ID=mlx-community/Qwen3.5-0.8B-4bit
-TIMELINE_AI_MODE=fast
-TIMELINE_AI_MAX_SEGMENTS_PER_ASSET=1
+TIMELINE_AI_MODE=full
+TIMELINE_AI_CLIP_MIN_SCORE=0.1
 ```
 
 The setup script installs MLX and model weights automatically. This provides high-quality semantic understanding of footage while keeping everything local on your Mac.
@@ -139,7 +139,7 @@ When `TIMELINE_AI_CLIP_ENABLED=true`, the analyzer uses CLIP embeddings to detec
 
 ```bash
 TIMELINE_AI_CLIP_ENABLED=true
-TIMELINE_AI_CLIP_MIN_SCORE=0.35
+TIMELINE_AI_CLIP_MIN_SCORE=0.1
 TIMELINE_DEDUP_THRESHOLD=0.85
 ```
 

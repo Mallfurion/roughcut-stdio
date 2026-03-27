@@ -379,14 +379,14 @@ The main behavior switches are:
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `TIMELINE_MEDIA_DIR` | `./media` | Root directory to scan for video files |
-| `TIMELINE_AI_PROVIDER` | `deterministic` | AI provider: `deterministic`, `lmstudio`, `mlx-vlm-local` |
-| `TIMELINE_AI_MODE` | `fast` | Limits VLM targets in fast mode |
+| `TIMELINE_AI_PROVIDER` | `mlx-vlm-local` | AI provider: `deterministic`, `lmstudio`, `mlx-vlm-local` |
+| `TIMELINE_AI_MODE` | `full` | Limits VLM targets in fast mode |
 | `TIMELINE_AI_MAX_SEGMENTS_PER_ASSET` | provider-dependent | Per-asset shortlist cap for expensive AI work |
 | `TIMELINE_AI_AUDIO_ENABLED` | `true` | Disable to skip audio extraction and use silent fallback |
 | `TIMELINE_TRANSCRIPT_PROVIDER` | `auto` | Transcript backend selection (`auto`, `disabled`, `faster-whisper`) |
 | `TIMELINE_TRANSCRIPT_MODEL_SIZE` | `small` | Local `faster-whisper` model size |
 | `TIMELINE_AI_CLIP_ENABLED` | `true` | Enable CLIP scoring and CLIP-based dedup |
-| `TIMELINE_AI_CLIP_MIN_SCORE` | `0.35` | CLIP gate threshold for VLM targeting |
+| `TIMELINE_AI_CLIP_MIN_SCORE` | `0.1` | CLIP gate threshold for VLM targeting |
 | `TIMELINE_AI_VLM_BUDGET_PCT` | `100` | Percent of shortlisted segments that may reach VLM analysis |
 | `TIMELINE_SEGMENT_BOUNDARY_REFINEMENT` | `true` | Enable deterministic seed refinement before scoring |
 | `TIMELINE_SEGMENT_LEGACY_FALLBACK` | `true` | Keep legacy fallback available if refinement yields nothing |
