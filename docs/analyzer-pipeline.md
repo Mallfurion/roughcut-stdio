@@ -15,6 +15,8 @@ The pipeline runs in four phases:
 
 Each phase narrows the candidate pool so expensive work only happens on stronger segments.
 
+Generated process summaries and benchmark artifacts also preserve a normalized runtime reliability block so repeated runs on the same dataset can explain capability changes alongside runtime deltas.
+
 ## Evaluation Modes
 
 The evaluation harness is intentionally split into two modes:
@@ -90,6 +92,13 @@ Before segmentation begins, the analyzer resolves transcript support from runtim
 - `TIMELINE_TRANSCRIPT_PROVIDER=disabled` skips transcript extraction entirely
 
 The run records transcript runtime status in `project.analysis_summary`, including configured provider, effective provider, status, model size, targeted/skipped/probed transcript counts, transcribed asset counts, transcript failures, transcript-bearing segments, and speech-fallback segment counts.
+
+The analyzer also records a normalized runtime reliability summary in `project.analysis_summary`, including:
+
+- overall runtime mode
+- per-layer modes for AI, transcript, semantic validation, and cache
+- degraded-mode reasons
+- intentional-skip reasons when bounded gating kept optional paths inactive
 
 When AI cache is enabled and `artifacts_root` is available, transcript spans are also cached on disk under the analysis artifacts so repeated `npm run process` calls can reuse prior transcription results.
 

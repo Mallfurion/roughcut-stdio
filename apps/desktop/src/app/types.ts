@@ -150,7 +150,7 @@ export type TimelineProject = {
     name: string;
     story_prompt: string;
     status: string;
-    analysis_summary?: Record<string, string | number | boolean>;
+    analysis_summary?: Record<string, string | number | boolean | string[]>;
   };
   assets: Asset[];
   candidate_segments: CandidateSegment[];

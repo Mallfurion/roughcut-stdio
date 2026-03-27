@@ -2227,6 +2227,31 @@ def inspect_runtime_capabilities() -> dict[str, bool]:
     }
 
 
+def runtime_status_label(*, active: bool, unavailable: bool, fallback_count: int, skipped_count: int) -> str:
+    if unavailable:
+        return "unavailable"
+    if fallback_count > 0:
+        return "degraded"
+    if skipped_count > 0 and active:
+        return "partial"
+    if active:
+        return "active"
+    return "inactive"
+
+
+def combined_runtime_status_label(*modes: str) -> str:
+    normalized = [mode.strip() for mode in modes if mode and mode.strip()]
+    if any(mode == "unavailable" for mode in normalized):
+        return "unavailable"
+    if any(mode == "degraded" for mode in normalized):
+        return "degraded"
+    if any(mode == "partial" for mode in normalized):
+        return "partial"
+    if any(mode == "active" for mode in normalized):
+        return "active"
+    return "inactive"
+
+
 def build_project_from_media_roots(
     *,
     project_name: str,
@@ -2951,6 +2976,13 @@ def analyze_assets(
             "transcript_detail": final_transcript_status.detail,
         }
     )
+    project.analysis_summary["transcript_runtime_mode"] = runtime_status_label(
+        active=final_transcript_status.enabled and final_transcript_status.available,
+        unavailable=final_transcript_status.enabled and not final_transcript_status.available,
+        fallback_count=final_transcript_status.failed_asset_count,
+        skipped_count=project.analysis_summary.get("transcript_skipped_asset_count", 0)
+        + project.analysis_summary.get("transcript_runtime_probe_rejected_asset_count", 0),
+    )
     timeline_mode_alternations = 0
     timeline_group_count = 0
     timeline_role_count = 0
@@ -3018,6 +3050,111 @@ def analyze_assets(
             "speech_structure_monologue_count": monologue_segment_count,
         }
     )
+    semantic_validated_count = int(project.analysis_summary.get("semantic_boundary_validated_count", 0))
+    semantic_fallback_count = int(project.analysis_summary.get("semantic_boundary_fallback_count", 0))
+    semantic_skipped_count = int(project.analysis_summary.get("semantic_boundary_skipped_count", 0))
+    project.analysis_summary["semantic_boundary_runtime_mode"] = runtime_status_label(
+        active=bool(ai_config.semantic_boundary_validation_enabled),
+        unavailable=bool(ai_config.semantic_boundary_validation_enabled) and semantic_available is False,
+        fallback_count=semantic_fallback_count,
+        skipped_count=semantic_skipped_count,
+    )
+    project.analysis_summary["semantic_boundary_targeting_mode"] = (
+        "active"
+        if semantic_validated_count > 0
+        else "inactive"
+    )
+    analyzer_available_method = getattr(analyzer, "is_available", None)
+    analyzer_available = analyzer_available_method() if callable(analyzer_available_method) else True
+    project.analysis_summary["ai_runtime_mode"] = runtime_status_label(
+        active=bool(ai_runtime_stats.live_segment_count or ai_runtime_stats.cached_segment_count),
+        unavailable=not analyzer_available,
+        fallback_count=ai_runtime_stats.fallback_segment_count,
+        skipped_count=project.analysis_summary.get("filtered_before_vlm_count", 0)
+        + project.analysis_summary.get("ai_cached_segment_count", 0),
+    )
+    project.analysis_summary["cache_runtime_mode"] = runtime_status_label(
+        active=bool(ai_config.cache_enabled),
+        unavailable=False,
+        fallback_count=0,
+        skipped_count=0 if ai_runtime_stats.cached_segment_count > 0 else 1,
+    )
+    runtime_degraded_reasons: list[str] = []
+    runtime_intentional_skip_reasons: list[str] = []
+
+    if final_transcript_status.enabled and not final_transcript_status.available:
+        runtime_degraded_reasons.append("transcript runtime unavailable")
+    elif final_transcript_status.failed_asset_count > 0:
+        runtime_degraded_reasons.append(
+            f"transcript fallback on {final_transcript_status.failed_asset_count} asset"
+            f"{'' if final_transcript_status.failed_asset_count == 1 else 's'}"
+        )
+
+    if total_semantic_boundary_fallback > 0:
+        runtime_degraded_reasons.append(
+            f"semantic boundary fallback on {total_semantic_boundary_fallback} segment"
+            f"{'' if total_semantic_boundary_fallback == 1 else 's'}"
+        )
+
+    if ai_runtime_stats.fallback_segment_count > 0:
+        runtime_degraded_reasons.append(
+            f"deterministic AI fallback on {ai_runtime_stats.fallback_segment_count} segment"
+            f"{'' if ai_runtime_stats.fallback_segment_count == 1 else 's'}"
+        )
+
+    if not final_transcript_status.enabled:
+        runtime_intentional_skip_reasons.append("transcript provider disabled")
+    elif total_transcript_skipped_assets > 0 or total_transcript_probe_rejected_assets > 0:
+        parts: list[str] = []
+        if total_transcript_skipped_assets > 0:
+            parts.append(
+                f"{total_transcript_skipped_assets} transcript-target skip"
+                f"{'' if total_transcript_skipped_assets == 1 else 's'}"
+            )
+        if total_transcript_probe_rejected_assets > 0:
+            parts.append(
+                f"{total_transcript_probe_rejected_assets} probe rejection"
+                f"{'' if total_transcript_probe_rejected_assets == 1 else 's'}"
+            )
+        runtime_intentional_skip_reasons.append("transcript targeting kept cost bounded: " + ", ".join(parts))
+
+    if not ai_config.semantic_boundary_validation_enabled:
+        runtime_intentional_skip_reasons.append("semantic boundary validation disabled")
+    elif semantic_skipped_count > 0:
+        runtime_intentional_skip_reasons.append(
+            f"semantic boundary validation skipped {semantic_skipped_count} segment"
+            f"{'' if semantic_skipped_count == 1 else 's'}"
+        )
+
+    filtered_before_vlm_count = int(project.analysis_summary.get("filtered_before_vlm_count", 0))
+    if filtered_before_vlm_count > 0:
+        runtime_intentional_skip_reasons.append(
+            f"AI analysis skipped {filtered_before_vlm_count} segment"
+            f"{'' if filtered_before_vlm_count == 1 else 's'} before live VLM"
+        )
+
+    runtime_reliability_mode = combined_runtime_status_label(
+        project.analysis_summary["ai_runtime_mode"],
+        project.analysis_summary["transcript_runtime_mode"],
+        project.analysis_summary["semantic_boundary_runtime_mode"],
+        project.analysis_summary["cache_runtime_mode"],
+    )
+    runtime_reliability_summary = (
+        "AI "
+        f"{project.analysis_summary['ai_runtime_mode']}, "
+        f"transcript {project.analysis_summary['transcript_runtime_mode']}, "
+        f"semantic {project.analysis_summary['semantic_boundary_runtime_mode']}, "
+        f"cache {project.analysis_summary['cache_runtime_mode']}"
+    )
+    project.analysis_summary.update(
+        {
+            "runtime_reliability_mode": runtime_reliability_mode,
+            "runtime_ready": runtime_reliability_mode not in {"unavailable", "inactive"},
+            "runtime_reliability_summary": runtime_reliability_summary,
+            "runtime_degraded_reasons": runtime_degraded_reasons,
+            "runtime_intentional_skip_reasons": runtime_intentional_skip_reasons,
+        }
+    )
     if status_callback is not None:
         status_callback("")
         status_callback("═══════════════════════════════════════════════════")
@@ -3061,6 +3198,15 @@ def analyze_assets(
             f"cached={ai_runtime_stats.cached_segment_count}, "
             f"fallback={ai_runtime_stats.fallback_segment_count}"
         )
+        status_callback(
+            "Runtime reliability: "
+            f"{runtime_reliability_mode} "
+            f"({runtime_reliability_summary})"
+        )
+        if runtime_degraded_reasons:
+            status_callback("Runtime degraded modes: " + "; ".join(runtime_degraded_reasons))
+        if runtime_intentional_skip_reasons:
+            status_callback("Runtime intentional skips: " + "; ".join(runtime_intentional_skip_reasons))
         status_callback("═══════════════════════════════════════════════════")
 
     return ProjectData(

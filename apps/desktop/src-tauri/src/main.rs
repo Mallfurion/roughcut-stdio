@@ -41,6 +41,16 @@ struct RuntimeCheckResult {
     base_url: String,
     available: bool,
     detail: String,
+    runtime_ready: bool,
+    runtime_reliability_mode: String,
+    ai_runtime_mode: String,
+    transcript_runtime_mode: String,
+    semantic_boundary_runtime_mode: String,
+    cache_runtime_mode: String,
+    degraded: bool,
+    degraded_reasons: Vec<String>,
+    intentional_skip_reasons: Vec<String>,
+    runtime_summary: String,
     output: String,
 }
 
@@ -764,6 +774,7 @@ fn run_script_capture(
 fn parse_runtime_check_output(output: &str, success: bool) -> RuntimeCheckResult {
     let mut result = RuntimeCheckResult {
         available: success,
+        runtime_ready: success,
         output: output.trim().to_string(),
         ..RuntimeCheckResult::default()
     };
@@ -780,11 +791,33 @@ fn parse_runtime_check_output(output: &str, success: bool) -> RuntimeCheckResult
                 "base_url" => result.base_url = value,
                 "available" => result.available = value == "yes",
                 "detail" => result.detail = value,
+                "runtime_ready" => result.runtime_ready = value == "yes",
+                "runtime_reliability_mode" => result.runtime_reliability_mode = value,
+                "ai_runtime_mode" => result.ai_runtime_mode = value,
+                "transcript_runtime_mode" => result.transcript_runtime_mode = value,
+                "semantic_boundary_runtime_mode" => result.semantic_boundary_runtime_mode = value,
+                "cache_runtime_mode" => result.cache_runtime_mode = value,
+                "degraded" => result.degraded = value == "yes",
+                "runtime_summary" => result.runtime_summary = value,
+                "degraded_reasons" => result.degraded_reasons = parse_runtime_list_field(&value),
+                "intentional_skip_reasons" => result.intentional_skip_reasons = parse_runtime_list_field(&value),
                 _ => {}
             }
         }
     }
     result
+}
+
+fn parse_runtime_list_field(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "(none)" {
+        return Vec::new();
+    }
+    trimmed
+        .split('|')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 fn spawn_process_run(
@@ -905,6 +938,45 @@ fn push_log(logs: &mut Vec<String>, line: &str) {
 fn emit_process_state(app: &AppHandle, state: &Arc<Mutex<ProcessRunState>>) {
     if let Ok(snapshot) = state.lock().map(|value| value.clone()) {
         let _ = app.emit("process-update", snapshot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_runtime_check_output, parse_runtime_list_field};
+
+    #[test]
+    fn parse_runtime_list_field_handles_empty_marker() {
+        assert!(parse_runtime_list_field("(none)").is_empty());
+        assert!(parse_runtime_list_field("").is_empty());
+    }
+
+    #[test]
+    fn parse_runtime_check_output_captures_reliability_fields() {
+        let payload = "\
+configured_provider: mlx-vlm-local
+effective_provider: mlx-vlm-local
+available: yes
+detail: MLX runtime ready
+runtime_ready: yes
+runtime_reliability_mode: degraded
+ai_runtime_mode: active
+transcript_runtime_mode: partial
+semantic_boundary_runtime_mode: degraded
+cache_runtime_mode: active
+degraded: yes
+runtime_summary: AI active, transcript partial, semantic degraded, cache active
+degraded_reasons: transcript fallback on 1 asset | semantic boundary fallback on 2 segments
+intentional_skip_reasons: transcript targeting kept cost bounded: 3 transcript-target skips
+";
+        let parsed = parse_runtime_check_output(payload, true);
+        assert!(parsed.available);
+        assert!(parsed.runtime_ready);
+        assert!(parsed.degraded);
+        assert_eq!(parsed.runtime_reliability_mode, "degraded");
+        assert_eq!(parsed.transcript_runtime_mode, "partial");
+        assert_eq!(parsed.degraded_reasons.len(), 2);
+        assert_eq!(parsed.intentional_skip_reasons.len(), 1);
     }
 }
 

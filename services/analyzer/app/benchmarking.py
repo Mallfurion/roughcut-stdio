@@ -66,6 +66,7 @@ class ProcessBenchmark:
     phase_timings_sec: dict[str, float]
     workload_counts: dict[str, int | float]
     runtime_configuration: dict[str, Any]
+    runtime_stability: dict[str, Any]
     artifact_paths: dict[str, str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,6 +80,41 @@ class BenchmarkComparison:
     total_runtime_delta_sec: float
     total_runtime_delta_pct: float | None
     context_differences: list[str]
+
+
+def build_runtime_stability_context(
+    *,
+    project_payload: dict[str, Any],
+    runtime_configuration: dict[str, Any],
+) -> dict[str, Any]:
+    analysis_summary = dict((project_payload.get("project") or {}).get("analysis_summary") or {})
+    degraded_reasons = [str(item) for item in analysis_summary.get("runtime_degraded_reasons", []) or [] if str(item)]
+    intentional_skip_reasons = [
+        str(item) for item in analysis_summary.get("runtime_intentional_skip_reasons", []) or [] if str(item)
+    ]
+    component_modes = {
+        "ai": str(analysis_summary.get("ai_runtime_mode", "inactive")),
+        "transcript": str(analysis_summary.get("transcript_runtime_mode", "inactive")),
+        "semantic_boundary": str(analysis_summary.get("semantic_boundary_runtime_mode", "inactive")),
+        "cache": str(analysis_summary.get("cache_runtime_mode", "inactive")),
+    }
+    return {
+        "overall_mode": str(analysis_summary.get("runtime_reliability_mode", "inactive")),
+        "ready": bool(analysis_summary.get("runtime_ready", False)),
+        "summary": str(analysis_summary.get("runtime_reliability_summary", "")),
+        "component_modes": component_modes,
+        "degraded_reasons": degraded_reasons,
+        "intentional_skip_reasons": intentional_skip_reasons,
+        "semantic_targeting_mode": str(analysis_summary.get("semantic_boundary_targeting_mode", "inactive")),
+        "transcript_status": str(analysis_summary.get("transcript_status", "")),
+        "transcript_provider_effective": str(
+            analysis_summary.get(
+                "transcript_provider_effective",
+                runtime_configuration.get("transcript_provider_configured", ""),
+            )
+        ),
+        "ai_provider_effective": str(runtime_configuration.get("ai_provider_effective", "")),
+    }
 
 
 def attach_quality_evaluation(
@@ -239,6 +275,10 @@ def build_process_benchmark(
             continue
         if key in analysis_summary:
             workload_counts[key] = analysis_summary[key]
+    runtime_stability = build_runtime_stability_context(
+        project_payload=project_payload,
+        runtime_configuration=runtime_configuration,
+    )
 
     return ProcessBenchmark(
         run_id=run_id,
@@ -248,6 +288,7 @@ def build_process_benchmark(
         phase_timings_sec=phase_timings,
         workload_counts=workload_counts,
         runtime_configuration={**runtime_configuration, "dataset_identity": dataset_identity},
+        runtime_stability=runtime_stability,
         artifact_paths=artifact_paths,
     )
 
@@ -297,6 +338,7 @@ def compare_benchmarks(
 
     current_cfg = current.runtime_configuration
     baseline_cfg = baseline_entry.get("runtime_configuration", {})
+    baseline_runtime_stability = dict(baseline_entry.get("runtime_stability") or {})
     current_workload = current.workload_counts
     baseline_workload = baseline_entry.get("workload_counts", {})
     current_dataset = dict(current_cfg.get("dataset_identity") or {})
@@ -335,6 +377,26 @@ def compare_benchmarks(
             "candidate segment count changed "
             f"({baseline_workload.get('candidate_segment_count', 0)} -> {current_workload.get('candidate_segment_count', 0)})"
         )
+    current_runtime_stability = dict(current.runtime_stability or {})
+    if current_runtime_stability.get("overall_mode") != baseline_runtime_stability.get("overall_mode"):
+        differences.append(
+            "runtime reliability mode changed "
+            f"({baseline_runtime_stability.get('overall_mode', 'unknown')} -> "
+            f"{current_runtime_stability.get('overall_mode', 'unknown')})"
+        )
+    current_component_modes = dict(current_runtime_stability.get("component_modes") or {})
+    baseline_component_modes = dict(baseline_runtime_stability.get("component_modes") or {})
+    for key, label in (
+        ("ai", "AI runtime"),
+        ("transcript", "transcript runtime"),
+        ("semantic_boundary", "semantic boundary runtime"),
+        ("cache", "cache runtime"),
+    ):
+        if current_component_modes.get(key) != baseline_component_modes.get(key):
+            differences.append(
+                f"{label} changed "
+                f"({baseline_component_modes.get(key, 'unknown')} -> {current_component_modes.get(key, 'unknown')})"
+            )
 
     return BenchmarkComparison(
         baseline_run_id=str(baseline_entry.get("run_id", "unknown")),
@@ -370,6 +432,7 @@ def write_benchmark_artifacts(
             "ai_provider_effective": benchmark.runtime_configuration.get("ai_provider_effective"),
             "ai_mode": benchmark.runtime_configuration.get("ai_mode"),
         },
+        "runtime_stability": benchmark.runtime_stability,
         "dataset_identity": dict(benchmark.runtime_configuration.get("dataset_identity") or {}),
         "workload_counts": {
             "asset_count": benchmark.workload_counts.get("asset_count", 0),
@@ -468,6 +531,35 @@ def build_process_summary_lines(
         )
         for difference in comparison.context_differences:
             lines.append(f"Comparison context: {difference}")
+
+    runtime_stability = dict(benchmark.runtime_stability or {})
+    if runtime_stability:
+        component_modes = dict(runtime_stability.get("component_modes") or {})
+        lines.extend(
+            [
+                "",
+                "Runtime reliability:",
+                f"Overall mode: {runtime_stability.get('overall_mode', 'unknown')}",
+                (
+                    "Component modes: "
+                    f"AI={component_modes.get('ai', 'unknown')}, "
+                    f"transcript={component_modes.get('transcript', 'unknown')}, "
+                    f"semantic={component_modes.get('semantic_boundary', 'unknown')}, "
+                    f"cache={component_modes.get('cache', 'unknown')}"
+                ),
+            ]
+        )
+        summary = str(runtime_stability.get("summary", "")).strip()
+        if summary:
+            lines.append(f"Runtime summary: {summary}")
+        degraded_reasons = [str(item) for item in runtime_stability.get("degraded_reasons", []) or [] if str(item)]
+        if degraded_reasons:
+            lines.append("Runtime degraded modes: " + "; ".join(degraded_reasons))
+        intentional_skip_reasons = [
+            str(item) for item in runtime_stability.get("intentional_skip_reasons", []) or [] if str(item)
+        ]
+        if intentional_skip_reasons:
+            lines.append("Runtime intentional skips: " + "; ".join(intentional_skip_reasons))
 
     if analysis_summary:
         lines.extend(

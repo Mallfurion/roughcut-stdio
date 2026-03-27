@@ -36,6 +36,7 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "audio_silent_asset_count": 0,
                     "transcript_status": "partial-fallback",
                     "transcript_provider_effective": "faster-whisper",
+                    "transcript_runtime_mode": "degraded",
                     "transcribed_asset_count": 1,
                     "transcript_failed_asset_count": 1,
                     "transcript_excerpt_segment_count": 2,
@@ -49,6 +50,7 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "semantic_boundary_threshold_targeted_count": 1,
                     "semantic_boundary_floor_targeted_count": 0,
                     "semantic_boundary_skipped_count": 0,
+                    "semantic_boundary_runtime_mode": "degraded",
                     "story_assembly_active": True,
                     "story_assembly_strategy": "sequence-heuristic-v2",
                     "story_assembly_mode_alternation_count": 2,
@@ -60,6 +62,18 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "ai_cached_segment_count": 1,
                     "ai_fallback_segment_count": 1,
                     "ai_live_request_count": 0,
+                    "ai_runtime_mode": "degraded",
+                    "cache_runtime_mode": "active",
+                    "runtime_reliability_mode": "degraded",
+                    "runtime_ready": True,
+                    "runtime_reliability_summary": "AI degraded, transcript degraded, semantic degraded, cache active",
+                    "runtime_degraded_reasons": [
+                        "transcript fallback on 1 asset",
+                        "deterministic AI fallback on 1 segment",
+                    ],
+                    "runtime_intentional_skip_reasons": [
+                        "AI analysis skipped 1 segment before live VLM",
+                    ],
                     "dedup_group_count": 1,
                     "dedup_eliminated_count": 1,
                 }
@@ -163,12 +177,17 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertEqual(comparison.baseline_run_id, "run-001")
             self.assertIn("Benchmark comparison: vs run-001", "\n".join(summary_lines))
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
+            self.assertIn("Runtime reliability:", "\n".join(summary_lines))
+            self.assertIn("Overall mode: degraded", "\n".join(summary_lines))
+            self.assertIn("Runtime degraded modes: transcript fallback on 1 asset; deterministic AI fallback on 1 segment", "\n".join(summary_lines))
+            self.assertIn("Runtime intentional skips: AI analysis skipped 1 segment before live VLM", "\n".join(summary_lines))
             self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
             self.assertIn("Speech structure: 2 structured beats, 1 question/answer, 1 monologue", "\n".join(summary_lines))
             self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
             self.assertIn("Story assembly: sequence-heuristic-v2, 2 mode alternations, 3 roles, 1 prompt-fit beats, 1 tradeoffs", "\n".join(summary_lines))
             self.assertIn("Story assembly anchors: open on A001 (opener), release on A003 (release)", "\n".join(summary_lines))
+            self.assertEqual(benchmark_payload["runtime_stability"]["overall_mode"], "degraded")
             self.assertTrue((benchmark_root / "history.jsonl").is_file())
 
     def test_matching_benchmark_lookup_ignores_other_datasets(self) -> None:
@@ -320,6 +339,68 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertEqual(
                 history_entries[-1]["quality_evaluation_summary"]["timeline"]["observed"]["opener_source_reel"],
                 "DJI_0721",
+            )
+
+    def test_benchmark_history_serializes_runtime_stability_context(self) -> None:
+        payload = {
+            "project": {
+                "analysis_summary": {
+                    "runtime_reliability_mode": "partial",
+                    "runtime_ready": True,
+                    "runtime_reliability_summary": "AI active, transcript partial, semantic active, cache active",
+                    "ai_runtime_mode": "active",
+                    "transcript_runtime_mode": "partial",
+                    "semantic_boundary_runtime_mode": "active",
+                    "cache_runtime_mode": "active",
+                    "runtime_degraded_reasons": [],
+                    "runtime_intentional_skip_reasons": ["transcript targeting kept cost bounded: 2 transcript-target skips"],
+                }
+            },
+            "assets": [{"id": "asset-1", "interchange_reel_name": "A001", "source_path": "/tmp/a.mov"}],
+        }
+        runtime_configuration = {
+            "media_dir": "/tmp/media-one",
+            "media_dir_input": "./media-one",
+            "ai_provider_effective": "deterministic",
+            "ai_mode": "fast",
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            benchmark_root = root / "generated" / "benchmarks"
+            artifact_paths = {
+                "project_json": str(root / "generated" / "project.json"),
+                "process_log": str(root / "generated" / "process.log"),
+                "process_summary": str(root / "generated" / "process-summary.txt"),
+                "process_output": str(root / "generated" / "process-output.txt"),
+                "benchmark_json": str(benchmark_root / "run-001" / "benchmark.json"),
+                "benchmark_history": str(benchmark_root / "history.jsonl"),
+                "run_process_output": str(benchmark_root / "run-001" / "process-output.txt"),
+            }
+            benchmark = build_process_benchmark(
+                run_id="run-001",
+                started_at="2026-03-26T10:00:00Z",
+                completed_at="2026-03-26T10:00:10Z",
+                total_runtime_sec=10.0,
+                project_payload=payload,
+                runtime_configuration=runtime_configuration,
+                artifact_paths=artifact_paths,
+            )
+            write_benchmark_artifacts(benchmark=benchmark, benchmark_root=benchmark_root)
+
+            history_entries = [
+                json.loads(line)
+                for line in (benchmark_root / "history.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(history_entries[-1]["runtime_stability"]["overall_mode"], "partial")
+            self.assertEqual(
+                history_entries[-1]["runtime_stability"]["component_modes"]["transcript"],
+                "partial",
+            )
+            self.assertEqual(
+                history_entries[-1]["runtime_stability"]["intentional_skip_reasons"],
+                ["transcript targeting kept cost bounded: 2 transcript-target skips"],
             )
 
 

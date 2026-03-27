@@ -17,6 +17,7 @@ npm run check:ai
 ```
 
 Verifies that required AI dependencies are installed and models are accessible. This now also reports transcript runtime status, configured transcript backend, model size, and whether local `faster-whisper` support is available.
+It also prints a concise runtime reliability summary, including AI/transcript/semantic/cache modes plus degraded-mode and intentional-skip reasons when optional paths are unavailable or bounded.
 
 ---
 
@@ -70,6 +71,8 @@ Generates:
 - `generated/process-summary.txt` with the latest operational and benchmark summary
 - `generated/process-output.txt` with the exact terminal-facing output from the latest run
 - `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
+
+The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset.
 
 **Evaluate segmentation quality**:
 

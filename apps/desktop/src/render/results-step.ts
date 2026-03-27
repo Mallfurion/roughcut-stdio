@@ -64,11 +64,55 @@ export function renderResultsStep(appState: AppState) {
         </button>
       </div>
 
+      ${renderRuntimeReliabilitySummary(analysisSummary)}
+
       <p class="muted">${escapeHtml(project.timeline.story_summary || "The rough timeline is ready for review.")}</p>
 
       <div class="clip-grid">
         ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds)).join("")}
       </div>
     </section>
+  `;
+}
+
+function renderRuntimeReliabilitySummary(analysisSummary: Record<string, string | number | boolean | string[]>) {
+  const overallMode = String(analysisSummary.runtime_reliability_mode ?? "").trim();
+  const summary = String(analysisSummary.runtime_reliability_summary ?? "").trim();
+  if (!overallMode && !summary) {
+    return "";
+  }
+
+  const aiMode = String(analysisSummary.ai_runtime_mode ?? "unknown");
+  const transcriptMode = String(analysisSummary.transcript_runtime_mode ?? "unknown");
+  const semanticMode = String(analysisSummary.semantic_boundary_runtime_mode ?? "unknown");
+  const cacheMode = String(analysisSummary.cache_runtime_mode ?? "unknown");
+  const degradedReasons = Array.isArray(analysisSummary.runtime_degraded_reasons)
+    ? analysisSummary.runtime_degraded_reasons.map((value) => String(value)).filter(Boolean)
+    : [];
+  const intentionalSkipReasons = Array.isArray(analysisSummary.runtime_intentional_skip_reasons)
+    ? analysisSummary.runtime_intentional_skip_reasons.map((value) => String(value)).filter(Boolean)
+    : [];
+
+  return `
+    <div class="review-summary">
+      <div class="review-summary-metrics">
+        ${renderMetric("Runtime", overallMode || "unknown")}
+        ${renderMetric("AI", aiMode)}
+        ${renderMetric("Transcript", transcriptMode)}
+        ${renderMetric("Semantic", semanticMode)}
+        ${renderMetric("Cache", cacheMode)}
+      </div>
+    </div>
+    ${summary ? `<p class="muted">${escapeHtml(summary)}</p>` : ""}
+    ${
+      degradedReasons.length > 0
+        ? `<p class="muted">Degraded modes: ${escapeHtml(degradedReasons.join("; "))}</p>`
+        : ""
+    }
+    ${
+      intentionalSkipReasons.length > 0
+        ? `<p class="muted">Intentional skips: ${escapeHtml(intentionalSkipReasons.join("; "))}</p>`
+        : ""
+    }
   `;
 }
