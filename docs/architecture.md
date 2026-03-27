@@ -23,7 +23,8 @@ Native macOS desktop application built with Tauri and a Vite-powered TypeScript 
 **Responsibilities:**
 - File dialog integration for media folder selection
 - Display processing progress and status
-- Review recommended segments, provenance, and timeline state
+- Review recommended segments, provenance, timeline state, and preview frames
+- Persist per-asset best-take overrides without mutating the analyzer baseline project JSON
 - Export dialog for saving FCPXML to chosen location
 - Launch and manage backend processes
 
@@ -98,6 +99,9 @@ Video Files
 [Story Assembly + Timeline Assembly] → Ordered rough cut
     ↓
 generated/project.json (all data)
+    ↓
+[Desktop Review Overrides] → generated/best-take-overrides.json (optional)
+    ↓
 generated/timeline.fcpxml (Resolve import)
 ```
 
@@ -278,5 +282,7 @@ CLIP inference is moderate cost. Mitigate with:
 **VLM unavailable** → Deterministic understanding from quality metrics
 
 **Audio stream missing** → All audio signals default to silent/zero energy
+
+**Desktop override file is stale** → Override payload is ignored and the analyzer-selected baseline project is loaded instead
 
 The system is designed so that failures degrade gracefully; the pipeline always produces usable output.

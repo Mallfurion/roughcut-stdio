@@ -321,6 +321,8 @@ The complete result is serialized to `generated/project.json`. It includes:
 
 The desktop app reads this file to display recommendations, segment provenance, and timeline state. The export command reads it to produce `generated/timeline.fcpxml` for Resolve.
 
+Desktop review overrides are stored separately in `generated/best-take-overrides.json`. When that file is present and still matches the current project signature, the desktop app reloads the project through the override map, rebuilds take recommendations and the assembled timeline in memory, and exports that review-adjusted timeline. The baseline analyzer output in `generated/project.json` is not mutated by review actions.
+
 The process step also writes:
 
 - `generated/process.log`
@@ -390,6 +392,8 @@ The main behavior switches are:
 | `TIMELINE_SEGMENT_LEGACY_FALLBACK` | `true` | Keep legacy fallback available if refinement yields nothing |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION` | `true` | Enable semantic boundary validation for ambiguous segments |
 | `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD` | `0.6` | Minimum ambiguity needed to be validation-eligible |
+| `TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD` | `0.45` | Softer ambiguity floor used when minimum targeting keeps the validation pass measurable |
+| `TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS` | `1` | Minimum number of floor-qualified ambiguous segments that may still be validated |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` | `100` | Percent of eligible ambiguous segments that may be validated |
 | `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` | `2` | Hard cap on validated segments per run |
 | `TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC` | `1.5` | Max boundary change applied from semantic validation |

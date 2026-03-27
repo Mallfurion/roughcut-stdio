@@ -24,7 +24,7 @@ The goal is to help editors skip raw footage scrubbing and move directly from me
 **macOS setup:**
 
 ```bash
-git clone https://github.com/your-org/roughcut-stdio
+git clone https://github.com/Mallfurion/roughcut-stdio.git
 cd roughcut-stdio
 npm run setup
 npm run view
@@ -36,8 +36,10 @@ npm run view
 
 1. Choose a media folder
 2. Click "Process" (the analyzer screens the footage)
-3. Review shortlisted shots, grades, and segment provenance, and optionally mark a segment as the best take for its clip
+3. Review shortlisted shots, grades, segment provenance, and the assembled timeline preview; optionally mark or clear the best take for each clip
 4. Click "Export" to save a DaVinci Resolve timeline that follows the active desktop review timeline
+
+The desktop review surface persists best-take overrides in `generated/best-take-overrides.json`. The in-app export action rebuilds the active timeline from those overrides before writing FCPXML.
 
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
 
@@ -87,11 +89,13 @@ See [docs/architecture.md](docs/architecture.md) for detailed design decisions a
 - **Context-complete segmentation** — Seed regions are deterministically refined, optionally merged or split into better narrative units, and can be semantically validated when boundaries are ambiguous
 - **Transcript-backed speech analysis** — Local transcript extraction can feed speech-aware refinement, scoring, and review; the analyzer now uses transcript cache reuse plus selective probing so only strong or validated speech assets pay the full transcription cost, and when transcripts are unavailable speech-heavy clips still degrade through explicit fallback instead of silent visual scoring
 - **Review provenance** — Desktop review shows how a segment was formed: boundary strategy, confidence, lineage, and semantic-validation status
+- **Editorial review controls** — Preview the assembled timeline, promote a different take per clip, clear a take from the timeline, and export the current review state
 - **CLIP-based deduplication** — Semantic near-duplicate detection using embeddings (cosine similarity >= 0.95)
 - **Audio & visual analysis** — Frame signals (sharpness, motion, distinctiveness) + audio signals (RMS, silence)
 - **Three-stage VLM filtering** — Dedup filter → CLIP gate → per-asset limit for efficient compute
 - **Caching & reuse** — CLIP embeddings cached during scoring, reused by dedup (zero redundant computation)
 - **Histogram fallback** — Deduplication works without CLIP (configurable threshold)
+- **Runtime reliability reporting** — Process summaries and benchmarks record active, degraded, and intentionally skipped runtime paths for AI, transcript, semantic, and cache layers
 - **Local-first** — All processing stays on your machine; no cloud dependencies
 - **DaVinci Resolve export** — FCPXML timelines ready to import and continue editing
 

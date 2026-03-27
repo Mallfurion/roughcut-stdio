@@ -97,7 +97,9 @@ The built-in fixture manifest supports both asset-level and timeline-level expec
 npm run export
 ```
 
-Generates `generated/timeline.fcpxml` from the processed project. Can be imported directly into DaVinci Resolve.
+Generates `generated/timeline.fcpxml` from `generated/project.json`. Can be imported directly into DaVinci Resolve.
+
+This CLI path exports the analyzer baseline exactly as stored in `generated/project.json`. If you use the desktop review workflow to mark a different best take or clear a take from the timeline, those overrides are persisted separately in `generated/best-take-overrides.json` and are only applied by the desktop app's export button.
 
 ---
 
@@ -168,6 +170,16 @@ For richer spoken-beat diagnostics, inspect:
 cat generated/project.json | jq '.project.analysis_summary | {speech_structure_segment_count, speech_structure_question_answer_count, speech_structure_monologue_count}'
 ```
 
+### Debug desktop review overrides
+
+The desktop app can persist per-clip review decisions to `generated/best-take-overrides.json`. Inspect it with:
+
+```bash
+cat generated/best-take-overrides.json | jq '.'
+```
+
+If the stored `project_id` or candidate segment IDs no longer match the current `generated/project.json`, the desktop app ignores the file as stale and falls back to analyzer-selected takes.
+
 ### Debug CLIP deduplication
 
 Set media directory and enable CLIP:
@@ -201,10 +213,10 @@ After processing, check the results:
 cat generated/project.json | jq '.project | keys'
 
 # View dedup statistics
-cat generated/project.json | jq '.project.analysis_summary | {clip_dedup_group_count, clip_dedup_eliminated_count}'
+cat generated/project.json | jq '.project.analysis_summary | {dedup_group_count, dedup_eliminated_count}'
 
 # View all segments with dedup info
-cat generated/project.json | jq '.assets[].segments[] | {id, deduplicated, dedup_group_id}'
+cat generated/project.json | jq '.candidate_segments[] | {id, deduplicated: .prefilter.deduplicated, dedup_group_id: .prefilter.dedup_group_id}'
 
 # View the latest benchmark summary
 cat generated/process-summary.txt
@@ -215,8 +227,14 @@ cat generated/process-output.txt
 # View benchmark history
 cat generated/benchmarks/history.jsonl
 
+# View the latest per-run benchmark payload
+cat generated/benchmarks/*/benchmark.json
+
 # View the latest segmentation evaluation summary
 cat generated/segmentation-evaluation-summary.txt
+
+# View desktop best-take overrides (if any)
+cat generated/best-take-overrides.json
 ```
 
 ---

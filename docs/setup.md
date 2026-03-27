@@ -8,7 +8,7 @@
 - **npm** 9+
 - **Python** 3.12+
 - **Xcode Command Line Tools** (macOS: `xcode-select --install`)
-- **Rust / Cargo** (for Tauri desktop shell; installer will prompt on first build)
+- **Rust / Cargo** (for the Tauri desktop shell; `npm run setup` installs it via Homebrew on macOS when possible)
 
 ### For Media Analysis
 
@@ -21,7 +21,7 @@ These are installed automatically by `npm run setup`:
 
 ### For MLX-VLM Local (Optional)
 
-If you choose the MLX provider during setup, these are installed automatically:
+If `TIMELINE_AI_PROVIDER=mlx-vlm-local` during setup, these are installed automatically:
 
 - **mlx** — Apple Silicon ML framework
 - **mlx-vlm** — Vision-language model runtime
@@ -36,13 +36,23 @@ Only required if using `TIMELINE_AI_PROVIDER=mlx-vlm-local`.
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/roughcut-stdio
+git clone https://github.com/Mallfurion/roughcut-stdio.git
 cd roughcut-stdio
 ```
 
 ### 2. Run Setup
 
-The setup script automates most of the heavy lifting:
+The setup script is driven by your current `.env` and `.env.local` settings. `.env.local` overrides `.env`.
+
+If you want to change the runtime before installing dependencies, copy the example file first:
+
+```bash
+cp .env.example .env.local
+```
+
+Then edit values like `TIMELINE_AI_PROVIDER`, `TIMELINE_TRANSCRIPT_PROVIDER`, or `TIMELINE_SKIP_MODEL_DOWNLOAD` before running setup.
+
+Now run:
 
 ```bash
 npm run setup
@@ -51,19 +61,24 @@ npm run setup
 This will:
 - Install Node.js dependencies (`npm install`)
 - Create a Python virtual environment
-- Install Python dependencies
+- Install the analyzer package into `.venv`
 - Install ffmpeg via Homebrew (if not already present)
 - Check for Xcode Command Line Tools
-- Download and prepare the MLX runtime and model cache (if chosen)
+- Check for Rust/Cargo and install it with Homebrew on macOS if missing
+- Prepare `generated/`
+- Create a default `media -> fixtures/sample-media` symlink when no media path is configured
 
-**During setup, you'll be prompted:**
-- Do you want to install MLX-VLM? (yes/no)
-- If yes, which model size? (small/medium/large)
+The installed Python extras are derived from the current environment:
 
-Choose based on your system:
-- **Small** (Qwen3.5-0.8B) — Recommended for most Macs; fast and accurate enough
-- **Medium** (Qwen3.5-3B) — Better quality; slower on M1/M2
-- **Large** (Qwen3.5-9B) — Best quality; requires LM Studio server
+- `clip` is installed by default
+- `transcript` is installed unless `TIMELINE_TRANSCRIPT_PROVIDER=disabled`
+- `mlx_vlm` is installed only when `TIMELINE_AI_PROVIDER=mlx-vlm-local`
+
+Model bootstrapping is also env-driven:
+
+- CLIP weights are bootstrapped by default
+- MLX-VLM weights are bootstrapped only for `TIMELINE_AI_PROVIDER=mlx-vlm-local`
+- `TIMELINE_SKIP_MODEL_DOWNLOAD=1` skips model downloads entirely
 
 ### 3. Verify Installation
 
@@ -71,13 +86,22 @@ Choose based on your system:
 npm run check:ai
 ```
 
-This checks that all required dependencies are available and working.
+This checks that the configured runtime is available and working.
 
-If you want transcript-backed speech analysis, also verify that `faster-whisper` is available. The analyzer can still run without it, but transcript runtime will report `unavailable` and speech clips will use deterministic fallback instead of transcript excerpts.
+The output now includes:
+
+- the configured and effective AI provider
+- transcript runtime status and model size
+- runtime reliability mode across AI, transcript, semantic validation, and cache
+- degraded-mode and intentional-skip reasons when optional layers are unavailable or bounded
+
+If you want transcript-backed speech analysis, verify that `faster-whisper` is available. The analyzer can still run without it, but transcript runtime will report `unavailable` and speech clips will use deterministic fallback instead of transcript excerpts.
 
 When transcript support is active, the analyzer does not fully transcribe every clip with audio. It reuses transcript cache on reruns, skips clearly weak candidates, and can run a short transcript probe on borderline assets before deciding whether a full transcription pass is worth the cost.
 
 By default, `npm run setup` installs transcript support because `TIMELINE_TRANSCRIPT_PROVIDER` defaults to `auto`. If you want a lighter install without local transcription, set `TIMELINE_TRANSCRIPT_PROVIDER=disabled` before running setup.
+
+If you want MLX-VLM support, set `TIMELINE_AI_PROVIDER=mlx-vlm-local` before running setup so the matching extra and model bootstrap path are included.
 
 ### 4. Open the Desktop App
 
@@ -106,10 +130,12 @@ Or download from [ffmpeg.org](https://ffmpeg.org/download.html).
 Create manually:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r services/analyzer/requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e './services/analyzer[clip,transcript]'
 ```
+
+If you use `TIMELINE_AI_PROVIDER=mlx-vlm-local`, include the `mlx_vlm` extra as well.
 
 ### MLX installation fails on Intel Mac
 
@@ -150,7 +176,8 @@ Once setup completes:
 1. Open the desktop app: `npm run view`
 2. Click "Choose Media Folder" and select a directory with video files
 3. Click "Process" and wait for analysis to complete
-4. Review the recommended segments, provenance, and generated timeline
-5. Click "Export" to save a DaVinci Resolve timeline
+4. Review the recommended segments, provenance, and generated timeline preview
+5. Optionally override or clear best takes per clip
+6. Click "Export" to save a DaVinci Resolve timeline built from the current desktop review state
 
 For detailed configuration options, see [docs/configuration.md](configuration.md).
