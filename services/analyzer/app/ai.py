@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import threading
 from typing import Any, Protocol
 from urllib import error, request
 
@@ -256,35 +257,37 @@ class MLXVLMRuntime:
         self._model: Any | None = None
         self._processor: Any | None = None
         self._config: Any | None = None
+        self._runtime_lock = threading.RLock()
 
     def ensure_loaded(self) -> None:
-        if self._model is not None:
-            return
+        with self._runtime_lock:
+            if self._model is not None:
+                return
 
-        load = importlib.import_module("mlx_vlm").load
-        load_config = importlib.import_module("mlx_vlm.utils").load_config
+            load = importlib.import_module("mlx_vlm").load
+            load_config = importlib.import_module("mlx_vlm.utils").load_config
 
-        self.device = resolve_mlx_device(requested=self.device)
-        model_reference = resolve_prepared_mlx_vlm_model_path(
-            model_id=self.model_id,
-            revision=self.revision,
-            cache_dir=self.cache_dir,
-        )
-        if model_reference is None:
-            raise AIProviderRequestError(
-                "Prepared MLX-VLM model files were not found in the local cache. "
-                "Run `npm run setup` to download the configured model before processing."
+            self.device = resolve_mlx_device(requested=self.device)
+            model_reference = resolve_prepared_mlx_vlm_model_path(
+                model_id=self.model_id,
+                revision=self.revision,
+                cache_dir=self.cache_dir,
             )
-        with model_cache_environment(self.cache_dir):
-            model, processor = load(model_reference)
-            try:
-                config = load_config(model_reference)
-            except Exception:
-                config = getattr(model, "config", None)
+            if model_reference is None:
+                raise AIProviderRequestError(
+                    "Prepared MLX-VLM model files were not found in the local cache. "
+                    "Run `npm run setup` to download the configured model before processing."
+                )
+            with model_cache_environment(self.cache_dir):
+                model, processor = load(model_reference)
+                try:
+                    config = load_config(model_reference)
+                except Exception:
+                    config = getattr(model, "config", None)
 
-        self._model = model
-        self._processor = processor
-        self._config = config
+            self._model = model
+            self._processor = processor
+            self._config = config
 
     def _model_type(self) -> str:
         config = self._config
@@ -378,43 +381,44 @@ class MLXVLMRuntime:
         if not path.exists() or not path.is_file():
             raise AIProviderRequestError(f"MLX-VLM local backend image path is invalid: {image_path}")
 
-        self.ensure_loaded()
-        model_type = self._model_type()
-        if model_type.startswith("qwen3"):
-            return self._query_qwen_with_prepared_inputs(
-                image_path=image_path,
-                prompt=prompt,
+        with self._runtime_lock:
+            self.ensure_loaded()
+            model_type = self._model_type()
+            if model_type.startswith("qwen3"):
+                return self._query_qwen_with_prepared_inputs(
+                    image_path=image_path,
+                    prompt=prompt,
+                )
+
+            pil_image = importlib.import_module("PIL.Image")
+            image = pil_image.open(path).convert("RGB")
+            apply_chat_template = importlib.import_module("mlx_vlm.prompt_utils").apply_chat_template
+            generate = importlib.import_module("mlx_vlm").generate
+            model = self._model
+            processor = self._processor
+            config = self._config
+            if model is None:
+                raise AIProviderRequestError("MLX-VLM model did not initialize.")
+            if processor is None:
+                raise AIProviderRequestError("MLX-VLM processor did not initialize.")
+
+            formatted_prompt = apply_chat_template(
+                processor,
+                config,
+                prompt,
+                num_images=1,
             )
 
-        pil_image = importlib.import_module("PIL.Image")
-        image = pil_image.open(path).convert("RGB")
-        apply_chat_template = importlib.import_module("mlx_vlm.prompt_utils").apply_chat_template
-        generate = importlib.import_module("mlx_vlm").generate
-        model = self._model
-        processor = self._processor
-        config = self._config
-        if model is None:
-            raise AIProviderRequestError("MLX-VLM model did not initialize.")
-        if processor is None:
-            raise AIProviderRequestError("MLX-VLM processor did not initialize.")
-
-        formatted_prompt = apply_chat_template(
-            processor,
-            config,
-            prompt,
-            num_images=1,
-        )
-
-        result = generate(
-            model,
-            processor,
-            formatted_prompt,
-            [image],
-            verbose=False,
-            max_tokens=120,
-            temperature=0.0,
-        )
-        return extract_generation_text(result)
+            result = generate(
+                model,
+                processor,
+                formatted_prompt,
+                [image],
+                verbose=False,
+                max_tokens=120,
+                temperature=0.0,
+            )
+            return extract_generation_text(result)
 
 
 class DeterministicVisionLanguageAnalyzer:

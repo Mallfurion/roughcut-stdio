@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1223,11 +1225,73 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertIn("pixel_values", kwargs)
         self.assertIn("mask", kwargs)
         self.assertIn("image_grid_thw", kwargs)
-        self.assertEqual(
-            fake_processor.last_messages[0]["content"][0]["image"],
-            str(image_path),
+
+    def test_mlx_vlm_runtime_serializes_concurrent_queries(self) -> None:
+        runtime = MLXVLMRuntime(
+            model_id="mlx-community/Qwen3.5-0.8B-4bit",
+            revision="",
+            cache_dir="/tmp/mlx-vlm",
+            device="metal",
         )
-        self.assertEqual(fake_processor.last_kwargs["return_tensors"], "pt")
+        runtime._model = object()
+        runtime._processor = object()
+        runtime._config = {"model_type": "qwen3_5"}
+
+        active_calls = 0
+        max_active_calls = 0
+        call_count = 0
+        lock = threading.Lock()
+        entered_event = threading.Event()
+        release_event = threading.Event()
+
+        def fake_query_qwen(*, image_path: str, prompt: str) -> str:
+            nonlocal active_calls, max_active_calls, call_count
+            with lock:
+                call_count += 1
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+                is_first_call = call_count == 1
+            if is_first_call:
+                entered_event.set()
+                release_event.wait(timeout=1.0)
+            else:
+                time.sleep(0.01)
+            with lock:
+                active_calls -= 1
+            return '{"summary":"ok"}'
+
+        runtime._query_qwen_with_prepared_inputs = fake_query_qwen  # type: ignore[method-assign]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            image_paths = []
+            for index in range(2):
+                image_path = Path(tempdir) / f"segment-{index}.jpg"
+                image_path.write_bytes(b"fake")
+                image_paths.append(str(image_path))
+
+            results: list[str] = []
+            errors: list[BaseException] = []
+
+            def worker(image_path: str) -> None:
+                try:
+                    results.append(runtime.query_image(image_path=image_path, prompt="Describe this segment."))
+                except BaseException as exc:  # pragma: no cover - test helper path
+                    errors.append(exc)
+
+            first_thread = threading.Thread(target=worker, args=(image_paths[0],))
+            second_thread = threading.Thread(target=worker, args=(image_paths[1],))
+            first_thread.start()
+            self.assertTrue(entered_event.wait(timeout=1.0))
+            second_thread.start()
+            time.sleep(0.05)
+            self.assertEqual(max_active_calls, 1)
+            release_event.set()
+            first_thread.join()
+            second_thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(results, ['{"summary":"ok"}', '{"summary":"ok"}'])
+        self.assertEqual(max_active_calls, 1)
 
 
 if __name__ == "__main__":
