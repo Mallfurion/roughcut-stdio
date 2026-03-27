@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-03-27
+
+### 🚀 Features
+- Add desktop best-take overrides and timeline preview controls to the review workflow.
+- Harden runtime reliability handling in the desktop and analyzer flow.
+- Improve speech understanding and cross-asset story assembly behavior.
+- Expand the evaluation harness and story-assembly implementation.
+
+### 🛠 Fixes & Improvements
+- Archive completed OpenSpec proposals and specs.
+- Add follow-up proposals for next steps and standalone desktop distribution.
+- Clean up proposal docs and parent proposal references.
+
 ## [1.5.1] - 2026-03-27
 
 ### 🛠 Fixes & Improvements
