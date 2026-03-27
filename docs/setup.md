@@ -1,5 +1,7 @@
 # Setup & Requirements
 
+This document covers **repository development setup**. If you are working with a packaged desktop build, see [docs/desktop-distribution.md](desktop-distribution.md) for bundled runtime behavior, app-managed storage, startup bootstrap, and release verification.
+
 ## System Requirements
 
 ### Always Required
@@ -111,6 +113,8 @@ npm run view
 
 This launches the Tauri desktop app in development mode.
 
+In development mode the app still reads repo `.env` settings, uses the local `.venv`, and writes generated output under the repository `generated/` folder.
+
 ---
 
 ## Troubleshooting Setup
@@ -156,6 +160,16 @@ Or install via Homebrew:
 ```bash
 brew install rust
 ```
+
+### Packaged app behavior differs from repo setup
+
+That is expected.
+
+- Repository development mode uses the checked-out repo, `.env`, `.venv`, and `scripts/*.sh`.
+- Packaged app mode uses bundled runtime resources and app-managed config/cache/generated directories.
+- Packaged model downloads live outside the signed app bundle and are checked through the startup bootstrap screen.
+
+Use [docs/desktop-distribution.md](desktop-distribution.md) for packaged-app details.
 
 ### Port already in use (LM Studio)
 

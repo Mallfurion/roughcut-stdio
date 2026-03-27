@@ -11,6 +11,7 @@ import { stringifyError } from "../lib/format.ts";
 import { renderAppShell } from "../render/app-shell.ts";
 import { resolveClipViews } from "../render/view-models.ts";
 import {
+  checkRuntimeReady,
   clearBestTake,
   chooseTimelineExportPath,
   cleanGenerated,
@@ -23,6 +24,7 @@ import {
   loadActiveProject,
   loadAppSettings,
   pickMediaDirectory,
+  runSetup,
   saveAppSettings,
   selectBestTake,
   startProcess,
@@ -102,6 +104,12 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     }
 
     try {
+      await refreshRuntimeCheck();
+    } catch (error) {
+      pushProcessLog(`Runtime check failed: ${stringifyError(error)}`);
+    }
+
+    try {
       appState.process = await getProcessState();
     } catch (error) {
       pushProcessLog(`Initial process state unavailable: ${stringifyError(error)}`);
@@ -140,6 +148,15 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
         return;
       case "pick-media":
         await handlePickMedia();
+        return;
+      case "prepare-runtime":
+        await handlePrepareRuntime();
+        return;
+      case "apply-runtime-fallback":
+        await handleApplyRuntimeFallback();
+        return;
+      case "refresh-runtime":
+        await refreshRuntimeCheck();
         return;
       case "go-process":
         goToProcessStep();
@@ -219,6 +236,25 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     const settings = await loadAppSettings();
     appState.settings = settings;
     appState.aiMode = settings.aiMode;
+  }
+
+  async function refreshRuntimeCheck() {
+    if (!appState.settings) {
+      return;
+    }
+
+    appState.runtimeBusy = true;
+    render();
+
+    try {
+      appState.runtimeCheck = await checkRuntimeReady(buildRuntimeConfig(appState.settings));
+      if (appState.runtimeCheck.runtime_ready && !appState.runtimeCheck.bootstrap_required) {
+        appState.runtimeMessage = "";
+      }
+    } finally {
+      appState.runtimeBusy = false;
+      render();
+    }
   }
 
   function openSettingsDialog() {
@@ -369,6 +405,22 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
   }
 
   async function handleStartProcess() {
+    if (!appState.settings) {
+      return;
+    }
+
+    await refreshRuntimeCheck();
+    if (!appState.runtimeCheck?.bundled_runtime_ready || appState.runtimeCheck.bootstrap_required) {
+      appState.currentStep = "choose";
+      appState.process = {
+        ...createInitialProcessState(),
+        status: "blocked",
+        logs: ["Runtime preparation is required before processing can start."],
+      };
+      render();
+      return;
+    }
+
     appState.currentStep = "process";
     appState.process = {
       ...createInitialProcessState(),
@@ -519,11 +571,60 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
       appState.aiMode = saved.aiMode;
       appState.settingsDraft = { ...saved };
       appState.settingsBusy = false;
-      appState.settingsMessage = "Saved settings to .env";
+      appState.settingsMessage = "Saved runtime settings";
+      await refreshRuntimeCheck();
       render();
     } catch (error) {
       appState.settingsBusy = false;
       appState.settingsMessage = `Save failed: ${stringifyError(error)}`;
+      render();
+    }
+  }
+
+  async function handlePrepareRuntime() {
+    if (!appState.settings) {
+      return;
+    }
+
+    appState.runtimeBusy = true;
+    appState.runtimeMessage = "";
+    render();
+
+    try {
+      const result = await runSetup(buildRuntimeConfig(appState.settings));
+      appState.runtimeCheck = result;
+      appState.runtimeMessage =
+        result.runtime_ready && !result.bootstrap_required
+          ? "Runtime preparation completed."
+          : "Runtime preparation finished, but more setup is still required.";
+    } catch (error) {
+      appState.runtimeMessage = `Runtime preparation failed: ${stringifyError(error)}`;
+    } finally {
+      appState.runtimeBusy = false;
+      render();
+    }
+  }
+
+  async function handleApplyRuntimeFallback() {
+    if (!appState.settings || !appState.runtimeCheck?.fallback_actions.length) {
+      return;
+    }
+
+    const nextSettings = applyRuntimeFallback(appState.settings, appState.runtimeCheck.fallback_actions);
+    appState.runtimeBusy = true;
+    appState.runtimeMessage = "";
+    render();
+
+    try {
+      const saved = await saveAppSettings(nextSettings);
+      appState.settings = saved;
+      appState.settingsDraft = appState.settingsOpen ? { ...saved } : appState.settingsDraft;
+      appState.aiMode = saved.aiMode;
+      await refreshRuntimeCheck();
+      appState.runtimeMessage = `Fallback mode enabled: ${describeFallbackActions(appState.runtimeCheck?.fallback_actions ?? [])}`;
+    } catch (error) {
+      appState.runtimeBusy = false;
+      appState.runtimeMessage = `Fallback update failed: ${stringifyError(error)}`;
       render();
     }
   }
@@ -604,4 +705,66 @@ function coerceSettingsValue(field: keyof AppSettings, value: string | boolean) 
     default:
       return value;
   }
+}
+
+function buildRuntimeConfig(settings: AppSettings) {
+  return {
+    provider: settings.aiProvider,
+    aiModel: settings.aiModel,
+    aiBaseUrl: settings.aiBaseUrl,
+    aiModelId: settings.aiModelId,
+    aiModelRevision: "",
+    aiModelCacheDir: "",
+    aiDevice: settings.aiDevice,
+    transcriptProvider: settings.transcriptProvider,
+    transcriptModelSize: settings.transcriptModelSize,
+    clipEnabled: settings.clipEnabled,
+    projectName: settings.projectName,
+    storyPrompt: settings.storyPrompt,
+  };
+}
+
+function applyRuntimeFallback(settings: AppSettings, fallbackActions: string[]) {
+  let nextSettings = { ...settings };
+
+  for (const action of fallbackActions) {
+    switch (action) {
+      case "disable-transcript":
+        nextSettings = { ...nextSettings, transcriptProvider: "disabled" };
+        break;
+      case "disable-clip":
+        nextSettings = { ...nextSettings, clipEnabled: false };
+        break;
+      case "switch-provider-deterministic":
+        nextSettings = { ...nextSettings, aiProvider: "deterministic" };
+        break;
+      default:
+        break;
+    }
+  }
+
+  return nextSettings;
+}
+
+function describeFallbackActions(fallbackActions: string[]) {
+  if (!fallbackActions.length) {
+    return "reduced-capability processing";
+  }
+
+  const labels = fallbackActions
+    .map((action) => {
+      switch (action) {
+        case "disable-transcript":
+          return "transcript disabled";
+        case "disable-clip":
+          return "CLIP scoring disabled";
+        case "switch-provider-deterministic":
+          return "AI provider switched to deterministic";
+        default:
+          return "";
+      }
+    })
+    .filter((label) => label.length > 0);
+
+  return labels.length ? labels.join(", ") : "reduced-capability processing";
 }

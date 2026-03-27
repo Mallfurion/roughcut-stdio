@@ -39,6 +39,14 @@ npm run build:desktop
 
 Compiles the Tauri shell and packages the desktop app. Output is in `src-tauri/target/release/`.
 
+**Verify the packaged desktop runtime**:
+
+```bash
+apps/desktop/scripts/verify_packaged_runtime.sh
+```
+
+Stages the packaged runtime, validates bundled `ffmpeg`/`ffprobe`, runs a deterministic transcript-disabled processing smoke test through the packaged Python wrapper, and checks Resolve export output.
+
 **Quick launch** (same as dev):
 
 ```bash

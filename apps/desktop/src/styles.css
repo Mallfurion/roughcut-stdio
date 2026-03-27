@@ -351,6 +351,17 @@ h2 {
   background: rgba(255, 202, 107, 0.08);
 }
 
+.status.error {
+  color: #ffd7dc;
+  background: rgba(255, 110, 122, 0.12);
+}
+
+.runtime-list {
+  margin: 0 0 18px;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
 .pill,
 .badge {
   display: inline-flex;

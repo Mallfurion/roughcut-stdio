@@ -16,6 +16,44 @@ export type ProcessState = {
   error?: string | null;
 };
 
+export type RuntimeCheck = {
+  runtime_backend: string;
+  configured_provider: string;
+  effective_provider: string;
+  model: string;
+  revision: string;
+  cache_dir: string;
+  device: string;
+  base_url: string;
+  available: boolean;
+  detail: string;
+  runtime_ready: boolean;
+  bundled_runtime_ready: boolean;
+  model_assets_ready: boolean;
+  bootstrap_required: boolean;
+  default_model_assets: string[];
+  provider_model_assets: string[];
+  missing_model_assets: string[];
+  fallback_actions: string[];
+  runtime_reliability_mode: string;
+  ai_runtime_mode: string;
+  transcript_runtime_mode: string;
+  semantic_boundary_runtime_mode: string;
+  cache_runtime_mode: string;
+  transcript_provider_configured: string;
+  transcript_provider_effective: string;
+  transcript_model_size: string;
+  transcript_enabled: boolean;
+  transcript_available: boolean;
+  transcript_status: string;
+  transcript_detail: string;
+  degraded: boolean;
+  degraded_reasons: string[];
+  intentional_skip_reasons: string[];
+  runtime_summary: string;
+  output: string;
+};
+
 export type MediaFolderSummary = {
   path: string;
   video_count: number;
@@ -215,6 +253,9 @@ export type AppState = {
   settingsMessage: string;
   mediaSummary: MediaFolderSummary | null;
   mediaSummaryError: string;
+  runtimeCheck: RuntimeCheck | null;
+  runtimeBusy: boolean;
+  runtimeMessage: string;
   process: ProcessState;
   processLogsExpanded: boolean;
   expandedClipIds: string[];

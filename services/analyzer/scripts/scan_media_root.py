@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 import time
@@ -15,14 +16,22 @@ from services.analyzer.app.domain import Asset  # noqa: E402
 from services.analyzer.app.service import scan_and_analyze_media_root  # noqa: E402
 
 
-def main() -> int:
-    if len(sys.argv) < 3:
-        sys.stderr.write("usage: scan_media_root.py <project-name> <media-root> [story-prompt]\n")
-        return 1
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("project_name")
+    parser.add_argument("media_root")
+    parser.add_argument("story_prompt", nargs="?", default="Build a coherent rough cut.")
+    parser.add_argument("--artifacts-root", default=str(ROOT / "generated" / "analysis"))
+    return parser.parse_args()
 
-    project_name = sys.argv[1]
-    media_root = sys.argv[2]
-    story_prompt = sys.argv[3] if len(sys.argv) > 3 else "Build a coherent rough cut."
+
+def main() -> int:
+    args = parse_args()
+
+    project_name = args.project_name
+    media_root = args.media_root
+    story_prompt = args.story_prompt
+    artifacts_root = Path(args.artifacts_root).resolve()
     start_time = time.monotonic()
 
     provider_status = inspect_ai_provider_status()
@@ -64,7 +73,7 @@ def main() -> int:
         project_name=project_name,
         media_roots=[media_root],
         story_prompt=story_prompt,
-        artifacts_root=ROOT / "generated" / "analysis",
+        artifacts_root=artifacts_root,
         status_callback=status_callback,
         progress_callback=progress_callback,
     )

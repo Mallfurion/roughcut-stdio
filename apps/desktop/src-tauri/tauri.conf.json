@@ -24,7 +24,10 @@
         "enable": true,
         "scope": {
           "allow": [
-            "/Users/florin/Projects/personal/roughcut-stdio/generated/analysis/**"
+            "$APPDATA/generated/**",
+            "$APPCACHE/**",
+            "$RESOURCE/**",
+            "$HOME/**"
           ]
         }
       }
@@ -33,6 +36,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "./.runtime-bundle/services/": "services/",
+      "./.runtime-bundle/fixtures/": "fixtures/",
+      "./.runtime-bundle/runtime/": "runtime/"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

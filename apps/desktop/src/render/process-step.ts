@@ -3,6 +3,8 @@ import { escapeHtml } from "../lib/html.ts";
 import { renderMetric } from "./shared.ts";
 
 export function renderProcessStep(appState: AppState, canViewResults: boolean) {
+  const runtimeBlocked =
+    !appState.runtimeCheck?.bundled_runtime_ready || Boolean(appState.runtimeCheck?.bootstrap_required);
   const processPercent = appState.process.total
     ? Math.max(0, Math.min(100, Math.round((appState.process.processed / appState.process.total) * 100)))
     : 0;
@@ -30,6 +32,12 @@ export function renderProcessStep(appState: AppState, canViewResults: boolean) {
         ${renderMetric("AI mode", appState.aiMode)}
       </div>
 
+      ${
+        runtimeBlocked
+          ? `<p class="status warn">Runtime preparation is required before processing can start. Return to step 1 to prepare the packaged runtime${appState.runtimeCheck?.fallback_actions.length ? " or apply fallback settings" : ""}.</p>`
+          : ""
+      }
+
       <div class="progress">
         <div class="progress-bar">
           <span style="width:${processPercent}%"></span>
@@ -43,7 +51,7 @@ export function renderProcessStep(appState: AppState, canViewResults: boolean) {
       </div>
 
       <div class="action-row">
-        <button data-action="start-process" class="button" ${!appState.mediaDir || appState.process.running ? "disabled" : ""}>
+        <button data-action="start-process" class="button" ${!appState.mediaDir || appState.process.running || runtimeBlocked ? "disabled" : ""}>
           ${appState.process.running ? "Processing..." : "Start process"}
         </button>
         <button data-action="view-results" class="button secondary" ${!canViewResults ? "disabled" : ""}>View results</button>

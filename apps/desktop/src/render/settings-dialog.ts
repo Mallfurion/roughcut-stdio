@@ -16,7 +16,7 @@ export function renderSettingsDialog(appState: AppState) {
           <div>
             <p class="eyebrow">Settings</p>
             <h2>Application settings</h2>
-            <p class="muted">Save env-backed defaults for provider selection, prompts, and AI runtime tuning.</p>
+            <p class="muted">Save runtime defaults for provider selection, prompts, and AI runtime tuning.</p>
           </div>
           <button data-action="close-settings" class="icon-button" title="Close settings" aria-label="Close settings">
             <svg viewBox="0 0 24 24" aria-hidden="true">

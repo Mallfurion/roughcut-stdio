@@ -42,6 +42,7 @@ npm run view
 The desktop review surface persists best-take overrides in `generated/best-take-overrides.json`. The in-app export action rebuilds the active timeline from those overrides before writing FCPXML.
 
 📖 **Full setup guide:** [docs/setup.md](docs/setup.md)
+📖 **Packaged desktop runtime:** [docs/desktop-distribution.md](docs/desktop-distribution.md)
 
 ## How It Works
 
@@ -57,6 +58,7 @@ The analyzer runs in four phases:
 ## Documentation
 
 - 📖 [docs/setup.md](docs/setup.md) — Installation & requirements
+- 📖 [docs/desktop-distribution.md](docs/desktop-distribution.md) — Packaged app runtime, storage, bootstrap, and release verification
 - 📖 [docs/configuration.md](docs/configuration.md) — Environment variables & AI provider setup
 - 📖 [docs/commands.md](docs/commands.md) — npm commands & debugging
 - 📖 [docs/analyzer-pipeline.md](docs/analyzer-pipeline.md) — How the analysis pipeline works
@@ -73,6 +75,7 @@ The project is split into three layers:
 
 - Native macOS Tauri desktop app with media selection, progress display, and export dialog
 - Review surface for recommended segments, timeline state, and segment provenance
+- Packaged mode bundles Python, analyzer resources, and `ffmpeg`/`ffprobe`, while repo mode keeps the development workflow intact
 
 **Backend** — `services/analyzer/` (Python)
 
@@ -80,9 +83,10 @@ The project is split into three layers:
 
 **Scripts** — `scripts/`
 
-- Shell entrypoints for setup, processing, and export
+- Shell entrypoints for setup, processing, and export in repository development mode
 
 See [docs/architecture.md](docs/architecture.md) for detailed design decisions and extensibility points.
+See [docs/desktop-distribution.md](docs/desktop-distribution.md) for packaged-app behavior and release verification.
 
 ## Core Features
 
@@ -114,6 +118,7 @@ See [docs/configuration.md](docs/configuration.md) for setup details and example
 ```bash
 npm run dev:desktop    # Launch app in dev mode
 npm run build:desktop  # Build production app
+apps/desktop/scripts/verify_packaged_runtime.sh  # Verify bundled runtime + packaged smoke flow
 npm run process        # Run analyzer directly
 npm run check:openspec-graph  # Validate chained OpenSpec change metadata
 npm run test:python    # Run Python tests
@@ -123,9 +128,16 @@ Full command reference: [docs/commands.md](docs/commands.md)
 
 ## Requirements
 
+For repository development:
+
 - Node.js 18+, npm 9+, Python 3.12+
 - Xcode Command Line Tools, Rust/Cargo
 - ffmpeg (installed automatically by setup script)
+
+For the packaged app:
+
+- the bundled desktop runtime is self-contained
+- first-run model assets may still require a bootstrap download depending on the configured workflow
 
 See [docs/setup.md](docs/setup.md) for detailed requirements and troubleshooting.
 

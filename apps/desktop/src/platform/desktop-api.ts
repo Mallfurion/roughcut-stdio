@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 
-import type { AppSettings, LoadedProject, MediaFolderSummary, ProcessState } from "../app/types.ts";
+import type { AppSettings, LoadedProject, MediaFolderSummary, ProcessState, RuntimeCheck } from "../app/types.ts";
 
 export function listenProcessUpdate(onUpdate: (processState: ProcessState) => void) {
   return listen<ProcessState>("process-update", (event) => {
@@ -20,6 +20,40 @@ export function saveAppSettings(settings: AppSettings) {
 
 export function getProcessState() {
   return invoke<ProcessState>("get_process_state");
+}
+
+export function checkRuntimeReady(config: {
+  provider: string;
+  aiModel: string;
+  aiBaseUrl: string;
+  aiModelId: string;
+  aiModelRevision: string;
+  aiModelCacheDir: string;
+  aiDevice: string;
+  transcriptProvider: string;
+  transcriptModelSize: string;
+  clipEnabled: boolean;
+  projectName: string;
+  storyPrompt: string;
+}) {
+  return invoke<RuntimeCheck>("check_runtime_ready", { config });
+}
+
+export function runSetup(config: {
+  provider: string;
+  aiModel: string;
+  aiBaseUrl: string;
+  aiModelId: string;
+  aiModelRevision: string;
+  aiModelCacheDir: string;
+  aiDevice: string;
+  transcriptProvider: string;
+  transcriptModelSize: string;
+  clipEnabled: boolean;
+  projectName: string;
+  storyPrompt: string;
+}) {
+  return invoke<RuntimeCheck>("run_setup", { config });
 }
 
 export function loadActiveProject() {

@@ -27,6 +27,7 @@ Native macOS desktop application built with Tauri and a Vite-powered TypeScript 
 - Persist per-asset best-take overrides without mutating the analyzer baseline project JSON
 - Export dialog for saving FCPXML to chosen location
 - Launch and manage backend processes
+- In packaged mode, own runtime checks, bootstrap, process orchestration, and export over bundled runtime resources
 
 **Tech:** Tauri, TypeScript, Vite, CSS
 
@@ -62,12 +63,14 @@ Complete analysis and export engine that runs the four-phase pipeline.
 
 ### Scripts — `scripts/`
 
-Shell entrypoints for setup, processing, and export. These wrap the Python analyzer and are called by the desktop app.
+Shell entrypoints for setup, processing, and export in repository development mode. These wrap the Python analyzer for local development and debugging.
 
 **Key Scripts:**
 - `setup.sh` — Environment initialization
 - `process.sh` — Runs the analysis pipeline
 - `export.sh` — Generates FCPXML
+
+The packaged desktop runtime no longer depends on these scripts as its required execution path; packaged mode runs through the Tauri backend runtime abstraction instead.
 
 ---
 
