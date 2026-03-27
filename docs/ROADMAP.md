@@ -73,17 +73,19 @@ Why it matters:
 
 Proposal:
 - [runtime-reliability-hardening](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/runtime-reliability-hardening/proposal.md)
+- [runtime-performance-optimization](../openspec/changes/runtime-performance-optimization/proposal.md)
 
-The analyzer is now more capable, but also more layered.
+The analyzer is now more capable, but also more layered. Reliability reporting is better than it was, but cold runs still spend too much time in avoidable local-runtime overhead.
 
 Likely next improvements:
-- clearer runtime and cache reporting
-- tighter control over expensive AI-path activation
-- better fallback visibility in generated data and desktop review
-- continued benchmark tuning for transcript, semantic, and assembly stages
+- make semantic validation budgets truly run-scoped and benchmarkable
+- reduce repeated evidence generation and per-segment ffmpeg fan-out
+- make MLX-local execution and reported concurrency reflect actual runtime behavior
+- separate warm-cache speedups from real cold-path improvements in benchmark reporting
 
 Why it matters:
 - product trust depends on the pipeline being predictable, debuggable, and fast enough to use regularly
+- cold-run cost is still the main barrier to using the full local AI path on larger footage sets
 
 ### 5. Review And Editorial UX
 
@@ -135,12 +137,13 @@ Why it matters:
 
 ## Current Direction
 
-The current planned analyzer follow-up remains split into four concrete proposals:
+The current planned analyzer follow-up remains split into five concrete proposals:
 
 1. [evaluation-harness-expansion](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/evaluation-harness-expansion/proposal.md)
 2. [story-assembly-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/story-assembly-improvements/proposal.md)
 3. [speech-understanding-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/speech-understanding-improvements/proposal.md)
 4. [runtime-reliability-hardening](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/runtime-reliability-hardening/proposal.md)
+5. [runtime-performance-optimization](../openspec/changes/runtime-performance-optimization/proposal.md)
 
 The current product-facing desktop follow-up is now split into two concrete proposals:
 
