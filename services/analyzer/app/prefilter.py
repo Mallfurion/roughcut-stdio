@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import md5
+import json
 import math
 import os
 from pathlib import Path
@@ -9,8 +10,13 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
+from typing import Any
 
 from .domain import Asset
+
+
+DETERMINISTIC_PREPROCESSING_SCHEMA_VERSION = 1
 
 
 @dataclass(slots=True)
@@ -36,12 +42,186 @@ class AudioSignal:
 
 
 @dataclass(slots=True)
+class AudioScreeningSummary:
+    timestamps: list[float]
+    silence_intervals: list[tuple[float, float]]
+    rms_by_time: list[tuple[float, float]]
+    sampled_signals: list[AudioSignal]
+    source: str
+
+
+@dataclass(slots=True)
 class SeedRegion:
     id: str
     source: str
     start_sec: float
     end_sec: float
     score_hint: float = 0.0
+
+
+@dataclass(slots=True)
+class DeterministicPreprocessingArtifact:
+    compatibility_key: str
+    base_ranges: list[tuple[float, float]]
+    frame_signals: list[FrameSignal]
+    audio_signals: list[AudioSignal]
+
+
+def deterministic_preprocessing_cache_path(
+    *,
+    artifacts_root: str | Path,
+    asset: Asset,
+) -> Path:
+    path_hash = md5(asset.proxy_path.encode("utf-8")).hexdigest()[:10]
+    return Path(artifacts_root) / "prefilter-cache" / f"{asset.id}-{path_hash}.json"
+
+
+def deterministic_preprocessing_compatibility_key(
+    *,
+    asset: Asset,
+    timestamps: list[float],
+    frame_width: int,
+    audio_enabled: bool,
+) -> str:
+    payload = {
+        "schema_version": DETERMINISTIC_PREPROCESSING_SCHEMA_VERSION,
+        "asset": {
+            "id": asset.id,
+            "source_path": asset.source_path,
+            "proxy_path": asset.proxy_path,
+            "duration_sec": round(float(asset.duration_sec), 3),
+            "fps": round(float(asset.fps), 4),
+            "width": int(asset.width),
+            "height": int(asset.height),
+            "has_speech": bool(asset.has_speech),
+            "source_fingerprint": _media_file_fingerprint(asset.source_path),
+            "proxy_fingerprint": _media_file_fingerprint(asset.proxy_path),
+        },
+        "sampling": {
+            "timestamps": [round(float(timestamp), 3) for timestamp in timestamps],
+            "frame_width": int(frame_width),
+            "audio_enabled": bool(audio_enabled),
+        },
+    }
+    return md5(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def load_deterministic_preprocessing_artifact(
+    *,
+    cache_path: str | Path,
+    compatibility_key: str,
+) -> DeterministicPreprocessingArtifact | None:
+    path = Path(cache_path)
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("schema_version", 0) or 0) != DETERMINISTIC_PREPROCESSING_SCHEMA_VERSION:
+        return None
+    if str(payload.get("compatibility_key", "")).strip() != compatibility_key:
+        return None
+
+    try:
+        base_ranges = [
+            (round(float(item[0]), 3), round(float(item[1]), 3))
+            for item in payload.get("base_ranges", [])
+            if isinstance(item, list) and len(item) == 2
+        ]
+        frame_signals = [
+            FrameSignal(
+                timestamp_sec=round(float(item["timestamp_sec"]), 3),
+                sharpness=round(float(item["sharpness"]), 4),
+                contrast=round(float(item["contrast"]), 4),
+                brightness=round(float(item["brightness"]), 4),
+                motion_energy=round(float(item["motion_energy"]), 4),
+                distinctiveness=round(float(item["distinctiveness"]), 4),
+                center_focus=round(float(item["center_focus"]), 4),
+                score=round(float(item["score"]), 4),
+                source=str(item["source"]),
+            )
+            for item in payload.get("frame_signals", [])
+        ]
+        audio_signals = [
+            AudioSignal(
+                timestamp_sec=round(float(item["timestamp_sec"]), 3),
+                rms_energy=round(float(item["rms_energy"]), 4),
+                peak_loudness=round(float(item["peak_loudness"]), 4),
+                is_silent=bool(item["is_silent"]),
+                source=str(item["source"]),
+            )
+            for item in payload.get("audio_signals", [])
+        ]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    return DeterministicPreprocessingArtifact(
+        compatibility_key=compatibility_key,
+        base_ranges=base_ranges,
+        frame_signals=frame_signals,
+        audio_signals=audio_signals,
+    )
+
+
+def write_deterministic_preprocessing_artifact(
+    *,
+    cache_path: str | Path,
+    artifact: DeterministicPreprocessingArtifact,
+) -> None:
+    path = Path(cache_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": DETERMINISTIC_PREPROCESSING_SCHEMA_VERSION,
+        "compatibility_key": artifact.compatibility_key,
+        "base_ranges": [
+            [round(start_sec, 3), round(end_sec, 3)]
+            for start_sec, end_sec in artifact.base_ranges
+        ],
+        "frame_signals": [
+            {
+                "timestamp_sec": round(signal.timestamp_sec, 3),
+                "sharpness": round(signal.sharpness, 4),
+                "contrast": round(signal.contrast, 4),
+                "brightness": round(signal.brightness, 4),
+                "motion_energy": round(signal.motion_energy, 4),
+                "distinctiveness": round(signal.distinctiveness, 4),
+                "center_focus": round(signal.center_focus, 4),
+                "score": round(signal.score, 4),
+                "source": signal.source,
+            }
+            for signal in artifact.frame_signals
+        ],
+        "audio_signals": [
+            {
+                "timestamp_sec": round(signal.timestamp_sec, 3),
+                "rms_energy": round(signal.rms_energy, 4),
+                "peak_loudness": round(signal.peak_loudness, 4),
+                "is_silent": bool(signal.is_silent),
+                "source": signal.source,
+            }
+            for signal in artifact.audio_signals
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _media_file_fingerprint(path: str) -> dict[str, Any]:
+    file_path = Path(path)
+    if not file_path.exists():
+        return {
+            "path": path,
+            "exists": False,
+        }
+    stat_result = file_path.stat()
+    return {
+        "path": path,
+        "exists": True,
+        "size": int(stat_result.st_size),
+        "mtime_ns": int(stat_result.st_mtime_ns),
+    }
 
 
 def sample_asset_signals(
@@ -55,9 +235,12 @@ def sample_asset_signals(
         timestamps = sample_timestamps(asset.duration_sec, target_count=target_count)
     signals: list[FrameSignal] = []
     previous_pixels: bytes | None = None
+    extracted_frames = extract_gray_frames_batched(asset.proxy_path, timestamps, width=frame_width)
 
-    for timestamp in timestamps:
-        extracted = extract_gray_frame(asset.proxy_path, timestamp, width=frame_width)
+    for index, timestamp in enumerate(timestamps):
+        extracted = extracted_frames[index] if extracted_frames is not None and index < len(extracted_frames) else None
+        if extracted is None:
+            extracted = extract_gray_frame(asset.proxy_path, timestamp, width=frame_width)
         if extracted is None:
             signal = deterministic_signal(asset, timestamp)
         else:
@@ -426,6 +609,63 @@ def extract_gray_frame(path: str, timestamp_sec: float, *, width: int) -> tuple[
     return decode_pgm(process.stdout)
 
 
+def extract_gray_frames_batched(
+    path: str,
+    timestamps: list[float],
+    *,
+    width: int,
+) -> list[tuple[int, int, bytes] | None] | None:
+    if not timestamps:
+        return []
+    if shutil.which("ffmpeg") is None:
+        return None
+    if not Path(path).exists():
+        return None
+    if len(timestamps) == 1:
+        return [extract_gray_frame(path, timestamps[0], width=width)]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_args: list[str] = []
+        filter_parts: list[str] = []
+        output_specs: list[tuple[Path, str]] = []
+        for index, timestamp_sec in enumerate(timestamps):
+            input_args.extend(["-ss", f"{timestamp_sec:.3f}", "-i", path])
+            label = f"v{index}"
+            output_path = Path(temp_dir) / f"{index:03d}.pgm"
+            filter_parts.append(f"[{index}:v]scale={width}:-1,format=gray[{label}]")
+            output_specs.append((output_path, label))
+
+        command = [
+            "ffmpeg",
+            "-v",
+            "error",
+            *input_args,
+            "-filter_complex",
+            ";".join(filter_parts),
+        ]
+        for output_path, label in output_specs:
+            command.extend(["-map", f"[{label}]", "-frames:v", "1", str(output_path)])
+
+        process = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+        )
+        if process.returncode != 0 and not any(output_path.exists() for output_path, _label in output_specs):
+            return None
+
+        results: list[tuple[int, int, bytes] | None] = []
+        for output_path, _label in output_specs:
+            if not output_path.exists():
+                results.append(None)
+                continue
+            try:
+                results.append(decode_pgm(output_path.read_bytes()))
+            except OSError:
+                results.append(None)
+        return results
+
+
 def decode_pgm(raw: bytes) -> tuple[int, int, bytes] | None:
     if not raw.startswith(b"P5"):
         return None
@@ -561,29 +801,97 @@ def sample_audio_signals(
     asset: Asset,
     timestamps: list[float],
 ) -> list[AudioSignal]:
+    return build_audio_screening_summary(asset, timestamps).sampled_signals
+
+
+def build_audio_screening_summary(
+    asset: Asset,
+    timestamps: list[float],
+) -> AudioScreeningSummary:
     if not timestamps:
-        return []
+        return AudioScreeningSummary(
+            timestamps=[],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=[],
+            source="empty",
+        )
     if os.environ.get("TIMELINE_AI_AUDIO_ENABLED", "true").lower() == "false":
-        return _fallback_audio_signals(timestamps)
+        return AudioScreeningSummary(
+            timestamps=[round(ts, 3) for ts in timestamps],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=_fallback_audio_signals(timestamps),
+            source="fallback",
+        )
     if not asset.has_speech:
-        return _fallback_audio_signals(timestamps)
+        return AudioScreeningSummary(
+            timestamps=[round(ts, 3) for ts in timestamps],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=_fallback_audio_signals(timestamps),
+            source="fallback",
+        )
     if shutil.which("ffmpeg") is None or not Path(asset.proxy_path).exists():
-        return _fallback_audio_signals(timestamps)
+        return AudioScreeningSummary(
+            timestamps=[round(ts, 3) for ts in timestamps],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=_fallback_audio_signals(timestamps),
+            source="fallback",
+        )
 
     try:
-        silence_intervals = _detect_silence_intervals(asset.proxy_path)
-        rms_by_time = _extract_rms_by_time(asset.proxy_path, asset.duration_sec, len(timestamps))
+        silence_intervals, rms_by_time = _extract_audio_screening_data(
+            asset.proxy_path,
+            asset.duration_sec,
+            len(timestamps),
+        )
     except Exception:
-        return _fallback_audio_signals(timestamps)
+        return AudioScreeningSummary(
+            timestamps=[round(ts, 3) for ts in timestamps],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=_fallback_audio_signals(timestamps),
+            source="fallback",
+        )
 
     if not rms_by_time:
-        return _fallback_audio_signals(timestamps)
+        return AudioScreeningSummary(
+            timestamps=[round(ts, 3) for ts in timestamps],
+            silence_intervals=[],
+            rms_by_time=[],
+            sampled_signals=_fallback_audio_signals(timestamps),
+            source="fallback",
+        )
 
-    half_window = (asset.duration_sec / (len(timestamps) + 1)) / 2.0
+    signals = _build_audio_signals_from_summary(
+        timestamps=timestamps,
+        silence_intervals=silence_intervals,
+        rms_by_time=rms_by_time,
+        duration_sec=asset.duration_sec,
+    )
+    return AudioScreeningSummary(
+        timestamps=[round(ts, 3) for ts in timestamps],
+        silence_intervals=silence_intervals,
+        rms_by_time=rms_by_time,
+        sampled_signals=signals,
+        source="ffmpeg",
+    )
+
+
+def _build_audio_signals_from_summary(
+    *,
+    timestamps: list[float],
+    silence_intervals: list[tuple[float, float]],
+    rms_by_time: list[tuple[float, float]],
+    duration_sec: float,
+) -> list[AudioSignal]:
+    half_window = (duration_sec / (len(timestamps) + 1)) / 2.0
     signals: list[AudioSignal] = []
     for ts in timestamps:
         window_start = max(0.0, ts - half_window)
-        window_end = min(asset.duration_sec, ts + half_window)
+        window_end = min(duration_sec, ts + half_window)
         matching_rms = [rms for time, rms in rms_by_time if window_start <= time <= window_end]
         rms_energy = sum(matching_rms) / len(matching_rms) if matching_rms else 0.0
         peak_loudness = max(matching_rms) if matching_rms else 0.0
@@ -658,20 +966,41 @@ def _fallback_audio_signals(timestamps: list[float]) -> list[AudioSignal]:
     ]
 
 
-def _detect_silence_intervals(path: str) -> list[tuple[float, float]]:
-    # -v info is required: silencedetect writes at info level, not warning
-    process = subprocess.run(
-        [
-            "ffmpeg", "-v", "info",
-            "-i", path,
-            "-map", "0:a:0",
-            "-af", "silencedetect=noise=-35dB:duration=0.3",
-            "-f", "null", "-",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def _extract_audio_screening_data(
+    path: str,
+    duration_sec: float,
+    target_count: int,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    chunk_len = max(0.1, min(2.0, duration_sec / max(1, target_count * 2)))
+    tmp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    tmp_path = tmp_file.name
+    tmp_file.close()
+
+    try:
+        process = subprocess.run(
+            [
+                "ffmpeg", "-v", "info",
+                "-i", path,
+                "-map", "0:a:0",
+                "-af",
+                (
+                    f"silencedetect=noise=-35dB:duration=0.3,"
+                    f"astats=length={chunk_len:.3f}:metadata=1:reset=1,"
+                    f"ametadata=mode=print:file={tmp_path}"
+                ),
+                "-f", "null", "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        metadata_output = Path(tmp_path).read_text(errors="replace") if Path(tmp_path).exists() else ""
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     intervals: list[tuple[float, float]] = []
     silence_start: float | None = None
     for line in process.stderr.splitlines():
@@ -686,47 +1015,10 @@ def _detect_silence_intervals(path: str) -> list[tuple[float, float]]:
                 silence_start = None
     if silence_start is not None:
         intervals.append((silence_start, float("inf")))
-    return intervals
-
-
-def _extract_rms_by_time(
-    path: str,
-    duration_sec: float,
-    target_count: int,
-) -> list[tuple[float, float]]:
-    import tempfile
-
-    chunk_len = max(0.1, min(2.0, duration_sec / max(1, target_count * 2)))
-    tmp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-    tmp_path = tmp_file.name
-    tmp_file.close()
-
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-v", "warning",
-                "-i", path,
-                "-map", "0:a:0",
-                "-af", f"astats=length={chunk_len:.3f}:metadata=1:reset=1,ametadata=mode=print:file={tmp_path}",
-                "-f", "null", "-",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        output = Path(tmp_path).read_text(errors="replace") if Path(tmp_path).exists() else ""
-    finally:
-        try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-
-    if not output:
-        return []
 
     results: list[tuple[float, float]] = []
     current_time: float | None = None
-    for line in output.splitlines():
+    for line in metadata_output.splitlines():
         time_match = re.search(r"pts_time:([\d.eE+-]+)", line)
         if time_match:
             current_time = float(time_match.group(1))
@@ -744,7 +1036,7 @@ def _extract_rms_by_time(
                     current_time = None
                 except ValueError:
                     pass
-    return results
+    return intervals, results
 
 
 def _is_window_silent(

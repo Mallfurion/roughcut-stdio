@@ -15,7 +15,7 @@ The pipeline runs in four phases:
 
 Each phase narrows the candidate pool so expensive work only happens on stronger segments.
 
-Generated process summaries and benchmark artifacts also preserve a normalized runtime reliability block so repeated runs on the same dataset can explain capability changes alongside runtime deltas. They now also record semantic boundary request counts, AI cache warmth, and configured-versus-effective AI execution context so cold and warm runs are easier to compare honestly.
+Generated process summaries and benchmark artifacts also preserve a normalized runtime reliability block so repeated runs on the same dataset can explain capability changes alongside runtime deltas. They now also record semantic boundary request counts, deterministic preprocessing cache warmth, AI cache warmth, and configured-versus-effective AI execution context so cold and warm runs are easier to compare honestly.
 
 ## Evaluation Modes
 
@@ -328,6 +328,7 @@ The process step also writes:
 - `generated/process.log`
 - `generated/process-summary.txt`
 - `generated/process-output.txt`
+- `generated/analysis/prefilter-cache/`
 - `generated/benchmarks/history.jsonl`
 - `generated/benchmarks/<run-id>/benchmark.json`
 - `generated/benchmarks/<run-id>/process-output.txt`
@@ -335,6 +336,7 @@ The process step also writes:
 Those benchmark artifacts now keep enough runtime context to answer three common questions directly:
 
 - Was semantic boundary validation actually invoked, or just eligible?
+- Was the deterministic prefilter front half reused, rebuilt, or mixed across assets?
 - Was the run cold, warm, or mixed from the AI cache perspective?
 - Did the configured AI concurrency match the provider's effective execution path?
 

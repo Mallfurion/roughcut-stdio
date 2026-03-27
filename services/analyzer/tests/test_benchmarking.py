@@ -28,6 +28,8 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                         "timeline_assembly": 0.12,
                     },
                     "prefilter_sample_count": 16,
+                    "deterministic_preprocessing_cache_hit_asset_count": 1,
+                    "deterministic_preprocessing_cache_rebuilt_asset_count": 0,
                     "candidate_segment_count": 4,
                     "prefilter_shortlisted_count": 2,
                     "vlm_target_count": 1,
@@ -183,11 +185,16 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
             self.assertIn("AI execution: configured concurrency 4, effective concurrency 0, deterministic-fallback", "\n".join(summary_lines))
             self.assertIn("AI cache activity: warm-cache (0 live, 1 cached, 0 live requests)", "\n".join(summary_lines))
+            self.assertIn(
+                "Deterministic preprocessing cache: warm-preprocessing (1 reused, 0 rebuilt)",
+                "\n".join(summary_lines),
+            )
             self.assertIn("Runtime reliability:", "\n".join(summary_lines))
             self.assertIn("Overall mode: degraded", "\n".join(summary_lines))
             self.assertIn("Runtime degraded modes: transcript fallback on 1 asset; deterministic AI fallback on 1 segment", "\n".join(summary_lines))
             self.assertIn("Runtime intentional skips: AI analysis skipped 1 segment before live VLM", "\n".join(summary_lines))
             self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
+            self.assertIn("Deterministic preprocessing reuse: 1 reused, 0 rebuilt", "\n".join(summary_lines))
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
             self.assertIn("Speech structure: 2 structured beats, 1 question/answer, 1 monologue", "\n".join(summary_lines))
             self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
@@ -203,6 +210,10 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             ]
             self.assertEqual(history_entries[-1]["runtime_configuration"]["ai_effective_concurrency"], 0)
             self.assertEqual(history_entries[-1]["workload_counts"]["semantic_boundary_request_count"], 1)
+            self.assertEqual(
+                history_entries[-1]["workload_counts"]["deterministic_preprocessing_cache_hit_asset_count"],
+                1,
+            )
 
     def test_matching_benchmark_lookup_ignores_other_datasets(self) -> None:
         payload_one = {
@@ -441,6 +452,8 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             "workload_counts": {
                 "asset_count": 1,
                 "candidate_segment_count": 2,
+                "deterministic_preprocessing_cache_hit_asset_count": 1,
+                "deterministic_preprocessing_cache_rebuilt_asset_count": 0,
                 "semantic_boundary_request_count": 2,
                 "ai_live_segment_count": 2,
                 "ai_cached_segment_count": 0,
@@ -455,6 +468,8 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                 "project": {
                     "analysis_summary": {
                         "candidate_segment_count": 2,
+                        "deterministic_preprocessing_cache_hit_asset_count": 0,
+                        "deterministic_preprocessing_cache_rebuilt_asset_count": 1,
                         "semantic_boundary_request_count": 1,
                         "ai_live_segment_count": 0,
                         "ai_cached_segment_count": 2,
@@ -492,6 +507,10 @@ class ProcessBenchmarkingTests(unittest.TestCase):
         )
         self.assertIn("semantic boundary request volume changed (2 -> 1)", comparison.context_differences)
         self.assertIn("AI cache activity changed (cold-cache -> warm-cache)", comparison.context_differences)
+        self.assertIn(
+            "deterministic preprocessing cache activity changed (warm-preprocessing -> cold-preprocessing)",
+            comparison.context_differences,
+        )
 
 
 if __name__ == "__main__":

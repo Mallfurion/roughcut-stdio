@@ -49,6 +49,8 @@ WORKLOAD_COUNT_KEYS = (
     "semantic_boundary_floor_targeted_count",
     "semantic_boundary_applied_count",
     "semantic_boundary_noop_count",
+    "deterministic_preprocessing_cache_hit_asset_count",
+    "deterministic_preprocessing_cache_rebuilt_asset_count",
     "clip_scored_count",
     "clip_gated_count",
     "ai_live_segment_count",
@@ -92,6 +94,18 @@ def classify_ai_cache_activity(*, workload_counts: dict[str, Any]) -> str:
         return "warm-cache"
     if live_segments > 0:
         return "cold-cache"
+    return "inactive"
+
+
+def classify_preprocessing_cache_activity(*, workload_counts: dict[str, Any]) -> str:
+    hit_assets = int(workload_counts.get("deterministic_preprocessing_cache_hit_asset_count", 0) or 0)
+    rebuilt_assets = int(workload_counts.get("deterministic_preprocessing_cache_rebuilt_asset_count", 0) or 0)
+    if hit_assets > 0 and rebuilt_assets > 0:
+        return "mixed-preprocessing"
+    if hit_assets > 0:
+        return "warm-preprocessing"
+    if rebuilt_assets > 0:
+        return "cold-preprocessing"
     return "inactive"
 
 
@@ -155,6 +169,9 @@ def build_runtime_stability_context(
         "ai_execution_context": str(runtime_configuration.get("ai_execution_context", "")),
         "ai_effective_concurrency": int(runtime_configuration.get("ai_effective_concurrency", 0) or 0),
         "ai_cache_activity": classify_ai_cache_activity(workload_counts=analysis_summary),
+        "deterministic_preprocessing_cache_activity": classify_preprocessing_cache_activity(
+            workload_counts=analysis_summary
+        ),
     }
 
 
@@ -444,6 +461,13 @@ def compare_benchmarks(
         differences.append(
             f"AI cache activity changed ({baseline_ai_cache_activity} -> {current_ai_cache_activity})"
         )
+    current_preprocessing_cache_activity = classify_preprocessing_cache_activity(workload_counts=current_workload)
+    baseline_preprocessing_cache_activity = classify_preprocessing_cache_activity(workload_counts=baseline_workload)
+    if current_preprocessing_cache_activity != baseline_preprocessing_cache_activity:
+        differences.append(
+            "deterministic preprocessing cache activity changed "
+            f"({baseline_preprocessing_cache_activity} -> {current_preprocessing_cache_activity})"
+        )
     current_runtime_stability = dict(current.runtime_stability or {})
     if current_runtime_stability.get("overall_mode") != baseline_runtime_stability.get("overall_mode"):
         differences.append(
@@ -574,6 +598,7 @@ def build_process_summary_lines(
     ai_execution_context = str(benchmark.runtime_configuration.get("ai_execution_context", "")).strip()
     ai_provider = str(benchmark.runtime_configuration.get("ai_provider_effective", "")).strip()
     ai_cache_activity = classify_ai_cache_activity(workload_counts=benchmark.workload_counts)
+    preprocessing_cache_activity = classify_preprocessing_cache_activity(workload_counts=benchmark.workload_counts)
     if ai_provider:
         lines.append(f"AI provider: {ai_provider}")
     if configured_ai_concurrency is not None and effective_ai_concurrency is not None:
@@ -589,6 +614,12 @@ def build_process_summary_lines(
         f"({benchmark.workload_counts.get('ai_live_segment_count', 0)} live, "
         f"{benchmark.workload_counts.get('ai_cached_segment_count', 0)} cached, "
         f"{benchmark.workload_counts.get('ai_live_request_count', 0)} live requests)"
+    )
+    lines.append(
+        "Deterministic preprocessing cache: "
+        f"{preprocessing_cache_activity} "
+        f"({benchmark.workload_counts.get('deterministic_preprocessing_cache_hit_asset_count', 0)} reused, "
+        f"{benchmark.workload_counts.get('deterministic_preprocessing_cache_rebuilt_asset_count', 0)} rebuilt)"
     )
     if benchmark.phase_timings_sec:
         for phase_name, label in PHASE_LABELS.items():
@@ -641,6 +672,11 @@ def build_process_summary_lines(
             [
                 "",
                 f"Prefilter sampled frames: {analysis_summary.get('prefilter_sample_count', 0)}",
+                (
+                    "Deterministic preprocessing reuse: "
+                    f"{analysis_summary.get('deterministic_preprocessing_cache_hit_asset_count', 0)} reused, "
+                    f"{analysis_summary.get('deterministic_preprocessing_cache_rebuilt_asset_count', 0)} rebuilt"
+                ),
                 f"Candidate segments: {analysis_summary.get('candidate_segment_count', 0)}",
                 f"Prefilter shortlisted: {analysis_summary.get('prefilter_shortlisted_count', 0)}",
             ]

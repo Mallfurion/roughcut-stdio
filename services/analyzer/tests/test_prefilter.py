@@ -7,8 +7,11 @@ import unittest.mock
 from services.analyzer.app.domain import Asset
 from services.analyzer.app.prefilter import (
     AudioSignal,
+    AudioScreeningSummary,
     aggregate_segment_prefilter,
+    build_audio_screening_summary,
     build_prefilter_segments,
+    extract_gray_frames_batched,
     sample_asset_signals,
     sample_audio_signals,
     sample_timestamps,
@@ -85,6 +88,115 @@ class PrefilterTests(unittest.TestCase):
         self.assertGreater(snapshot["sampled_frame_count"], 0)
         self.assertIn("prefilter_score", snapshot["metrics_snapshot"])
 
+    def test_sample_asset_signals_uses_batched_extraction_and_preserves_order(self) -> None:
+        asset = Asset(
+            id="asset-batch",
+            name="Batch Clip",
+            source_path="/tmp/batch.mov",
+            proxy_path="/tmp/batch.mov",
+            duration_sec=24.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C020",
+        )
+        timestamps = [2.0, 6.0]
+        frame_a = (2, 2, bytes([0, 64, 128, 255]))
+        frame_b = (2, 2, bytes([255, 128, 64, 0]))
+
+        with (
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frames_batched",
+                return_value=[frame_a, frame_b],
+            ) as batched_mock,
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frame",
+                side_effect=AssertionError("single-frame extraction should not run"),
+            ),
+        ):
+            signals = sample_asset_signals(asset, timestamps=timestamps, frame_width=32)
+
+        self.assertEqual(batched_mock.call_count, 1)
+        self.assertEqual([signal.timestamp_sec for signal in signals], timestamps)
+        self.assertTrue(all(signal.source == "ffmpeg" for signal in signals))
+
+    def test_sample_asset_signals_falls_back_to_single_extraction_when_batch_fails(self) -> None:
+        asset = Asset(
+            id="asset-batch-fallback",
+            name="Batch Fallback Clip",
+            source_path="/tmp/batch-fallback.mov",
+            proxy_path="/tmp/batch-fallback.mov",
+            duration_sec=24.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C021",
+        )
+        timestamps = [2.0, 6.0]
+        frame_a = (2, 2, bytes([0, 64, 128, 255]))
+        frame_b = (2, 2, bytes([255, 128, 64, 0]))
+
+        with (
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frames_batched",
+                return_value=None,
+            ),
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frame",
+                side_effect=[frame_a, frame_b],
+            ) as single_mock,
+        ):
+            signals = sample_asset_signals(asset, timestamps=timestamps, frame_width=32)
+
+        self.assertEqual(single_mock.call_count, len(timestamps))
+        self.assertEqual([signal.timestamp_sec for signal in signals], timestamps)
+        self.assertTrue(all(signal.source == "ffmpeg" for signal in signals))
+
+    def test_batched_frame_sampling_matches_single_frame_metrics(self) -> None:
+        asset = Asset(
+            id="asset-batch-stability",
+            name="Batch Stability Clip",
+            source_path="/tmp/batch-stability.mov",
+            proxy_path="/tmp/batch-stability.mov",
+            duration_sec=24.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C022",
+        )
+        timestamps = [2.0, 6.0]
+        frame_a = (2, 2, bytes([0, 64, 128, 255]))
+        frame_b = (2, 2, bytes([255, 128, 64, 0]))
+
+        with (
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frames_batched",
+                return_value=[frame_a, frame_b],
+            ),
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frame",
+                side_effect=[frame_a, frame_b],
+            ),
+        ):
+            batched_signals = sample_asset_signals(asset, timestamps=timestamps, frame_width=32)
+            with unittest.mock.patch(
+                "services.analyzer.app.prefilter.extract_gray_frames_batched",
+                return_value=None,
+            ):
+                single_signals = sample_asset_signals(asset, timestamps=timestamps, frame_width=32)
+
+        self.assertEqual(
+            [(signal.timestamp_sec, signal.score, signal.motion_energy) for signal in batched_signals],
+            [(signal.timestamp_sec, signal.score, signal.motion_energy) for signal in single_signals],
+        )
+
+    def test_extract_gray_frames_batched_returns_none_without_runtime(self) -> None:
+        with unittest.mock.patch("services.analyzer.app.prefilter.shutil.which", return_value=None):
+            self.assertIsNone(extract_gray_frames_batched("/tmp/missing.mov", [1.0, 2.0], width=64))
+
 
 class AudioSignalTests(unittest.TestCase):
     def _make_asset(self, has_speech: bool = False) -> "Asset":
@@ -111,6 +223,52 @@ class AudioSignalTests(unittest.TestCase):
         self.assertTrue(all(sig.source == "fallback" for sig in signals))
         self.assertTrue(all(sig.rms_energy == 0.0 for sig in signals))
         self.assertTrue(all(sig.is_silent for sig in signals))
+
+    def test_build_audio_screening_summary_generates_shared_summary(self) -> None:
+        asset = self._make_asset(has_speech=True)
+        timestamps = [2.0, 6.0, 10.0]
+        silence_intervals = [(0.0, 1.0), (8.0, 9.0)]
+        rms_by_time = [(1.8, 0.01), (2.1, 0.02), (6.0, 0.03), (10.0, 0.0)]
+
+        with (
+            unittest.mock.patch("services.analyzer.app.prefilter.shutil.which", return_value="/usr/bin/ffmpeg"),
+            unittest.mock.patch("services.analyzer.app.prefilter.Path.exists", return_value=True),
+            unittest.mock.patch(
+                "services.analyzer.app.prefilter._extract_audio_screening_data",
+                return_value=(silence_intervals, rms_by_time),
+            ),
+        ):
+            summary = build_audio_screening_summary(asset, timestamps)
+
+        self.assertIsInstance(summary, AudioScreeningSummary)
+        self.assertEqual(summary.source, "ffmpeg")
+        self.assertEqual(summary.silence_intervals, silence_intervals)
+        self.assertEqual(summary.rms_by_time, rms_by_time)
+        self.assertEqual(len(summary.sampled_signals), len(timestamps))
+        self.assertTrue(any(not signal.is_silent for signal in summary.sampled_signals))
+
+    def test_sample_audio_signals_uses_shared_summary(self) -> None:
+        asset = self._make_asset(has_speech=True)
+        timestamps = [1.0, 3.0]
+        summary = AudioScreeningSummary(
+            timestamps=timestamps,
+            silence_intervals=[],
+            rms_by_time=[(1.0, 0.02), (3.0, 0.03)],
+            sampled_signals=[
+                AudioSignal(timestamp_sec=1.0, rms_energy=0.02, peak_loudness=0.02, is_silent=False, source="ffmpeg"),
+                AudioSignal(timestamp_sec=3.0, rms_energy=0.03, peak_loudness=0.03, is_silent=False, source="ffmpeg"),
+            ],
+            source="ffmpeg",
+        )
+
+        with unittest.mock.patch(
+            "services.analyzer.app.prefilter.build_audio_screening_summary",
+            return_value=summary,
+        ) as summary_mock:
+            signals = sample_audio_signals(asset, timestamps)
+
+        self.assertEqual(summary_mock.call_count, 1)
+        self.assertEqual(signals, summary.sampled_signals)
 
     def test_sample_audio_signals_returns_fallback_for_missing_file(self) -> None:
         asset = self._make_asset(has_speech=True)

@@ -37,7 +37,7 @@ from services.analyzer.app.analysis import (
     transcript_runtime_status,
 )
 from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
-from services.analyzer.app.prefilter import AudioSignal, FrameSignal, SeedRegion
+from services.analyzer.app.prefilter import AudioSignal, FrameSignal, SeedRegion, deterministic_preprocessing_cache_path
 from services.analyzer.app.service import CLEAR_BEST_TAKE_SENTINEL, load_project, load_project_with_override_file
 
 
@@ -150,6 +150,208 @@ class ExpensiveAnalyzerStub:
 
 
 class AnalysisPipelineTests(unittest.TestCase):
+    def test_analyze_assets_writes_deterministic_preprocessing_artifacts_on_cache_miss(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            media_path = Path(temp_dir) / "clip.mov"
+            media_path.write_bytes(b"cache-miss")
+            artifacts_root = Path(temp_dir) / "analysis"
+            asset = Asset(
+                id="asset-cache-miss",
+                name="Cache Miss",
+                source_path=str(media_path),
+                proxy_path=str(media_path),
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C200",
+            )
+            frame_signals = [
+                FrameSignal(2.0, 0.6, 0.5, 0.4, 0.2, 0.3, 0.6, 0.55, "deterministic"),
+                FrameSignal(8.0, 0.7, 0.6, 0.45, 0.22, 0.35, 0.62, 0.6, "deterministic"),
+            ]
+            audio_signals = [
+                AudioSignal(2.0, 0.0, 0.0, True, "fallback"),
+                AudioSignal(8.0, 0.0, 0.0, True, "fallback"),
+            ]
+            detector = unittest.mock.Mock()
+            detector.detect.return_value = [(0.0, 6.0), (6.0, 12.0)]
+
+            with (
+                unittest.mock.patch("services.analyzer.app.analysis.sample_asset_signals", return_value=frame_signals),
+                unittest.mock.patch("services.analyzer.app.analysis.sample_audio_signals", return_value=audio_signals),
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=detector,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    artifacts_root=artifacts_root,
+                )
+
+            cache_path = deterministic_preprocessing_cache_path(
+                artifacts_root=artifacts_root,
+                asset=asset,
+            )
+            self.assertTrue(cache_path.is_file())
+            self.assertEqual(detector.detect.call_count, 1)
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_hit_asset_count"), 0)
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_rebuilt_asset_count"), 1)
+
+    def test_analyze_assets_reuses_deterministic_preprocessing_artifacts_on_cache_hit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            media_path = Path(temp_dir) / "clip.mov"
+            media_path.write_bytes(b"cache-hit")
+            artifacts_root = Path(temp_dir) / "analysis"
+            asset = Asset(
+                id="asset-cache-hit",
+                name="Cache Hit",
+                source_path=str(media_path),
+                proxy_path=str(media_path),
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C201",
+            )
+            frame_signals = [
+                FrameSignal(2.0, 0.6, 0.5, 0.4, 0.2, 0.3, 0.6, 0.55, "deterministic"),
+                FrameSignal(8.0, 0.7, 0.6, 0.45, 0.22, 0.35, 0.62, 0.6, "deterministic"),
+            ]
+            audio_signals = [
+                AudioSignal(2.0, 0.0, 0.0, True, "fallback"),
+                AudioSignal(8.0, 0.0, 0.0, True, "fallback"),
+            ]
+            detector = unittest.mock.Mock()
+            detector.detect.return_value = [(0.0, 6.0), (6.0, 12.0)]
+
+            with (
+                unittest.mock.patch("services.analyzer.app.analysis.sample_asset_signals", return_value=frame_signals),
+                unittest.mock.patch("services.analyzer.app.analysis.sample_audio_signals", return_value=audio_signals),
+            ):
+                analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=detector,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    artifacts_root=artifacts_root,
+                )
+
+            detector = unittest.mock.Mock()
+            detector.detect.side_effect = AssertionError("scene detector should not run on cache hit")
+            with (
+                unittest.mock.patch(
+                    "services.analyzer.app.analysis.sample_asset_signals",
+                    side_effect=AssertionError("frame sampling should not run on cache hit"),
+                ),
+                unittest.mock.patch(
+                    "services.analyzer.app.analysis.sample_audio_signals",
+                    side_effect=AssertionError("audio sampling should not run on cache hit"),
+                ),
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=detector,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    artifacts_root=artifacts_root,
+                )
+
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_hit_asset_count"), 1)
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_rebuilt_asset_count"), 0)
+
+    def test_analyze_assets_rebuilds_deterministic_preprocessing_artifacts_when_stale(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            media_path = Path(temp_dir) / "clip.mov"
+            media_path.write_bytes(b"stale-one")
+            artifacts_root = Path(temp_dir) / "analysis"
+            asset = Asset(
+                id="asset-cache-stale",
+                name="Cache Stale",
+                source_path=str(media_path),
+                proxy_path=str(media_path),
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C202",
+            )
+            initial_frame_signals = [
+                FrameSignal(2.0, 0.6, 0.5, 0.4, 0.2, 0.3, 0.6, 0.55, "deterministic"),
+            ]
+            rebuilt_frame_signals = [
+                FrameSignal(3.0, 0.8, 0.7, 0.5, 0.3, 0.4, 0.65, 0.7, "deterministic"),
+            ]
+            audio_signals = [AudioSignal(2.0, 0.0, 0.0, True, "fallback")]
+            detector = unittest.mock.Mock()
+            detector.detect.return_value = [(0.0, 6.0), (6.0, 12.0)]
+
+            with (
+                unittest.mock.patch("services.analyzer.app.analysis.sample_asset_signals", return_value=initial_frame_signals),
+                unittest.mock.patch("services.analyzer.app.analysis.sample_audio_signals", return_value=audio_signals),
+            ):
+                analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=detector,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    artifacts_root=artifacts_root,
+                )
+
+            media_path.write_bytes(b"stale-two-with-different-size")
+            detector = unittest.mock.Mock()
+            detector.detect.return_value = [(0.0, 4.0), (4.0, 12.0)]
+            with (
+                unittest.mock.patch("services.analyzer.app.analysis.sample_asset_signals", return_value=rebuilt_frame_signals) as sample_frames_mock,
+                unittest.mock.patch("services.analyzer.app.analysis.sample_audio_signals", return_value=audio_signals) as sample_audio_mock,
+            ):
+                project = analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=detector,
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                    artifacts_root=artifacts_root,
+                )
+
+            self.assertEqual(detector.detect.call_count, 1)
+            self.assertEqual(sample_frames_mock.call_count, 1)
+            self.assertEqual(sample_audio_mock.call_count, 1)
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_hit_asset_count"), 0)
+            self.assertEqual(project.project.analysis_summary.get("deterministic_preprocessing_cache_rebuilt_asset_count"), 1)
+
     def test_fallback_segments_cover_longer_clip(self) -> None:
         segments = fallback_segments(22.0)
         self.assertGreaterEqual(len(segments), 3)

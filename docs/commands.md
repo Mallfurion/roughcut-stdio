@@ -78,9 +78,10 @@ Generates:
 - `generated/process.log` with runtime/config diagnostics for the latest run
 - `generated/process-summary.txt` with the latest operational and benchmark summary
 - `generated/process-output.txt` with the exact terminal-facing output from the latest run
+- `generated/analysis/prefilter-cache/` with reusable deterministic preprocessing artifacts when analysis artifacts are enabled
 - `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
-The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset. They also record semantic boundary request volume, AI cache activity, and configured-versus-effective AI execution context, so warm-cache speedups and MLX-local serialization are visible in the same benchmark history.
+The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset. They also record semantic boundary request volume, deterministic preprocessing reuse, AI cache activity, and configured-versus-effective AI execution context, so front-half warm runs and MLX-local serialization are visible in the same benchmark history.
 
 **Evaluate segmentation quality**:
 

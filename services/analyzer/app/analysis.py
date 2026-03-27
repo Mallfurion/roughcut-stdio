@@ -6,6 +6,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import shutil
@@ -58,15 +59,20 @@ from .domain import (
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .prefilter import (
+    DeterministicPreprocessingArtifact,
     AudioSignal,
     FrameSignal,
     SeedRegion,
     aggregate_segment_prefilter,
     build_prefilter_seed_regions,
     build_prefilter_segments,
+    deterministic_preprocessing_cache_path,
+    deterministic_preprocessing_compatibility_key,
+    load_deterministic_preprocessing_artifact,
     sample_asset_signals,
     sample_audio_signals,
     sample_timestamps,
+    write_deterministic_preprocessing_artifact,
 )
 from .scoring import infer_analysis_mode, limiting_factor_labels, score_segment, top_score_driver_labels
 
@@ -2377,6 +2383,8 @@ def analyze_assets(
     total_semantic_boundary_floor_targeted = 0
     total_semantic_boundary_applied = 0
     total_semantic_boundary_noop = 0
+    total_preprocessing_cache_hits = 0
+    total_preprocessing_cache_rebuilds = 0
     deduplication_enabled = is_deduplication_enabled()
     dedup_threshold = get_dedup_threshold()
     total_dedup_group_count = 0  # Accumulate dedup group count across all dedup passes
@@ -2400,21 +2408,62 @@ def analyze_assets(
         if status_callback is not None:
             status_callback(f"[{len(analysis_contexts) + 1}/{total_assets}] Analyzing: {asset.name}")
 
-        base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
-        if not base_ranges:
-            base_ranges = fallback_segments(asset.duration_sec)
         timestamps = sample_timestamps(asset.duration_sec)
-        prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+        preprocessing_cache_hit = False
+        cache_path: Path | None = None
+        compatibility_key = ""
+        if artifacts_root is not None:
+            cache_path = deterministic_preprocessing_cache_path(
+                artifacts_root=artifacts_root,
+                asset=asset,
+            )
+            compatibility_key = deterministic_preprocessing_compatibility_key(
+                asset=asset,
+                timestamps=timestamps,
+                frame_width=64,
+                audio_enabled=os.environ.get("TIMELINE_AI_AUDIO_ENABLED", "true").lower() != "false",
+            )
+            cached_artifact = load_deterministic_preprocessing_artifact(
+                cache_path=cache_path,
+                compatibility_key=compatibility_key,
+            )
+        else:
+            cached_artifact = None
 
-        # Audio signal sampling
-        audio_signals = sample_audio_signals(asset, timestamps)
+        if cached_artifact is not None:
+            preprocessing_cache_hit = True
+            base_ranges = cached_artifact.base_ranges
+            prefilter_signals = cached_artifact.frame_signals
+            audio_signals = cached_artifact.audio_signals
+            total_preprocessing_cache_hits += 1
+        else:
+            base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
+            if not base_ranges:
+                base_ranges = fallback_segments(asset.duration_sec)
+            prefilter_signals = sample_asset_signals(asset, timestamps=timestamps)
+            audio_signals = sample_audio_signals(asset, timestamps)
+            if cache_path is not None:
+                write_deterministic_preprocessing_artifact(
+                    cache_path=cache_path,
+                    artifact=DeterministicPreprocessingArtifact(
+                        compatibility_key=compatibility_key,
+                        base_ranges=base_ranges,
+                        frame_signals=prefilter_signals,
+                        audio_signals=audio_signals,
+                    ),
+                )
+                total_preprocessing_cache_rebuilds += 1
+
         total_prefilter_samples += len(prefilter_signals)
         has_audio = any(sig.source == "ffmpeg" for sig in audio_signals)
         if has_audio:
             total_audio_signal_assets += 1
         if status_callback is not None:
             audio_status = f"audio detected" if has_audio else "silent/no audio"
-            status_callback(f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})")
+            status_callback(
+                f"  ✓ Sampled {len(prefilter_signals)} frames ({audio_status})"
+                + (" from preprocessing cache" if preprocessing_cache_hit else "")
+            )
         if transcript_provider_injected:
             transcript_lookup_enabled = asset.has_speech
         else:
@@ -3030,6 +3079,8 @@ def analyze_assets(
         "semantic_boundary_applied_count": total_semantic_boundary_applied,
         "semantic_boundary_noop_count": total_semantic_boundary_noop,
         "semantic_boundary_dormant": total_semantic_boundary_validated == 0,
+        "deterministic_preprocessing_cache_hit_asset_count": total_preprocessing_cache_hits,
+        "deterministic_preprocessing_cache_rebuilt_asset_count": total_preprocessing_cache_rebuilds,
         "vlm_budget_cap_pct": ai_config.vlm_budget_pct,
         "vlm_budget_was_binding": total_vlm_targets < (total_prefilter_shortlisted * ai_config.vlm_budget_pct / 100.0) if ai_config.vlm_budget_pct < 100 else False,
         "vlm_target_pct_of_candidates": (total_vlm_targets / len(candidate_segments) * 100) if candidate_segments else 0.0,
