@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { Asset, CandidateSegment } from "../../app/types.ts";
+import type { Asset, CandidateSegment, SegmentView } from "../../app/types.ts";
 import { renderSegmentCard } from "./segment-card.ts";
 
-test("renderSegmentCard places sequence and provenance in the detail grid and omits the analysis path line", () => {
-  const asset: Asset = {
+function buildAsset(): Asset {
+  return {
     id: "asset-1",
     name: "Clip A",
     source_path: "/tmp/a.mov",
@@ -13,8 +13,10 @@ test("renderSegmentCard places sequence and provenance in the detail grid and om
     has_speech: true,
     interchange_reel_name: "A001",
   };
+}
 
-  const segment: CandidateSegment = {
+function buildSegment(): CandidateSegment {
+  return {
     id: "segment-1",
     asset_id: "asset-1",
     start_sec: 0,
@@ -72,83 +74,81 @@ test("renderSegmentCard places sequence and provenance in the detail grid and om
       semantic_validation_summary: "Deterministic boundaries were not ambiguous enough for semantic validation.",
     },
   };
+}
 
-  const html = renderSegmentCard(
-    {
-      asset,
-      segment,
-      recommendation: {
-        id: "take-1",
-        candidate_segment_id: "segment-1",
-        title: "Take 1",
-        is_best_take: true,
-        selection_reason: "Fits the story beat.",
-        score_technical: 0.7,
-        score_semantic: 0.8,
-        score_story: 0.6,
-        score_total: 0.72,
-        outcome: "best",
-        within_asset_rank: 1,
-      },
-      timelineItem: {
-        id: "timeline-item-1",
-        take_recommendation_id: "take-1",
-        trim_in_sec: 0,
-        trim_out_sec: 6,
-        label: "Development beat",
-        notes: "",
-        source_asset_path: "/tmp/a.mov",
-        source_reel: "A001",
-        sequence_group: "development",
-        sequence_role: "visual bridge",
-        sequence_score: 0.6,
-        sequence_rationale: [
-          "Alternates from speech to visual to keep sequence contrast.",
-          "Adds role variety instead of repeating the same beat type.",
-        ],
-      },
-      orderingScore: 0.72,
-    },
+function buildSegmentView(): SegmentView {
+  const asset = buildAsset();
+  const segment = buildSegment();
+
+  return {
     asset,
-  );
+    segment,
+    recommendation: {
+      id: "take-1",
+      candidate_segment_id: "segment-1",
+      title: "Take 1",
+      is_best_take: true,
+      selection_reason: "Fits the story beat.",
+      score_technical: 0.7,
+      score_semantic: 0.8,
+      score_story: 0.6,
+      score_total: 0.72,
+      outcome: "best",
+      within_asset_rank: 1,
+    },
+    timelineItem: {
+      id: "timeline-item-1",
+      take_recommendation_id: "take-1",
+      trim_in_sec: 0,
+      trim_out_sec: 6,
+      label: "Development beat",
+      notes: "",
+      source_asset_path: "/tmp/a.mov",
+      source_reel: "A001",
+      sequence_group: "development",
+      sequence_role: "visual bridge",
+      sequence_score: 0.6,
+      sequence_rationale: [
+        "Alternates from speech to visual to keep sequence contrast.",
+        "Adds role variety instead of repeating the same beat type.",
+      ],
+    },
+    orderingScore: 0.72,
+  };
+}
+
+test("renderSegmentCard renders sequence and provenance collapsed by default", () => {
+  const asset = buildAsset();
+  const html = renderSegmentCard(buildSegmentView(), asset, []);
 
   assert.match(html, /section-detail-grid/);
   assert.match(html, /Sequence/);
   assert.match(html, /Provenance/);
+  assert.match(html, /data-action="toggle-detail-panel"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /section-provenance--collapsed/);
+  assert.doesNotMatch(html, /Group development/);
+  assert.doesNotMatch(html, /Built from 1 seed region \(visual peak\)\./);
+  assert.doesNotMatch(html, /shortlisted -&gt; CLIP 32 -&gt; 4 keyframes -&gt; VLM mlx-vlm-local/);
+});
+
+test("renderSegmentCard expands sequence and provenance when requested and omits the analysis path line", () => {
+  const asset = buildAsset();
+  const html = renderSegmentCard(buildSegmentView(), asset, ["segment-1:sequence", "segment-1:provenance"]);
+
+  assert.match(html, /section-detail-grid/);
+  assert.match(html, /Sequence/);
+  assert.match(html, /Provenance/);
+  assert.match(html, /aria-expanded="true"/);
   assert.doesNotMatch(html, /section-analysis-path/);
+  assert.match(html, /Group development/);
+  assert.match(html, /Built from 1 seed region \(visual peak\)\./);
   assert.doesNotMatch(html, /shortlisted -&gt; CLIP 32 -&gt; 4 keyframes -&gt; VLM mlx-vlm-local/);
 });
 
 test("renderSegmentCard exposes promote and clear override controls with override provenance", () => {
-  const asset: Asset = {
-    id: "asset-1",
-    name: "Clip A",
-    source_path: "/tmp/a.mov",
-    has_proxy: false,
-    has_speech: true,
-    interchange_reel_name: "A001",
-  };
-
-  const segment: CandidateSegment = {
-    id: "segment-1",
-    asset_id: "asset-1",
-    start_sec: 0,
-    end_sec: 6,
-    analysis_mode: "visual",
-    description: "Scene snapped",
-    transcript_excerpt: "",
-    quality_metrics: {
-      sharpness: 0.8,
-      stability: 0.7,
-      visual_novelty: 0.6,
-      subject_clarity: 0.9,
-      motion_energy: 0.5,
-      duration_fit: 0.4,
-      speech_presence: 0.3,
-      hook_strength: 0.6,
-      story_alignment: 0.7,
-    },
-  };
+  const asset = buildAsset();
+  const segment = buildSegment();
 
   const backupHtml = renderSegmentCard(
     {
@@ -168,6 +168,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
       orderingScore: 0.61,
     },
     asset,
+    [],
     { allowOverrides: true, reviewBusy: false },
   );
 
@@ -192,6 +193,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
       orderingScore: 0.72,
     },
     asset,
+    [],
     { allowOverrides: true, reviewBusy: false },
   );
 
@@ -216,6 +218,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
       orderingScore: 0.61,
     },
     asset,
+    [],
     { allowOverrides: true, reviewBusy: false },
   );
 
@@ -241,6 +244,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
       orderingScore: 0.72,
     },
     asset,
+    [],
     { allowOverrides: true, reviewBusy: false },
   );
 

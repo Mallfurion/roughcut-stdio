@@ -69,6 +69,7 @@ export function createInitialAppState(): AppState {
     process: createInitialProcessState(),
     processLogsExpanded: false,
     expandedClipIds: [],
+    expandedDetailPanelIds: [],
     allClipsExpanded: false,
     project: null,
     reviewBusy: false,

@@ -110,6 +110,7 @@ function buildAppState(): AppState {
     },
     processLogsExpanded: false,
     expandedClipIds: [],
+    expandedDetailPanelIds: [],
     allClipsExpanded: false,
     project: null,
     reviewBusy: false,
@@ -214,8 +215,17 @@ test("renderResultsStep keeps only the compact top-level metrics in the summary 
 
   assert.match(html, /Preview Timeline/);
   assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /class="view-head results-head"/);
   assert.match(html, /class="action-row results-actions"/);
+  assert.match(html, /class="review-summary-metrics results-head-metrics"/);
+  assert.match(
+    html,
+    /class="action-row results-actions">[\s\S]*Preview Timeline[\s\S]*class="results-order-row"[\s\S]*<label class="field field-compact results-order-field">[\s\S]*Order by clip/,
+  );
+  assert.match(html, /class="icon-button results-expand-button"/);
   assert.doesNotMatch(html, /<section class="timeline-preview" id="timeline-preview-strip">/);
+  assert.doesNotMatch(html, /Review the selected shots and export the generated timeline\./);
+  assert.doesNotMatch(html, /<span>Order<\/span>/);
   assert.match(html, /Sections<\/span><strong>3 \(3 VLM\)<\/strong>/);
   assert.doesNotMatch(html, /VLM analyzed/);
   assert.doesNotMatch(html, /Runtime/);
@@ -234,13 +244,16 @@ test("renderResultsStep shows timeline preview frames in timeline order when ena
   appState.project = buildProject();
 
   const html = renderResultsStep(appState);
-  const previewIndex = html.indexOf("timeline-preview-strip");
-  const metricsIndex = html.indexOf("Project</span><strong>Demo</strong>");
+  const previewIndex = html.indexOf('<section class="timeline-preview" id="timeline-preview-strip">');
+  const statusIndex = html.indexOf("Export the current generated timeline to an FCPXML file for DaVinci Resolve.");
+  const clipGridIndex = html.indexOf("clip-grid");
   const firstFrameIndex = html.indexOf("segment-1.jpg");
   const secondFrameIndex = html.indexOf("segment-2.jpg");
 
   assert.ok(previewIndex >= 0);
-  assert.ok(metricsIndex > previewIndex);
+  assert.ok(statusIndex >= 0);
+  assert.ok(previewIndex > statusIndex);
+  assert.ok(clipGridIndex > previewIndex);
   assert.ok(firstFrameIndex >= 0);
   assert.ok(secondFrameIndex > firstFrameIndex);
   assert.match(html, /Timeline Preview/);
@@ -282,11 +295,14 @@ test("renderResultsStep switches to a flat score-ranked view when requested", ()
   const segmentOneIndex = html.indexOf("Segment 1");
 
   assert.match(html, /<select data-action="set-results-order"/);
-  assert.match(html, /<option value="score" selected>By score<\/option>/);
+  assert.match(html, /<option value="score" selected>Order by score<\/option>/);
   assert.match(html, /ranked-segment-list/);
   assert.match(html, /Overall 80/);
   assert.match(html, /Clip A · A001/);
-  assert.doesNotMatch(html, /data-action="toggle-all-clips"/);
+  assert.match(
+    html,
+    /class="results-order-row"[\s\S]*data-action="toggle-all-clips"[\s\S]*class="icon-button results-expand-button"[\s\S]*disabled/,
+  );
   assert.ok(rankOneIndex >= 0);
   assert.ok(segmentTwoIndex > rankOneIndex);
   assert.ok(segmentOneIndex > segmentTwoIndex);

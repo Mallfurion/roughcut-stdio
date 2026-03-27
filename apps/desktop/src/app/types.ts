@@ -260,6 +260,7 @@ export type AppState = {
   process: ProcessState;
   processLogsExpanded: boolean;
   expandedClipIds: string[];
+  expandedDetailPanelIds: string[];
   allClipsExpanded: boolean;
   project: LoadedProject | null;
   reviewBusy: boolean;

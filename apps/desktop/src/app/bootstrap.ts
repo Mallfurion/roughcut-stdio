@@ -195,6 +195,11 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
           toggleClip(element.dataset.clipId);
         }
         return;
+      case "toggle-detail-panel":
+        if (element.dataset.panelId) {
+          toggleDetailPanel(element.dataset.panelId);
+        }
+        return;
       case "set-best-take":
         if (element.dataset.assetId && element.dataset.segmentId) {
           await handleSetBestTake(element.dataset.assetId, element.dataset.segmentId);
@@ -320,6 +325,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     await refreshProject();
     appState.currentStep = hasGeneratedResults(appState) ? "results" : "process";
     appState.timelinePreviewOpen = false;
+    appState.expandedDetailPanelIds = [];
     ensureFirstExpandedClip();
     syncAllClipsExpanded();
     render();
@@ -362,6 +368,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     appState.mediaSummaryError = "";
     appState.process = createInitialProcessState();
     appState.expandedClipIds = [];
+    appState.expandedDetailPanelIds = [];
     appState.allClipsExpanded = false;
     appState.project = null;
     appState.reviewBusy = false;
@@ -568,6 +575,15 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
       appState.expandedClipIds = [...appState.expandedClipIds, clipId];
     }
     syncAllClipsExpanded();
+    render();
+  }
+
+  function toggleDetailPanel(panelId: string) {
+    if (appState.expandedDetailPanelIds.includes(panelId)) {
+      appState.expandedDetailPanelIds = appState.expandedDetailPanelIds.filter((value) => value !== panelId);
+    } else {
+      appState.expandedDetailPanelIds = [...appState.expandedDetailPanelIds, panelId];
+    }
     render();
   }
 

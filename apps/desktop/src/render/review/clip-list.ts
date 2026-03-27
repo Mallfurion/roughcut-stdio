@@ -2,7 +2,13 @@ import type { ClipView } from "../../app/types.ts";
 import { escapeHtml } from "../../lib/html.ts";
 import { renderSegmentCard } from "./segment-card.ts";
 
-export function renderClipCard(view: ClipView, expandedClipIds: string[], allowOverrides: boolean, reviewBusy: boolean) {
+export function renderClipCard(
+  view: ClipView,
+  expandedClipIds: string[],
+  expandedDetailPanelIds: string[],
+  allowOverrides: boolean,
+  reviewBusy: boolean,
+) {
   const expanded = expandedClipIds.includes(view.asset.id);
   const dedupCount = view.segments.filter(({ segment }) => segment.prefilter?.deduplicated).length;
   const activeCount = view.segments.length - dedupCount;
@@ -11,8 +17,9 @@ export function renderClipCard(view: ClipView, expandedClipIds: string[], allowO
     <article class="clip-card">
       <button class="clip-toggle" data-action="toggle-clip" data-clip-id="${escapeHtml(view.asset.id)}" aria-expanded="${expanded ? "true" : "false"}">
         <div class="clip-head">
-          <div>
+          <div class="clip-title-row">
             <h3>${escapeHtml(view.asset.name)}</h3>
+            <span class="clip-title-separator" aria-hidden="true">·</span>
             <p class="muted">${escapeHtml(view.asset.interchange_reel_name)}</p>
           </div>
           <div class="clip-toggle-meta">
@@ -26,7 +33,9 @@ export function renderClipCard(view: ClipView, expandedClipIds: string[], allowO
         expanded
           ? `
       <div class="section-list">
-        ${view.segments.map((segmentView) => renderSegmentCard(segmentView, view.asset, { allowOverrides, reviewBusy })).join("")}
+        ${view.segments
+          .map((segmentView) => renderSegmentCard(segmentView, view.asset, expandedDetailPanelIds, { allowOverrides, reviewBusy }))
+          .join("")}
       </div>`
           : ""
       }
