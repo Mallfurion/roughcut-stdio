@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-03-27
+
+### 🚀 Features
+
+- Add an ordering option for the results view.
+
+### 🛠 Fixes & Improvements
+
+- Add the runtime-performance-optimization proposal docs.
+
 ## [2.0.0] - 2026-03-27
 
 ### 🚀 Features
