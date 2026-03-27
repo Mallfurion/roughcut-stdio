@@ -192,6 +192,10 @@ class TimelineItem:
     notes: str
     source_asset_path: str
     source_reel: str
+    sequence_group: str = ""
+    sequence_role: str = ""
+    sequence_score: float = 0.0
+    sequence_rationale: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

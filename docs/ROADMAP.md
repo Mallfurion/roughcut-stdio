@@ -19,6 +19,7 @@ Those changes are now implemented and archived. They are now joined by two newer
 
 5. `segmentation-evaluation-harness`
 6. `transcript-turn-structure`
+7. `semantic-boundary-calibration`
 
 Together, this baseline moves the analyzer from finding interesting snippets to producing measurable, turn-aware within-asset narrative units.
 
@@ -51,7 +52,6 @@ After the evaluation harness and turn-aware transcript work, the analyzer should
 
 Even after this current baseline, several important analyzer problems remain:
 
-- semantic boundary validation is implemented but underused in real runs
 - cross-asset story assembly is still weak
 - editor review actions are still not captured as reusable feedback
 
@@ -59,29 +59,17 @@ Even after this current baseline, several important analyzer problems remain:
 
 The next phase after the current shipped baseline is now split into the following remaining chained OpenSpec changes:
 
-1. [semantic-boundary-calibration](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/semantic-boundary-calibration/proposal.md)
-2. [cross-asset-story-assembly](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/cross-asset-story-assembly/proposal.md)
-3. [editor-feedback-learning](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/editor-feedback-learning/proposal.md)
+1. [cross-asset-story-assembly](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/cross-asset-story-assembly/proposal.md)
+2. [editor-feedback-learning](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/editor-feedback-learning/proposal.md)
 
 This remaining sequence is deliberate:
 
-- semantic calibration happens after evaluation and turn-aware transcript evidence already exist
 - cross-asset story assembly builds on stronger within-asset units
 - feedback learning comes last, once review and assembly behavior are stable enough to learn from
 
 ## Current Planned Changes
 
-### 1. Semantic Boundary Calibration
-
-Proposal:
-- [semantic-boundary-calibration](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/semantic-boundary-calibration/proposal.md)
-
-Focus:
-- calibrate ambiguity scoring with real evaluation data
-- activate semantic validation on the right borderline segments
-- keep runtime bounded while making the feature materially useful
-
-### 2. Cross-Asset Story Assembly
+### 1. Cross-Asset Story Assembly
 
 Proposal:
 - [cross-asset-story-assembly](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/cross-asset-story-assembly/proposal.md)
@@ -91,7 +79,7 @@ Focus:
 - score relationships across assets
 - improve rough timeline ordering and grouping
 
-### 3. Editor Feedback Learning
+### 2. Editor Feedback Learning
 
 Proposal:
 - [editor-feedback-learning](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/editor-feedback-learning/proposal.md)
@@ -111,11 +99,10 @@ The active chained order is:
 4. Cross-asset story assembly
 5. Editor feedback learning
 
-The first two items in that chain are now complete. The active next order is:
+The first three items in that chain are now complete. The active next order is:
 
-1. Semantic boundary calibration
-2. Cross-asset story assembly
-3. Editor feedback learning
+1. Cross-asset story assembly
+2. Editor feedback learning
 
 ## Guiding Principle
 

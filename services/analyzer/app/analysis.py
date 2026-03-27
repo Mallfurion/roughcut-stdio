@@ -181,6 +181,15 @@ class AssemblyContinuitySignals:
     strong_turn_break_between: bool
 
 
+@dataclass(slots=True)
+class StoryAssemblyChoice:
+    take: TakeRecommendation
+    sequence_score: float
+    sequence_group: str
+    sequence_role: str
+    sequence_rationale: list[str]
+
+
 class NoOpTranscriptProvider:
     def __init__(
         self,
@@ -2723,6 +2732,37 @@ def analyze_assets(
             "transcript_detail": final_transcript_status.detail,
         }
     )
+    timeline_mode_alternations = 0
+    timeline_group_count = 0
+    if timeline.items:
+        best_take_by_id = {take.id: take for take in take_recommendations}
+        timeline_modes: list[str] = []
+        for item in timeline.items:
+            take = best_take_by_id.get(item.take_recommendation_id)
+            if take is None:
+                continue
+            segment = next(
+                (candidate for candidate in candidate_segments if candidate.id == take.candidate_segment_id),
+                None,
+            )
+            if segment is None:
+                continue
+            timeline_modes.append(segment.analysis_mode)
+        timeline_mode_alternations = sum(
+            1
+            for index in range(1, len(timeline_modes))
+            if timeline_modes[index] != timeline_modes[index - 1]
+        )
+        timeline_group_count = len({item.sequence_group for item in timeline.items if item.sequence_group})
+    project.analysis_summary.update(
+        {
+            "story_assembly_active": len(timeline.items) > 1,
+            "story_assembly_strategy": "sequence-heuristic-v1",
+            "story_assembly_transition_count": max(0, len(timeline.items) - 1),
+            "story_assembly_mode_alternation_count": timeline_mode_alternations,
+            "story_assembly_group_count": timeline_group_count,
+        }
+    )
     if status_callback is not None:
         status_callback("")
         status_callback("═══════════════════════════════════════════════════")
@@ -2755,6 +2795,10 @@ def analyze_assets(
 
         status_callback(f"VLM analysis: {total_vlm_targets} segments selected for AI")
         status_callback(f"Deterministic analysis: {total_filtered_before_vlm} segments (budget/gating/fast-mode)")
+        status_callback(
+            f"Story assembly: {project.analysis_summary['story_assembly_transition_count']} transitions, "
+            f"{project.analysis_summary['story_assembly_mode_alternation_count']} mode alternations"
+        )
 
         status_callback(
             f"AI results: "
@@ -2843,20 +2887,13 @@ def build_timeline(
     assets: list[Asset],
 ) -> Timeline:
     best_takes = [take for take in take_recommendations if take.is_best_take]
-    best_takes.sort(key=lambda take: take.score_total, reverse=True)
-
     segment_by_id = {segment.id: segment for segment in candidate_segments}
     asset_by_id = {asset.id: asset for asset in assets}
-    best_takes.sort(
-        key=lambda take: (
-            asset_order(asset_by_id, segment_by_id[take.candidate_segment_id].asset_id),
-            segment_by_id[take.candidate_segment_id].start_sec,
-            -take.score_total,
-        )
-    )
+    assembled_choices = assemble_story_sequence(best_takes, segment_by_id, asset_by_id)
 
     items: list[TimelineItem] = []
-    for index, take in enumerate(best_takes):
+    for index, choice in enumerate(assembled_choices):
+        take = choice.take
         segment = segment_by_id[take.candidate_segment_id]
         asset = asset_by_id[segment.asset_id]
         duration = segment.end_sec - segment.start_sec
@@ -2872,16 +2909,256 @@ def build_timeline(
                 notes=timeline_note(segment),
                 source_asset_path=asset.source_path,
                 source_reel=asset.interchange_reel_name,
+                sequence_group=choice.sequence_group,
+                sequence_role=choice.sequence_role,
+                sequence_score=round(choice.sequence_score, 4),
+                sequence_rationale=list(choice.sequence_rationale),
             )
         )
 
-    summary = summarize_story(best_takes, segment_by_id)
+    ordered_takes = [choice.take for choice in assembled_choices]
+    summary = summarize_story(ordered_takes, segment_by_id)
     return Timeline(
         id="timeline-main",
         version=1,
         story_summary=summary,
         items=items,
     )
+
+
+def assemble_story_sequence(
+    best_takes: list[TakeRecommendation],
+    segment_by_id: dict[str, CandidateSegment],
+    asset_by_id: dict[str, Asset],
+) -> list[StoryAssemblyChoice]:
+    if not best_takes:
+        return []
+
+    if len(best_takes) == 1:
+        take = best_takes[0]
+        segment = segment_by_id[take.candidate_segment_id]
+        return [
+            StoryAssemblyChoice(
+                take=take,
+                sequence_score=round(take.score_total, 4),
+                sequence_group="setup",
+                sequence_role=sequence_role_for_item(0, 1, segment),
+                sequence_rationale=["Only selected beat in the current rough timeline."],
+            )
+        ]
+
+    remaining = list(best_takes)
+    mixed_modes = has_mixed_sequence_modes(best_takes, segment_by_id)
+    opener = max(
+        remaining,
+        key=lambda take: opener_sequence_score(take, segment_by_id[take.candidate_segment_id]),
+    )
+    remaining.remove(opener)
+
+    release_take: TakeRecommendation | None = None
+    if mixed_modes and len(best_takes) >= 3:
+        visual_remaining = [
+            take for take in remaining if segment_by_id[take.candidate_segment_id].analysis_mode == "visual"
+        ]
+        if visual_remaining:
+            release_take = max(
+                visual_remaining,
+                key=lambda take: release_sequence_score(take, segment_by_id[take.candidate_segment_id]),
+            )
+            remaining.remove(release_take)
+
+    ordered_takes = [opener]
+    while remaining:
+        previous = ordered_takes[-1]
+        next_take = max(
+            remaining,
+            key=lambda take: transition_sequence_score(
+                previous,
+                take,
+                segment_by_id[previous.candidate_segment_id],
+                segment_by_id[take.candidate_segment_id],
+            ),
+        )
+        ordered_takes.append(next_take)
+        remaining.remove(next_take)
+
+    if release_take is not None:
+        ordered_takes.append(release_take)
+
+    choices: list[StoryAssemblyChoice] = []
+    total = len(ordered_takes)
+    for index, take in enumerate(ordered_takes):
+        segment = segment_by_id[take.candidate_segment_id]
+        previous_segment = (
+            segment_by_id[ordered_takes[index - 1].candidate_segment_id]
+            if index > 0
+            else None
+        )
+        sequence_score = take.score_total if previous_segment is None else transition_sequence_score(
+            ordered_takes[index - 1],
+            take,
+            previous_segment,
+            segment,
+        )
+        choices.append(
+            StoryAssemblyChoice(
+                take=take,
+                sequence_score=round(sequence_score, 4),
+                sequence_group=sequence_group_for_item(index, total),
+                sequence_role=sequence_role_for_item(index, total, segment),
+                sequence_rationale=sequence_rationale_for_item(
+                    index=index,
+                    total=total,
+                    current_take=take,
+                    current_segment=segment,
+                    previous_segment=previous_segment,
+                    release_reserved=release_take is not None and take.id == release_take.id,
+                    asset_by_id=asset_by_id,
+                ),
+            )
+        )
+    return choices
+
+
+def has_mixed_sequence_modes(
+    takes: list[TakeRecommendation],
+    segment_by_id: dict[str, CandidateSegment],
+) -> bool:
+    modes = {segment_by_id[take.candidate_segment_id].analysis_mode for take in takes}
+    return len(modes) > 1
+
+
+def opener_sequence_score(take: TakeRecommendation, segment: CandidateSegment) -> float:
+    score = take.score_total
+    if segment.analysis_mode == "visual":
+        score += 0.09
+        if segment.quality_metrics.get("visual_novelty", 0.0) >= 0.7:
+            score += 0.04
+    else:
+        score += 0.03
+        if not segment.transcript_excerpt.strip():
+            score -= 0.03
+    if segment.quality_metrics.get("hook_strength", 0.0) >= 0.7:
+        score += 0.03
+    return score
+
+
+def release_sequence_score(take: TakeRecommendation, segment: CandidateSegment) -> float:
+    score = take.score_total
+    if segment.analysis_mode == "visual":
+        score += 0.08
+        if segment.quality_metrics.get("motion_energy", 0.0) <= 0.55:
+            score += 0.04
+    elif segment.quality_metrics.get("turn_completeness", 0.0) >= 0.85:
+        score += 0.03
+    if segment.quality_metrics.get("story_alignment", 0.0) >= 0.7:
+        score += 0.03
+    return score
+
+
+def transition_sequence_score(
+    previous_take: TakeRecommendation,
+    current_take: TakeRecommendation,
+    previous_segment: CandidateSegment,
+    current_segment: CandidateSegment,
+) -> float:
+    score = current_take.score_total
+    if current_segment.analysis_mode != previous_segment.analysis_mode:
+        score += 0.08
+        if previous_segment.analysis_mode == "visual" and current_segment.analysis_mode == "speech":
+            score += 0.04
+        if previous_segment.analysis_mode == "speech" and current_segment.analysis_mode == "visual":
+            score += 0.05
+    else:
+        score -= 0.02
+
+    if segment_story_role(previous_segment) != segment_story_role(current_segment):
+        score += 0.04
+
+    if (
+        current_segment.analysis_mode == "speech"
+        and current_segment.quality_metrics.get("turn_completeness", 0.0) >= 0.85
+    ):
+        score += 0.02
+
+    if previous_take.score_total >= 0.75 and current_take.score_total >= 0.75:
+        score += 0.01
+
+    return score
+
+
+def segment_story_role(segment: CandidateSegment) -> str:
+    if segment.ai_understanding and segment.ai_understanding.story_roles:
+        return segment.ai_understanding.story_roles[0]
+    if segment.analysis_mode == "speech":
+        return "spoken beat"
+    metrics = segment.quality_metrics
+    if metrics.get("visual_novelty", 0.0) >= 0.8 and metrics.get("motion_energy", 0.0) >= 0.7:
+        return "dynamic establishing"
+    if metrics.get("motion_energy", 0.0) < 0.45:
+        return "calm texture"
+    if metrics.get("subject_clarity", 0.0) >= 0.8:
+        return "clear detail"
+    return "transition-ready"
+
+
+def sequence_group_for_item(index: int, count: int) -> str:
+    if count <= 1 or index == 0:
+        return "setup"
+    if index == count - 1:
+        return "release"
+    return "development"
+
+
+def sequence_role_for_item(index: int, count: int, segment: CandidateSegment) -> str:
+    if index == 0:
+        return "opener"
+    if index == count - 1:
+        return "release"
+    if segment.analysis_mode == "speech":
+        return "spoken beat"
+    return "visual bridge"
+
+
+def sequence_rationale_for_item(
+    *,
+    index: int,
+    total: int,
+    current_take: TakeRecommendation,
+    current_segment: CandidateSegment,
+    previous_segment: CandidateSegment | None,
+    release_reserved: bool,
+    asset_by_id: dict[str, Asset],
+) -> list[str]:
+    asset = asset_by_id[current_segment.asset_id]
+    reasons: list[str] = []
+    if index == 0:
+        if current_segment.analysis_mode == "visual":
+            reasons.append("Starts on a visual anchor to establish the cut cleanly.")
+        else:
+            reasons.append("Starts on the strongest spoken beat available.")
+        if current_segment.quality_metrics.get("hook_strength", 0.0) >= 0.7:
+            reasons.append("Its hook strength makes it a stable opener.")
+    else:
+        if previous_segment is not None and previous_segment.analysis_mode != current_segment.analysis_mode:
+            reasons.append(
+                f"Alternates from {previous_segment.analysis_mode} to {current_segment.analysis_mode} to keep sequence contrast."
+            )
+        if previous_segment is not None and segment_story_role(previous_segment) != segment_story_role(current_segment):
+            reasons.append("Adds role variety instead of repeating the same beat type.")
+        if current_segment.analysis_mode == "speech" and current_segment.transcript_excerpt.strip():
+            reasons.append("Moves the sequence forward with readable spoken information.")
+        elif current_segment.analysis_mode == "visual":
+            reasons.append("Provides visual pacing between stronger information beats.")
+
+    if release_reserved:
+        reasons.append("Held for the end because it reads as a cleaner release beat.")
+    if index == total - 1 and not release_reserved:
+        reasons.append("Closes the current rough cut without needing another transition.")
+    if current_take.score_total >= 0.78:
+        reasons.append(f"Carries strong local quality at {round(current_take.score_total * 100):d}/100.")
+    reasons.append(f"Source {asset.interchange_reel_name}.")
+    return reasons[:3]
 
 
 def fallback_segments(duration_sec: float) -> list[tuple[float, float]]:

@@ -64,6 +64,8 @@ export function renderResultsStep(appState: AppState) {
         </button>
       </div>
 
+      <p class="muted">${escapeHtml(project.timeline.story_summary || "The rough timeline is ready for review.")}</p>
+
       <div class="clip-grid">
         ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds)).join("")}
       </div>

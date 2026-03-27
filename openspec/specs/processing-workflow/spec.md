@@ -15,18 +15,11 @@ The repository workflow SHALL continue to support preparing and validating the c
 - **THEN** the analyzer SHALL execute under desktop orchestration rather than requiring terminal-first interaction
 
 ### Requirement: Process SHALL honor configured media roots and write generated artifacts
-The process step SHALL read footage from `TIMELINE_MEDIA_DIR` when set and SHALL otherwise fall back to the repository `media/` path. The process step SHALL write generated state under `generated/`, including a project JSON document, processing diagnostics, and the persisted terminal-facing output for the latest run.
+The process step SHALL read footage from `TIMELINE_MEDIA_DIR` when set and SHALL otherwise fall back to the repository `media/` path. The process step SHALL write generated state under `generated/`, including a project JSON document, processing diagnostics, and the persisted terminal-facing output for the latest run. When project-level story assembly is active, generated state SHALL preserve the sequence rationale used for the final rough timeline.
 
-#### Scenario: Media root is provided through environment
-- **WHEN** `TIMELINE_MEDIA_DIR` is set for a process run
-- **THEN** the process step SHALL scan that absolute directory instead of the repository `media/` path
-
-#### Scenario: Process completes successfully
-- **WHEN** `npm run process` finishes
-- **THEN** the repository SHALL contain `generated/project.json`
-- **THEN** the repository SHALL contain `generated/process.log`
-- **THEN** the repository SHALL contain `generated/process-summary.txt`
-- **THEN** the repository SHALL contain `generated/process-output.txt`
+#### Scenario: Process completes with project-level story assembly
+- **WHEN** `npm run process` finishes with story-assembly logic enabled
+- **THEN** `generated/project.json` SHALL preserve sequence-level rationale or grouping metadata for the final timeline
 
 ### Requirement: Process SHALL report operational status during long runs
 The process workflow SHALL report benchmark timing statistics in addition to existing prefilter, deduplication, audio, and VLM reduction statistics. This reporting SHALL be included in `generated/process-summary.txt`, in the terminal-facing output saved to `generated/process-output.txt`, and in the benchmark artifacts for the completed run.
@@ -60,3 +53,4 @@ The process workflow SHALL report transcript runtime configuration and transcrip
 - **WHEN** `npm run process` starts with transcript support enabled but the configured backend cannot be used
 - **THEN** process output SHALL disclose that transcript extraction is unavailable and that fallback behavior will be used
 - **THEN** generated process artifacts SHALL preserve that transcript-unavailable status after the run
+

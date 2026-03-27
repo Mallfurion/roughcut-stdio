@@ -261,11 +261,23 @@ These roll into a total score used to pick the strongest one or two takes per as
 
 **Code:** `services/analyzer/app/analysis.py`
 
-Best takes are assembled into a rough timeline. Ordering uses asset discovery order, segment start time, and score-based tie breaking. Each take becomes a `TimelineItem` with trims, a label, notes, and source references.
+Best takes are assembled into a rough timeline with bounded cross-asset story assembly heuristics rather than pure asset-order sorting. The current sequence pass works on already-selected per-asset winners and prefers a cleaner multi-asset flow by considering:
+
+- opener strength
+- speech/visual alternation
+- role variety across adjacent beats
+- a cleaner visual or low-friction release beat when the project is mixed
+
+Each selected take becomes a `TimelineItem` with trims, a label, notes, source references, and story-assembly metadata such as:
+
+- `sequence_group`
+- `sequence_role`
+- `sequence_score`
+- `sequence_rationale`
 
 Timeline trims now preserve more of refined segment length instead of flattening every visual clip to five seconds. Speech beats may run up to `7.5s`; trusted refined visual beats may run up to `6.5s`, and merged visual beats up to `7.0s`. Legacy/fallback visual windows still cap at `5.0s`.
 
-The analyzer also generates a short story summary for the timeline composition.
+The analyzer also generates a short story summary for the timeline composition and records story-assembly counters in `project.analysis_summary`, including transition count, mode alternations, and sequence-group count.
 
 ## Final Output
 

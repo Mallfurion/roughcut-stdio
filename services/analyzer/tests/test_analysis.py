@@ -32,7 +32,7 @@ from services.analyzer.app.analysis import (
     select_prefilter_shortlist_ids,
     transcript_runtime_status,
 )
-from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline
+from services.analyzer.app.domain import Asset, BoundaryValidationResult, CandidateSegment, PrefilterDecision, ProjectData, ProjectMeta, TakeRecommendation, Timeline, TimelineItem
 from services.analyzer.app.prefilter import AudioSignal, FrameSignal, SeedRegion
 from services.analyzer.app.service import load_project
 
@@ -1117,6 +1117,165 @@ class AnalysisPipelineTests(unittest.TestCase):
         timeline = build_timeline(takes, segments, assets)
 
         self.assertEqual([item.trim_out_sec for item in timeline.items], [6.2, 5.0])
+
+    def test_build_timeline_applies_sequence_heuristics_to_mixed_modes(self) -> None:
+        assets = [
+            Asset(
+                id="asset-1",
+                name="Dialogue Clip",
+                source_path="/tmp/dialogue.mov",
+                proxy_path="/tmp/dialogue.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=True,
+                interchange_reel_name="A001_C201",
+            ),
+            Asset(
+                id="asset-2",
+                name="Visual Opener",
+                source_path="/tmp/opener.mov",
+                proxy_path="/tmp/opener.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C202",
+            ),
+            Asset(
+                id="asset-3",
+                name="Visual Release",
+                source_path="/tmp/release.mov",
+                proxy_path="/tmp/release.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C203",
+            ),
+        ]
+        segments = [
+            CandidateSegment(
+                id="seg-dialogue",
+                asset_id="asset-1",
+                start_sec=3.0,
+                end_sec=8.5,
+                analysis_mode="speech",
+                transcript_excerpt="The key answer lands here.",
+                description="Dialogue beat",
+                quality_metrics={"hook_strength": 0.82, "story_alignment": 0.84, "turn_completeness": 0.9},
+            ),
+            CandidateSegment(
+                id="seg-opener",
+                asset_id="asset-2",
+                start_sec=0.0,
+                end_sec=5.8,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Visual opener",
+                quality_metrics={"visual_novelty": 0.9, "hook_strength": 0.78, "story_alignment": 0.72, "motion_energy": 0.66},
+            ),
+            CandidateSegment(
+                id="seg-release",
+                asset_id="asset-3",
+                start_sec=1.0,
+                end_sec=6.2,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Visual release",
+                quality_metrics={"visual_novelty": 0.71, "hook_strength": 0.74, "story_alignment": 0.75, "motion_energy": 0.31},
+            ),
+        ]
+        takes = [
+            TakeRecommendation(
+                id="take-dialogue",
+                candidate_segment_id="seg-dialogue",
+                title="Dialogue",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.3,
+                score_semantic=0.36,
+                score_story=0.34,
+                score_total=0.82,
+            ),
+            TakeRecommendation(
+                id="take-opener",
+                candidate_segment_id="seg-opener",
+                title="Opener",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.29,
+                score_semantic=0.33,
+                score_story=0.31,
+                score_total=0.79,
+            ),
+            TakeRecommendation(
+                id="take-release",
+                candidate_segment_id="seg-release",
+                title="Release",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.28,
+                score_semantic=0.32,
+                score_story=0.3,
+                score_total=0.76,
+            ),
+        ]
+
+        timeline = build_timeline(takes, segments, assets)
+
+        self.assertEqual(
+            [item.take_recommendation_id for item in timeline.items],
+            ["take-opener", "take-dialogue", "take-release"],
+        )
+        self.assertEqual([item.sequence_group for item in timeline.items], ["setup", "development", "release"])
+        self.assertTrue(any("visual anchor" in reason for reason in timeline.items[0].sequence_rationale))
+        self.assertTrue(any("Alternates from visual to speech" in reason for reason in timeline.items[1].sequence_rationale))
+
+    def test_timeline_sequence_metadata_round_trips_through_project_data(self) -> None:
+        project = ProjectData(
+            project=ProjectMeta(
+                id="project-sequence",
+                name="Sequence Project",
+                story_prompt="Build a sequence",
+                status="draft",
+                media_roots=["/tmp"],
+            ),
+            assets=[],
+            candidate_segments=[],
+            take_recommendations=[],
+            timeline=Timeline(
+                id="timeline-main",
+                version=1,
+                story_summary="Visual opener into dialogue then release.",
+                items=[
+                    TimelineItem(
+                        id="timeline-item-01",
+                        take_recommendation_id="take-01",
+                        order_index=0,
+                        trim_in_sec=0.0,
+                        trim_out_sec=5.5,
+                        label="Opener",
+                        notes="Open strong.",
+                        source_asset_path="/tmp/a.mov",
+                        source_reel="A001_C001",
+                        sequence_group="setup",
+                        sequence_role="opener",
+                        sequence_score=0.84,
+                        sequence_rationale=["Starts on a visual anchor.", "Source A001_C001."],
+                    )
+                ],
+            ),
+        )
+
+        restored = ProjectData.from_dict(project.to_dict())
+        item = restored.timeline.items[0]
+        self.assertEqual(item.sequence_group, "setup")
+        self.assertEqual(item.sequence_role, "opener")
+        self.assertEqual(item.sequence_rationale, ["Starts on a visual anchor.", "Source A001_C001."])
 
     def test_load_project_enriches_review_fixture_with_mixed_segment_states(self) -> None:
         project = load_project(REVIEW_FIXTURE)

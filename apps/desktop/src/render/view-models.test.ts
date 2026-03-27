@@ -83,7 +83,22 @@ test("resolveClipViews groups segments by asset and sorts them by start time", (
       id: "timeline-1",
       version: 1,
       story_summary: "Summary",
-      items: [],
+      items: [
+        {
+          id: "timeline-item-1",
+          take_recommendation_id: "take-1",
+          trim_in_sec: 0,
+          trim_out_sec: 4,
+          label: "Opener",
+          notes: "Open strong",
+          source_asset_path: "/tmp/a.mov",
+          source_reel: "A001",
+          sequence_group: "setup",
+          sequence_role: "opener",
+          sequence_score: 0.84,
+          sequence_rationale: ["Starts on a visual anchor."],
+        },
+      ],
     },
   };
 
@@ -96,4 +111,5 @@ test("resolveClipViews groups segments by asset and sorts them by start time", (
     ["seg-1", "seg-2"],
   );
   assert.equal(views[0]?.segments[0]?.recommendation?.id, "take-1");
+  assert.equal(views[0]?.segments[0]?.timelineItem?.sequence_group, "setup");
 });

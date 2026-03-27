@@ -4,6 +4,9 @@ export function resolveClipViews(project: TimelineProject): ClipView[] {
   const takeBySegmentId = new Map(
     project.take_recommendations.map((take) => [take.candidate_segment_id, take]),
   );
+  const timelineItemByRecommendationId = new Map(
+    project.timeline.items.map((item) => [item.take_recommendation_id, item]),
+  );
 
   return project.assets
     .map((asset) => ({
@@ -14,6 +17,9 @@ export function resolveClipViews(project: TimelineProject): ClipView[] {
         .map((segment) => ({
           segment,
           recommendation: takeBySegmentId.get(segment.id),
+          timelineItem: takeBySegmentId.get(segment.id)
+            ? timelineItemByRecommendationId.get(takeBySegmentId.get(segment.id)?.id ?? "")
+            : undefined,
         })),
     }))
     .filter((view) => view.segments.length > 0);

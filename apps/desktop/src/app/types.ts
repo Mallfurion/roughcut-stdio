@@ -139,6 +139,10 @@ export type TimelineItem = {
   notes: string;
   source_asset_path: string;
   source_reel: string;
+  sequence_group?: string;
+  sequence_role?: string;
+  sequence_score?: number;
+  sequence_rationale?: string[];
 };
 
 export type TimelineProject = {
@@ -223,6 +227,7 @@ export type ClipView = {
   segments: {
     segment: CandidateSegment;
     recommendation?: TakeRecommendation;
+    timelineItem?: TimelineItem;
   }[];
 };
 

@@ -39,6 +39,7 @@ Complete analysis and export engine that runs the four-phase pipeline.
 - Seed-region generation and deterministic boundary refinement
 - Narrative-unit merge/split assembly
 - Optional semantic boundary validation for ambiguous segments
+- Cross-asset story assembly for rough timeline ordering
 - Prefilter scoring and shortlist selection
 - Evidence building (keyframe/contact sheet extraction)
 - CLIP semantic scoring and deduplication
@@ -48,7 +49,7 @@ Complete analysis and export engine that runs the four-phase pipeline.
 **Key Modules:**
 - `media.py` — File discovery, asset creation
 - `prefilter.py` — Signal extraction and low-cost candidate generation
-- `analysis.py` — Boundary refinement, narrative-unit assembly, review-state construction, timeline assembly
+- `analysis.py` — Boundary refinement, narrative-unit assembly, story assembly, review-state construction, timeline assembly
 - `clip.py` — CLIP semantic scoring with embedding cache
 - `clip_dedup.py` — CLIP-based deduplication
 - `deduplication.py` — Histogram-based fallback dedup
@@ -94,7 +95,7 @@ Video Files
     ↓
 [Take Selection] → Best segment per asset
     ↓
-[Timeline Assembly] → Ordered rough cut
+[Story Assembly + Timeline Assembly] → Ordered rough cut
     ↓
 generated/project.json (all data)
 generated/timeline.fcpxml (Resolve import)

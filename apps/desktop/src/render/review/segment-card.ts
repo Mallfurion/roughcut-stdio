@@ -12,10 +12,10 @@ import {
 } from "./helpers.ts";
 
 export function renderSegmentCard(
-  view: { segment: CandidateSegment; recommendation?: TakeRecommendation },
+  view: { segment: CandidateSegment; recommendation?: TakeRecommendation; timelineItem?: { sequence_group?: string; sequence_role?: string; sequence_score?: number; sequence_rationale?: string[] } },
   asset: Asset,
 ) {
-  const { segment, recommendation } = view;
+  const { segment, recommendation, timelineItem } = view;
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
   const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
@@ -38,6 +38,11 @@ export function renderSegmentCard(
   ].filter(Boolean);
 
   const sourceFacts = [`Source ${asset.interchange_reel_name}`, asset.source_path].filter(Boolean);
+  const sequenceFacts = [
+    timelineItem?.sequence_group ? `Group ${timelineItem.sequence_group}` : "",
+    timelineItem?.sequence_role ? `Role ${timelineItem.sequence_role}` : "",
+    typeof timelineItem?.sequence_score === "number" ? `Sequence ${formatScore(timelineItem.sequence_score)}` : "",
+  ].filter(Boolean);
   const quietFacts = [
     score > 0 ? `Prefilter ${formatScore(score)}` : "",
     clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
@@ -85,6 +90,24 @@ export function renderSegmentCard(
       ${
         quietFacts.length > 0
           ? `<div class="meta-list section-facts">${quietFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+          : ""
+      }
+      ${
+        timelineItem?.sequence_rationale?.length
+          ? `
+      <section class="section-provenance">
+        <div class="section-provenance-head">
+          <span class="eyebrow section-provenance-eyebrow">Sequence</span>
+        </div>
+        ${
+          sequenceFacts.length > 0
+            ? `<div class="meta-list section-source-facts">${sequenceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+            : ""
+        }
+        <div class="section-provenance-list">
+          ${timelineItem.sequence_rationale.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
+        </div>
+      </section>`
           : ""
       }
       ${
