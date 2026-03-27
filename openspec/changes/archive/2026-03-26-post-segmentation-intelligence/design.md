@@ -14,7 +14,6 @@ What remains is not one feature. It is a sequence:
 2. improve transcript-turn structure
 3. retune semantic validation against that richer evidence
 4. assemble stronger cross-asset sequences
-5. learn from editor behavior
 
 ## Decisions
 
@@ -34,13 +33,11 @@ The post-segmentation chain is:
 2. `transcript-turn-structure`
 3. `semantic-boundary-calibration`
 4. `cross-asset-story-assembly`
-5. `editor-feedback-learning`
 
 Why:
 - evaluation should exist before deeper tuning
 - transcript-turn structure should improve the evidence before semantic retuning
 - sequence assembly should consume stronger units, not compensate for weak local structure
-- feedback learning should come after the review and assembly behavior is stable enough to learn from
 
 ## Risks / Trade-offs
 
@@ -52,3 +49,4 @@ Why:
 1. Create the child changes with chaining metadata.
 2. Implement them in order unless new evidence suggests a dependency change.
 3. Archive each child independently after implementation.
+4. Archive this umbrella once the chain is complete.
