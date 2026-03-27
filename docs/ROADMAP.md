@@ -15,8 +15,9 @@ This document tracks the likely next product directions for Roughcut Stdio beyon
 - `transcript-turn-structure`
 - `semantic-boundary-calibration`
 - `cross-asset-story-assembly`
+- `standalone-desktop-distribution`
 
-This baseline moved the analyzer from finding interesting snippets toward producing measurable, turn-aware editorial units and assembling a stronger first-pass rough cut across assets.
+This baseline moved the analyzer from finding interesting snippets toward producing measurable, turn-aware editorial units and assembling a stronger first-pass rough cut across assets. It also established a real packaged standalone desktop runtime with app-managed storage, bundled runtime dependencies, packaged processing/export orchestration, and first-launch model bootstrap.
 
 ## Future Directions
 
@@ -97,31 +98,54 @@ Likely next improvements:
 Why it matters:
 - once the analyzer proposes better cuts, the review surface becomes the main product interface for trust and iteration
 
-### 6. Standalone Desktop Distribution
+### 6. Standalone Desktop Polish
 
-The product already has a real desktop app, but it still behaves like a development wrapper around the repository instead of a packaged application.
+Proposal:
+- [standalone-desktop-polish](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-desktop-polish/proposal.md)
+
+The standalone desktop runtime now exists, but it still feels like a first shipped build rather than a polished desktop product.
 
 Likely next improvements:
-- replace repo-relative setup and process assumptions with app-managed runtime orchestration
-- bundle the analyzer runtime and required binaries as sidecars or packaged resources
-- move generated output, logs, settings, and caches into app-managed storage
-- add first-run bootstrap for optional transcript and local AI assets
-- package, sign, and verify the app as a normal desktop product release
+- add an installed-app runtime management surface for runtime health, downloaded assets, storage usage, and repair actions
+- add first-launch migration/import for repo-local settings and generated runs
+- add a packaged run library so prior runs can be reopened instead of only the active/latest run
+- harden DMG generation and release verification so packaged output is reliable and repeatable
 
 Why it matters:
-- the current product experience is still too close to a developer environment
-- a standalone app is the clearest path from “useful tool in a repo” to “real desktop product”
+- a packaged app still needs recovery, migration, and release reliability to feel production-ready
+- reopening prior runs and repairing runtime state are product behaviors, not just tooling niceties
+
+### 7. Standalone Runtime Size Optimization
+
+Proposal:
+- [standalone-runtime-size-optimization](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-runtime-size-optimization/proposal.md)
+
+The standalone app is now functionally complete, but the packaged bundle is still too large for a normal desktop distribution workflow.
+
+Likely next improvements:
+- redefine the install around a slim deterministic core instead of bundling every optional runtime dependency
+- move transcript, CLIP, and MLX-VLM support into downloadable runtime packs
+- replace whole-`.venv` packaging with a runtime-only Python environment built for the app
+- prune the packaged Python home and bundled runtime payload aggressively
+- enforce bundle-size auditing and budgets in release verification
+
+Why it matters:
+- large installers slow down downloads, updates, release validation, and distribution
+- a smaller core app will make the standalone product easier to ship and easier to trust operationally
 
 ## Current Direction
 
-The current planned analyzer follow-up is now split into four concrete proposals:
+The current planned analyzer follow-up remains split into four concrete proposals:
 
 1. [evaluation-harness-expansion](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/evaluation-harness-expansion/proposal.md)
 2. [story-assembly-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/story-assembly-improvements/proposal.md)
 3. [speech-understanding-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/speech-understanding-improvements/proposal.md)
 4. [runtime-reliability-hardening](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/runtime-reliability-hardening/proposal.md)
 
-The currently identified product-facing desktop step remains [standalone-desktop-distribution](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-desktop-distribution/proposal.md).
+The current product-facing desktop follow-up is now split into two concrete proposals:
+
+1. [standalone-desktop-polish](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-desktop-polish/proposal.md)
+2. [standalone-runtime-size-optimization](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-runtime-size-optimization/proposal.md)
 
 ## Guiding Principle
 
