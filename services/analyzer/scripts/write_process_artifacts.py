@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from services.analyzer.app.benchmarking import (  # noqa: E402
     build_process_benchmark,
     compare_benchmarks,
-    load_previous_benchmark_entry,
+    load_previous_matching_benchmark_entry,
     load_runtime_configuration,
     write_benchmark_artifacts,
     write_process_log,
@@ -70,7 +70,15 @@ def main() -> int:
             "run_process_output": args.run_process_output,
         },
     )
-    comparison = compare_benchmarks(benchmark, load_previous_benchmark_entry(history_path))
+    dataset_identity = dict(benchmark.runtime_configuration.get("dataset_identity") or {})
+    comparison = compare_benchmarks(
+        benchmark,
+        load_previous_matching_benchmark_entry(
+            history_path,
+            dataset_fingerprint=str(dataset_identity.get("fingerprint", "")),
+            exclude_run_id=benchmark.run_id,
+        ),
+    )
     write_benchmark_artifacts(benchmark=benchmark, benchmark_root=benchmark_root)
     write_process_log(path=args.process_log, benchmark=benchmark)
     write_process_summary(

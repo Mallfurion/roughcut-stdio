@@ -1,12 +1,13 @@
 ## Why
 
-The current evaluation harness is useful, but it still measures mostly segment-level quality on a narrow fixture set. As story assembly and analyzer behavior get more sophisticated, the product needs broader, more repeatable evaluation that can catch sequence-level regressions and make tuning decisions defensible.
+The current evaluation harness is useful, but it still needs a cleaner split between portable correctness checks and real-dataset benchmarking. As story assembly and analyzer behavior get more sophisticated, the project needs shared repo-owned fixtures for pass/fail validation and dataset-aware benchmark comparisons for repeated runs on the same footage.
 
 ## What Changes
 
-- Expand the fixture-driven evaluation workflow beyond the current media-light baseline.
+- Replace private-footage assumptions in the shared evaluation baseline with portable repo-owned fixtures.
 - Add sequence-level and rough-cut quality checks alongside existing segment-level checks.
-- Preserve richer evaluation summaries in benchmark artifacts so runs can be compared over time and across releases.
+- Preserve richer evaluation summaries in benchmark artifacts so repeated runs on the same dataset can be compared without treating different datasets as regressions.
+- Keep portable fixture validation and real-dataset benchmarking as separate modes rather than one blended pass/fail system.
 - Keep evaluation aligned with the current local-first analyzer flow rather than creating a separate research-only harness.
 
 ## Capabilities

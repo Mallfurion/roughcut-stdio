@@ -196,6 +196,8 @@ class TimelineItem:
     sequence_role: str = ""
     sequence_score: float = 0.0
     sequence_rationale: list[str] = field(default_factory=list)
+    sequence_driver_labels: list[str] = field(default_factory=list)
+    sequence_tradeoff_labels: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

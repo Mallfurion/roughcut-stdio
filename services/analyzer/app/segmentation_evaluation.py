@@ -191,6 +191,12 @@ def evaluate_project_for_fixture_set(
             }
         )
 
+    timeline_results = _evaluate_timeline_expectations(
+        project_payload=project_payload,
+        fixture_set=fixture_set,
+    )
+    checks.extend(timeline_results["checks"])
+
     passed_count = sum(1 for item in checks if item.passed)
     failed_count = len(checks) - passed_count
     semantic_validation = {
@@ -215,12 +221,18 @@ def evaluate_project_for_fixture_set(
             "passed_check_count": passed_count,
             "failed_check_count": failed_count,
             "asset_expectation_count": len(fixture_set.get("asset_expectations", [])),
+            "timeline_check_count": len(timeline_results["checks"]),
         },
         "semantic_validation": semantic_validation,
         "analysis_summary_checks": [
             item.to_dict() for item in checks if item.scope == "analysis_summary"
         ],
         "asset_results": asset_results,
+        "timeline_results": {
+            "passed": timeline_results["passed"],
+            "checks": [item.to_dict() for item in timeline_results["checks"]],
+            "observed": timeline_results["observed"],
+        },
     }
 
 
@@ -287,10 +299,163 @@ def _evaluate_scalar_expectations(
     return checks
 
 
+def _evaluate_timeline_expectations(
+    *,
+    project_payload: dict[str, Any],
+    fixture_set: dict[str, Any],
+) -> dict[str, Any]:
+    timeline = project_payload.get("timeline", {}) or {}
+    timeline_items = list(timeline.get("items", []) or [])
+    expectations = fixture_set.get("timeline_expectations") or {}
+    if not expectations:
+        return {
+            "passed": True,
+            "checks": [],
+            "observed": _timeline_observed_state(timeline, timeline_items),
+        }
+
+    checks: list[EvaluationCheck] = []
+    observed = _timeline_observed_state(timeline, timeline_items)
+    checks.extend(
+        _evaluate_scalar_expectations(
+            "timeline",
+            "item_count",
+            len(timeline_items),
+            expectations.get("item_count") or {},
+        )
+    )
+
+    for field_name, observed_values in (
+        ("required_sequence_roles", observed["sequence_roles"]),
+        ("required_sequence_groups", observed["sequence_groups"]),
+        ("required_source_reels", observed["source_reels"]),
+    ):
+        required_values = sorted(str(item) for item in expectations.get(field_name, []))
+        if not required_values:
+            continue
+        missing = [value for value in required_values if value not in observed_values]
+        checks.append(
+            EvaluationCheck(
+                scope="timeline",
+                name=field_name,
+                expected=", ".join(required_values),
+                actual=", ".join(observed_values) if observed_values else "none",
+                passed=not missing,
+                message=(
+                    f"Observed required timeline values for {field_name}."
+                    if not missing
+                    else f"Missing expected timeline values for {field_name}: {', '.join(missing)}."
+                ),
+            )
+        )
+
+    story_summary = observed["story_summary"]
+    story_summary_contains = [str(item) for item in expectations.get("story_summary_contains", [])]
+    for snippet in story_summary_contains:
+        checks.append(
+            EvaluationCheck(
+                scope="timeline",
+                name="story_summary_contains",
+                expected=snippet,
+                actual=story_summary or "",
+                passed=snippet.lower() in story_summary.lower(),
+                message=(
+                    f"Story summary contained '{snippet}'."
+                    if snippet.lower() in story_summary.lower()
+                    else f"Story summary did not contain expected text '{snippet}'."
+                ),
+            )
+        )
+
+    for field_name, actual_value in (
+        ("opener_source_reel", observed["opener_source_reel"]),
+        ("release_source_reel", observed["release_source_reel"]),
+    ):
+        expected_values = [str(item) for item in expectations.get(field_name, [])]
+        if not expected_values:
+            continue
+        checks.append(
+            EvaluationCheck(
+                scope="timeline",
+                name=field_name,
+                expected=", ".join(expected_values),
+                actual=actual_value or "none",
+                passed=actual_value in expected_values,
+                message=(
+                    f"{field_name} matched an allowed source reel."
+                    if actual_value in expected_values
+                    else f"{field_name} was '{actual_value or 'none'}', expected one of: {', '.join(expected_values)}."
+                ),
+            )
+        )
+
+    return {
+        "passed": all(item.passed for item in checks),
+        "checks": checks,
+        "observed": observed,
+    }
+
+
+def _timeline_observed_state(
+    timeline: dict[str, Any],
+    timeline_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    sequence_roles = sorted(
+        {
+            str(item.get("sequence_role", "")).strip()
+            for item in timeline_items
+            if str(item.get("sequence_role", "")).strip()
+        }
+    )
+    sequence_groups = sorted(
+        {
+            str(item.get("sequence_group", "")).strip()
+            for item in timeline_items
+            if str(item.get("sequence_group", "")).strip()
+        }
+    )
+    source_reels = sorted(
+        {
+            str(item.get("source_reel", "")).strip()
+            for item in timeline_items
+            if str(item.get("source_reel", "")).strip()
+        }
+    )
+    opener_source_reel = ""
+    release_source_reel = ""
+    if timeline_items:
+        opener_source_reel = str(timeline_items[0].get("source_reel", "")).strip()
+        release_source_reel = str(timeline_items[-1].get("source_reel", "")).strip()
+    return {
+        "item_count": len(timeline_items),
+        "story_summary": str(timeline.get("story_summary", "")).strip(),
+        "sequence_roles": sequence_roles,
+        "sequence_groups": sequence_groups,
+        "source_reels": source_reels,
+        "opener_source_reel": opener_source_reel,
+        "release_source_reel": release_source_reel,
+    }
+
+
 def find_previous_quality_evaluation(
     history_path: str | Path,
     *,
     fixture_set: str,
+    exclude_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    return find_previous_quality_evaluation_for_dataset(
+        history_path,
+        fixture_set=fixture_set,
+        dataset_fingerprint="",
+        exclude_run_id=exclude_run_id,
+    )
+
+
+def find_previous_quality_evaluation_for_dataset(
+    history_path: str | Path,
+    *,
+    fixture_set: str,
+    dataset_fingerprint: str,
     exclude_run_id: str | None = None,
 ) -> dict[str, Any] | None:
     path = Path(history_path)
@@ -302,6 +467,11 @@ def find_previous_quality_evaluation(
         if exclude_run_id and entry.get("run_id") == exclude_run_id:
             continue
         evaluation_summary = entry.get("quality_evaluation_summary") or {}
-        if evaluation_summary.get("fixture_set") == fixture_set:
+        entry_dataset = dict(entry.get("dataset_identity") or {})
+        same_dataset = (
+            not dataset_fingerprint
+            or entry_dataset.get("fingerprint") == dataset_fingerprint
+        )
+        if evaluation_summary.get("fixture_set") == fixture_set and same_dataset:
             return entry
     return None

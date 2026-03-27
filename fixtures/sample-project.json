@@ -154,7 +154,21 @@
         "label": "City opener",
         "notes": "Keep the tram entrance.",
         "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A001_C001_0324AB.mov",
-        "source_reel": "A001_C001_0324AB"
+        "source_reel": "A001_C001_0324AB",
+        "sequence_group": "setup",
+        "sequence_role": "opener",
+        "sequence_score": 0.88,
+        "sequence_rationale": [
+          "Starts on a visual anchor to establish the cut cleanly.",
+          "Matches story prompt cues: city, market.",
+          "Source A001_C001_0324AB."
+        ],
+        "sequence_driver_labels": [
+          "local_strength",
+          "opener_fit",
+          "prompt_fit"
+        ],
+        "sequence_tradeoff_labels": []
       },
       {
         "id": "item-2",
@@ -165,7 +179,22 @@
         "label": "Narrative turn",
         "notes": "Start just before the spoken line settles.",
         "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A002_C014_0324CD.mov",
-        "source_reel": "A002_C014_0324CD"
+        "source_reel": "A002_C014_0324CD",
+        "sequence_group": "development",
+        "sequence_role": "spoken beat",
+        "sequence_score": 0.91,
+        "sequence_rationale": [
+          "Alternates from visual to speech to keep sequence contrast.",
+          "Moves the sequence forward with readable spoken information.",
+          "Source A002_C014_0324CD."
+        ],
+        "sequence_driver_labels": [
+          "local_strength",
+          "mode_variety",
+          "spoken_progression",
+          "repetition_control"
+        ],
+        "sequence_tradeoff_labels": []
       },
       {
         "id": "item-3",
@@ -176,9 +205,22 @@
         "label": "Evening outro",
         "notes": "Hold long enough for the pace shift.",
         "source_asset_path": "/Volumes/Shoot/Bucharest/Originals/A003_C007_0324EF.mov",
-        "source_reel": "A003_C007_0324EF"
+        "source_reel": "A003_C007_0324EF",
+        "sequence_group": "release",
+        "sequence_role": "release",
+        "sequence_score": 0.86,
+        "sequence_rationale": [
+          "Held for the end because it reads as a cleaner release beat.",
+          "Closes the current rough cut without needing another transition.",
+          "Source A003_C007_0324EF."
+        ],
+        "sequence_driver_labels": [
+          "local_strength",
+          "release_fit",
+          "calm_release"
+        ],
+        "sequence_tradeoff_labels": []
       }
     ]
   }
 }
-

@@ -15,6 +15,15 @@ The pipeline runs in four phases:
 
 Each phase narrows the candidate pool so expensive work only happens on stronger segments.
 
+## Evaluation Modes
+
+The evaluation harness is intentionally split into two modes:
+
+- **Portable validation** uses repo-owned fixtures from [segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json). These are the shared pass/fail checks for the project.
+- **Dataset benchmarking** uses real processed footage and records quality and runtime metrics without turning that footage into a universal regression target.
+
+When a benchmark history exists, evaluation summaries are only attached and compared against prior runs that share the same derived dataset fingerprint. Different footage sets can still be benchmarked, but they are not treated as direct regressions against one another.
+
 ## Phase 1: Media Discovery
 
 **Code:** `services/analyzer/app/media.py`
@@ -266,6 +275,8 @@ Best takes are assembled into a rough timeline with bounded cross-asset story as
 - opener strength
 - speech/visual alternation
 - role variety across adjacent beats
+- repetition control across recent beats
+- bounded story-prompt fit
 - a cleaner visual or low-friction release beat when the project is mixed
 
 Each selected take becomes a `TimelineItem` with trims, a label, notes, source references, and story-assembly metadata such as:
@@ -274,10 +285,12 @@ Each selected take becomes a `TimelineItem` with trims, a label, notes, source r
 - `sequence_role`
 - `sequence_score`
 - `sequence_rationale`
+- `sequence_driver_labels`
+- `sequence_tradeoff_labels`
 
 Timeline trims now preserve more of refined segment length instead of flattening every visual clip to five seconds. Speech beats may run up to `7.5s`; trusted refined visual beats may run up to `6.5s`, and merged visual beats up to `7.0s`. Legacy/fallback visual windows still cap at `5.0s`.
 
-The analyzer also generates a short story summary for the timeline composition and records story-assembly counters in `project.analysis_summary`, including transition count, mode alternations, and sequence-group count.
+The analyzer also generates a short story summary for the timeline composition and records story-assembly counters in `project.analysis_summary`, including transition count, mode alternations, sequence-group count, role count, prompt-fit count, repetition-control count, and how many beats won through bounded sequence-level tradeoffs.
 
 ## Final Output
 
@@ -315,9 +328,17 @@ That workflow:
 2. loads a stable fixture manifest from [fixtures/segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json)
 3. evaluates the latest `generated/project.json` against the selected fixture set
 4. writes a human-readable summary to `generated/segmentation-evaluation-summary.txt`
-5. attaches the full evaluation result to the latest benchmark run as `generated/benchmarks/<run-id>/segmentation-evaluation.json`
+5. attaches the full evaluation result to the latest benchmark run as `generated/benchmarks/<run-id>/segmentation-evaluation.json` when benchmark history exists
 
-The latest `benchmark.json` and `history.jsonl` entry are also updated with a summary of the quality-evaluation result, so segmentation-quality checks travel with the existing benchmark artifacts.
+The latest `benchmark.json` and `history.jsonl` entry are also updated with a summary of the quality-evaluation result when benchmark history exists, so segmentation-quality checks travel with the existing benchmark artifacts. The default manifest is portable and based on repo-owned fixtures rather than private footage assumptions.
+
+Fixture sets can now distinguish:
+
+- `analysis_summary_expectations` for run-level counters
+- `asset_expectations` for per-asset segment behavior
+- `timeline_expectations` for sequence-level rough-cut behavior such as roles, groups, source reels, and story-summary cues
+
+Project-specific or private evaluation datasets should live in separate manifests passed with `--manifest`, rather than becoming the shared default fixture baseline.
 
 ## What Gets Filtered And When
 

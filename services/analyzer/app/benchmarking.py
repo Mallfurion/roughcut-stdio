@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
+from os.path import basename
 from pathlib import Path
 from typing import Any
 
@@ -112,17 +114,65 @@ def attach_quality_evaluation(
         entries = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         for entry in entries:
             if entry.get("run_id") == run_id:
+                timeline_results = dict(evaluation_result.get("timeline_results") or {})
+                timeline_summary = {
+                    "passed": bool(timeline_results.get("passed", False)),
+                    "failed_check_count": sum(
+                        1
+                        for check in timeline_results.get("checks", [])
+                        if not bool(check.get("passed", False))
+                    ),
+                    "observed": dict(timeline_results.get("observed") or {}),
+                }
                 entry["quality_evaluation_summary"] = {
                     "fixture_set": evaluation_result.get("fixture_set", ""),
                     "passed": bool(evaluation_result.get("passed", False)),
                     "failed_check_count": int((evaluation_result.get("summary") or {}).get("failed_check_count", 0)),
                     "semantic_validation": dict(evaluation_result.get("semantic_validation") or {}),
+                    "timeline": timeline_summary,
                 }
         history_path.write_text(
             "".join(json.dumps(entry, sort_keys=True) + "\n" for entry in entries),
             encoding="utf-8",
         )
     return evaluation_path
+
+
+def derive_dataset_identity(
+    *,
+    project_payload: dict[str, Any],
+    media_dir: str = "",
+    media_dir_input: str = "",
+) -> dict[str, Any]:
+    assets = project_payload.get("assets", []) or []
+    asset_tokens: list[str] = []
+    for asset in assets:
+        token = (
+            str(asset.get("interchange_reel_name") or "").strip()
+            or str(asset.get("name") or "").strip()
+            or basename(str(asset.get("source_path") or "").strip())
+            or str(asset.get("id") or "").strip()
+        )
+        if token:
+            asset_tokens.append(token)
+    asset_tokens = sorted(set(asset_tokens))
+    payload = {
+        "asset_tokens": asset_tokens,
+        "asset_count": len(assets),
+    }
+    fingerprint = hashlib.sha1(
+        json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()[:12]
+    label_source = media_dir_input or media_dir
+    label = basename(str(label_source).rstrip("/")) if label_source else ""
+    if not label:
+        label = asset_tokens[0] if asset_tokens else "unknown-dataset"
+    return {
+        "fingerprint": fingerprint,
+        "label": label,
+        "asset_count": len(assets),
+        "asset_tokens": asset_tokens,
+    }
 
 
 def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[str, Any]:
@@ -179,6 +229,11 @@ def build_process_benchmark(
     workload_counts = {
         "asset_count": len(project_payload.get("assets", [])),
     }
+    dataset_identity = derive_dataset_identity(
+        project_payload=project_payload,
+        media_dir=str(runtime_configuration.get("media_dir") or ""),
+        media_dir_input=str(runtime_configuration.get("media_dir_input") or ""),
+    )
     for key in WORKLOAD_COUNT_KEYS:
         if key == "asset_count":
             continue
@@ -192,7 +247,7 @@ def build_process_benchmark(
         total_runtime_sec=round(float(total_runtime_sec), 3),
         phase_timings_sec=phase_timings,
         workload_counts=workload_counts,
-        runtime_configuration=runtime_configuration,
+        runtime_configuration={**runtime_configuration, "dataset_identity": dataset_identity},
         artifact_paths=artifact_paths,
     )
 
@@ -205,6 +260,26 @@ def load_previous_benchmark_entry(history_path: str | Path) -> dict[str, Any] | 
     if not lines:
         return None
     return json.loads(lines[-1])
+
+
+def load_previous_matching_benchmark_entry(
+    history_path: str | Path,
+    *,
+    dataset_fingerprint: str,
+    exclude_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    path = Path(history_path)
+    if not path.exists():
+        return None
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for line in reversed(lines):
+        entry = json.loads(line)
+        if exclude_run_id and entry.get("run_id") == exclude_run_id:
+            continue
+        dataset = dict(entry.get("dataset_identity") or {})
+        if dataset.get("fingerprint") == dataset_fingerprint:
+            return entry
+    return None
 
 
 def compare_benchmarks(
@@ -224,8 +299,15 @@ def compare_benchmarks(
     baseline_cfg = baseline_entry.get("runtime_configuration", {})
     current_workload = current.workload_counts
     baseline_workload = baseline_entry.get("workload_counts", {})
+    current_dataset = dict(current_cfg.get("dataset_identity") or {})
+    baseline_dataset = dict(baseline_entry.get("dataset_identity") or {})
 
     differences: list[str] = []
+    if current_dataset.get("fingerprint") != baseline_dataset.get("fingerprint"):
+        differences.append(
+            "dataset changed "
+            f"({baseline_dataset.get('label', 'unknown')} -> {current_dataset.get('label', 'unknown')})"
+        )
     if current_cfg.get("media_dir") != baseline_cfg.get("media_dir"):
         differences.append(
             f"media root changed ({baseline_cfg.get('media_dir', 'unknown')} -> {current_cfg.get('media_dir', 'unknown')})"
@@ -288,6 +370,7 @@ def write_benchmark_artifacts(
             "ai_provider_effective": benchmark.runtime_configuration.get("ai_provider_effective"),
             "ai_mode": benchmark.runtime_configuration.get("ai_mode"),
         },
+        "dataset_identity": dict(benchmark.runtime_configuration.get("dataset_identity") or {}),
         "workload_counts": {
             "asset_count": benchmark.workload_counts.get("asset_count", 0),
             "candidate_segment_count": benchmark.workload_counts.get("candidate_segment_count", 0),
@@ -454,6 +537,28 @@ def build_process_summary_lines(
             f"{analysis_summary.get('semantic_boundary_floor_targeted_count', 0)} floor, "
             f"{analysis_summary.get('semantic_boundary_skipped_count', 0)} skipped"
         )
+        if analysis_summary.get("story_assembly_active", False):
+            lines.append(
+                "Story assembly: "
+                f"{analysis_summary.get('story_assembly_strategy', 'unknown')}, "
+                f"{analysis_summary.get('story_assembly_mode_alternation_count', 0)} mode alternations, "
+                f"{analysis_summary.get('story_assembly_role_count', 0)} roles, "
+                f"{analysis_summary.get('story_assembly_prompt_fit_count', 0)} prompt-fit beats, "
+                f"{analysis_summary.get('story_assembly_tradeoff_count', 0)} tradeoffs"
+            )
+            lines.append(
+                "Story assembly repetition control: "
+                f"{analysis_summary.get('story_assembly_repetition_control_count', 0)} beats"
+            )
+            timeline_items = list((project_payload.get("timeline") or {}).get("items", []) or [])
+            if timeline_items:
+                opener = timeline_items[0]
+                release = timeline_items[-1]
+                lines.append(
+                    "Story assembly anchors: "
+                    f"open on {opener.get('source_reel', 'unknown')} ({opener.get('sequence_role', 'unknown')}), "
+                    f"release on {release.get('source_reel', 'unknown')} ({release.get('sequence_role', 'unknown')})"
+                )
         lines.append(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
         lines.append(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
         lines.append(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")

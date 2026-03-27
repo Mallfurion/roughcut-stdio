@@ -10,7 +10,7 @@ from services.analyzer.app.benchmarking import (
     build_process_benchmark,
     build_process_summary_lines,
     compare_benchmarks,
-    load_previous_benchmark_entry,
+    load_previous_matching_benchmark_entry,
     write_benchmark_artifacts,
     write_process_log,
 )
@@ -46,6 +46,13 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "semantic_boundary_threshold_targeted_count": 1,
                     "semantic_boundary_floor_targeted_count": 0,
                     "semantic_boundary_skipped_count": 0,
+                    "story_assembly_active": True,
+                    "story_assembly_strategy": "sequence-heuristic-v2",
+                    "story_assembly_mode_alternation_count": 2,
+                    "story_assembly_role_count": 3,
+                    "story_assembly_prompt_fit_count": 1,
+                    "story_assembly_tradeoff_count": 1,
+                    "story_assembly_repetition_control_count": 1,
                     "ai_live_segment_count": 0,
                     "ai_cached_segment_count": 1,
                     "ai_fallback_segment_count": 1,
@@ -53,6 +60,13 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "dedup_group_count": 1,
                     "dedup_eliminated_count": 1,
                 }
+            },
+            "timeline": {
+                "items": [
+                    {"source_reel": "A001", "sequence_role": "opener"},
+                    {"source_reel": "A002", "sequence_role": "spoken beat"},
+                    {"source_reel": "A003", "sequence_role": "release"},
+                ]
             },
             "assets": [
                 {
@@ -112,7 +126,14 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                 runtime_configuration=runtime_configuration,
                 artifact_paths=artifact_paths,
             )
-            comparison = compare_benchmarks(current, load_previous_benchmark_entry(benchmark_root / "history.jsonl"))
+            comparison = compare_benchmarks(
+                current,
+                load_previous_matching_benchmark_entry(
+                    benchmark_root / "history.jsonl",
+                    dataset_fingerprint=current.runtime_configuration["dataset_identity"]["fingerprint"],
+                    exclude_run_id="run-002",
+                ),
+            )
             benchmark_path = write_benchmark_artifacts(benchmark=current, benchmark_root=benchmark_root)
             write_process_log(path=artifact_paths["process_log"], benchmark=current)
 
@@ -142,7 +163,65 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
             self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
+            self.assertIn("Story assembly: sequence-heuristic-v2, 2 mode alternations, 3 roles, 1 prompt-fit beats, 1 tradeoffs", "\n".join(summary_lines))
+            self.assertIn("Story assembly anchors: open on A001 (opener), release on A003 (release)", "\n".join(summary_lines))
             self.assertTrue((benchmark_root / "history.jsonl").is_file())
+
+    def test_matching_benchmark_lookup_ignores_other_datasets(self) -> None:
+        payload_one = {
+            "project": {"analysis_summary": {}},
+            "assets": [{"id": "asset-1", "interchange_reel_name": "A001", "source_path": "/tmp/a.mov"}],
+        }
+        payload_two = {
+            "project": {"analysis_summary": {}},
+            "assets": [{"id": "asset-2", "interchange_reel_name": "B001", "source_path": "/tmp/b.mov"}],
+        }
+        runtime_configuration = {
+            "media_dir": "/tmp/media-one",
+            "media_dir_input": "./media-one",
+            "ai_provider_effective": "deterministic",
+            "ai_mode": "fast",
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            benchmark_root = root / "generated" / "benchmarks"
+            artifact_paths = {
+                "project_json": str(root / "generated" / "project.json"),
+                "process_log": str(root / "generated" / "process.log"),
+                "process_summary": str(root / "generated" / "process-summary.txt"),
+                "process_output": str(root / "generated" / "process-output.txt"),
+                "benchmark_json": str(benchmark_root / "run-001" / "benchmark.json"),
+                "benchmark_history": str(benchmark_root / "history.jsonl"),
+                "run_process_output": str(benchmark_root / "run-001" / "process-output.txt"),
+            }
+            benchmark_one = build_process_benchmark(
+                run_id="run-001",
+                started_at="2026-03-26T10:00:00Z",
+                completed_at="2026-03-26T10:00:10Z",
+                total_runtime_sec=10.0,
+                project_payload=payload_one,
+                runtime_configuration=runtime_configuration,
+                artifact_paths=artifact_paths,
+            )
+            benchmark_two = build_process_benchmark(
+                run_id="run-002",
+                started_at="2026-03-26T10:01:00Z",
+                completed_at="2026-03-26T10:01:10Z",
+                total_runtime_sec=12.0,
+                project_payload=payload_two,
+                runtime_configuration={**runtime_configuration, "media_dir": "/tmp/media-two", "media_dir_input": "./media-two"},
+                artifact_paths={**artifact_paths, "benchmark_json": str(benchmark_root / "run-002" / "benchmark.json")},
+            )
+            write_benchmark_artifacts(benchmark=benchmark_one, benchmark_root=benchmark_root)
+            write_benchmark_artifacts(benchmark=benchmark_two, benchmark_root=benchmark_root)
+
+            matched = load_previous_matching_benchmark_entry(
+                benchmark_root / "history.jsonl",
+                dataset_fingerprint=benchmark_two.runtime_configuration["dataset_identity"]["fingerprint"],
+                exclude_run_id="run-002",
+            )
+            self.assertIsNone(matched)
 
     def test_attach_quality_evaluation_updates_benchmark_and_history(self) -> None:
         payload = {
@@ -198,6 +277,17 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "applied_count": 1,
                     "floor_targeted_count": 0,
                 },
+                "timeline_results": {
+                    "passed": True,
+                    "checks": [
+                        {"passed": True},
+                        {"passed": False},
+                    ],
+                    "observed": {
+                        "item_count": 8,
+                        "opener_source_reel": "DJI_0721",
+                    },
+                },
             }
 
             evaluation_path = attach_quality_evaluation(
@@ -221,6 +311,12 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             )
             self.assertEqual(history_entries[-1]["quality_evaluation_summary"]["fixture_set"], "fixture-a")
             self.assertEqual(history_entries[-1]["quality_evaluation_summary"]["semantic_validation"]["validated_count"], 1)
+            self.assertTrue(history_entries[-1]["quality_evaluation_summary"]["timeline"]["passed"])
+            self.assertEqual(history_entries[-1]["quality_evaluation_summary"]["timeline"]["failed_check_count"], 1)
+            self.assertEqual(
+                history_entries[-1]["quality_evaluation_summary"]["timeline"]["observed"]["opener_source_reel"],
+                "DJI_0721",
+            )
 
 
 if __name__ == "__main__":

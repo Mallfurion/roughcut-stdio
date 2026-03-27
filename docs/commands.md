@@ -74,16 +74,19 @@ Generates:
 **Evaluate segmentation quality**:
 
 ```bash
-npm run evaluate:segmentation -- --fixture-set ccl2025_media_light --media-dir /path/to/media
+npm run evaluate:segmentation -- --fixture-set sample_project_baseline --skip-process --project-json fixtures/sample-project.json
+npm run evaluate:segmentation -- --fixture-set sample_project_story --skip-process --project-json fixtures/sample-project.json
 ```
 
-This runs the analyzer for the selected fixture set, evaluates the resulting `generated/project.json` against [fixtures/segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json), writes `generated/segmentation-evaluation-summary.txt`, and attaches the evaluation result to the latest benchmark run.
+This evaluates the selected project JSON against the portable fixture manifest in [fixtures/segmentation-evaluation.json](/Users/florin/Projects/personal/roughcut-stdio/fixtures/segmentation-evaluation.json), writes `generated/segmentation-evaluation-summary.txt`, and attaches the evaluation result to the latest benchmark run only when that run matches the same dataset fingerprint.
 
 To evaluate the current generated output without rerunning `process`:
 
 ```bash
-npm run evaluate:segmentation -- --fixture-set ccl2025_media_light --skip-process
+npm run evaluate:segmentation -- --fixture-set sample_project_baseline --skip-process
 ```
+
+The built-in fixture manifest supports both asset-level and timeline-level expectations, so different fixture sets can focus on either segmentation behavior or rough-cut assembly behavior. Portable repo-owned fixtures live in the default manifest and act as the shared pass/fail contract. Local/private datasets should use a separate custom manifest path via `--manifest`, and their benchmark comparisons are observational rather than universal regressions.
 
 **Export to DaVinci Resolve**:
 

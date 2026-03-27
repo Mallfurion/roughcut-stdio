@@ -1225,7 +1225,12 @@ class AnalysisPipelineTests(unittest.TestCase):
             ),
         ]
 
-        timeline = build_timeline(takes, segments, assets)
+        timeline = build_timeline(
+            takes,
+            segments,
+            assets,
+            story_prompt="Open on the strongest visual city energy, then land the spoken beat, then end on a calm release.",
+        )
 
         self.assertEqual(
             [item.take_recommendation_id for item in timeline.items],
@@ -1234,6 +1239,130 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual([item.sequence_group for item in timeline.items], ["setup", "development", "release"])
         self.assertTrue(any("visual anchor" in reason for reason in timeline.items[0].sequence_rationale))
         self.assertTrue(any("Alternates from visual to speech" in reason for reason in timeline.items[1].sequence_rationale))
+        self.assertIn("prompt_fit", timeline.items[0].sequence_driver_labels)
+        self.assertIn("repetition_control", timeline.items[1].sequence_driver_labels)
+
+    def test_build_timeline_can_trade_small_local_score_for_prompt_fit(self) -> None:
+        assets = [
+            Asset(
+                id="asset-1",
+                name="Speaker",
+                source_path="/tmp/speaker.mov",
+                proxy_path="/tmp/speaker.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=True,
+                interchange_reel_name="A001_C301",
+            ),
+            Asset(
+                id="asset-2",
+                name="City Atmosphere",
+                source_path="/tmp/city.mov",
+                proxy_path="/tmp/city.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C302",
+            ),
+            Asset(
+                id="asset-3",
+                name="Quiet Release",
+                source_path="/tmp/release.mov",
+                proxy_path="/tmp/release.mov",
+                duration_sec=12.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=False,
+                interchange_reel_name="A001_C303",
+            ),
+        ]
+        segments = [
+            CandidateSegment(
+                id="seg-speech",
+                asset_id="asset-1",
+                start_sec=2.0,
+                end_sec=7.5,
+                analysis_mode="speech",
+                transcript_excerpt="The market really begins after this point.",
+                description="Confident spoken line from the middle of the scene.",
+                quality_metrics={"hook_strength": 0.66, "story_alignment": 0.8, "turn_completeness": 0.9},
+            ),
+            CandidateSegment(
+                id="seg-city",
+                asset_id="asset-2",
+                start_sec=0.0,
+                end_sec=5.6,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="City atmosphere with traffic, skyline, and waking street energy.",
+                quality_metrics={"visual_novelty": 0.61, "hook_strength": 0.62, "story_alignment": 0.73, "motion_energy": 0.58},
+            ),
+            CandidateSegment(
+                id="seg-release",
+                asset_id="asset-3",
+                start_sec=1.0,
+                end_sec=6.0,
+                analysis_mode="visual",
+                transcript_excerpt="",
+                description="Calm closing texture with slower movement and softer light.",
+                quality_metrics={"visual_novelty": 0.58, "hook_strength": 0.58, "story_alignment": 0.76, "motion_energy": 0.34},
+            ),
+        ]
+        takes = [
+            TakeRecommendation(
+                id="take-speech",
+                candidate_segment_id="seg-speech",
+                title="Speech",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.31,
+                score_semantic=0.35,
+                score_story=0.18,
+                score_total=0.83,
+            ),
+            TakeRecommendation(
+                id="take-city",
+                candidate_segment_id="seg-city",
+                title="City",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.27,
+                score_semantic=0.27,
+                score_story=0.18,
+                score_total=0.72,
+            ),
+            TakeRecommendation(
+                id="take-release",
+                candidate_segment_id="seg-release",
+                title="Release",
+                is_best_take=True,
+                selection_reason="",
+                score_technical=0.28,
+                score_semantic=0.29,
+                score_story=0.19,
+                score_total=0.69,
+            ),
+        ]
+
+        timeline = build_timeline(
+            takes,
+            segments,
+            assets,
+            story_prompt="Open on city atmosphere and waking street energy, then move into the spoken market moment, and finish calm.",
+        )
+
+        self.assertEqual(
+            [item.take_recommendation_id for item in timeline.items],
+            ["take-city", "take-speech", "take-release"],
+        )
+        self.assertIn("prompt_fit", timeline.items[0].sequence_driver_labels)
+        self.assertIn("preferred_for_prompt_fit", timeline.items[0].sequence_tradeoff_labels)
+        self.assertTrue(any("Matches story prompt cues" in reason for reason in timeline.items[0].sequence_rationale))
 
     def test_timeline_sequence_metadata_round_trips_through_project_data(self) -> None:
         project = ProjectData(
@@ -1266,6 +1395,8 @@ class AnalysisPipelineTests(unittest.TestCase):
                         sequence_role="opener",
                         sequence_score=0.84,
                         sequence_rationale=["Starts on a visual anchor.", "Source A001_C001."],
+                        sequence_driver_labels=["local_strength", "opener_fit"],
+                        sequence_tradeoff_labels=["preferred_for_prompt_fit"],
                     )
                 ],
             ),
@@ -1276,6 +1407,8 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(item.sequence_group, "setup")
         self.assertEqual(item.sequence_role, "opener")
         self.assertEqual(item.sequence_rationale, ["Starts on a visual anchor.", "Source A001_C001."])
+        self.assertEqual(item.sequence_driver_labels, ["local_strength", "opener_fit"])
+        self.assertEqual(item.sequence_tradeoff_labels, ["preferred_for_prompt_fit"])
 
     def test_load_project_enriches_review_fixture_with_mixed_segment_states(self) -> None:
         project = load_project(REVIEW_FIXTURE)
