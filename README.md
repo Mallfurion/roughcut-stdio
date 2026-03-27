@@ -1,4 +1,4 @@
-# Roughcut Stdio
+<h1><img src="docs/images/logo.svg" alt="Roughcut Stdio logo" width="30" /> Roughcut Stdio</h1>
 
 A local-first AI-assisted footage screening and rough-cut tool for video editors.
 
