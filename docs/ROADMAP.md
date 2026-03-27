@@ -22,6 +22,9 @@ This baseline moved the analyzer from finding interesting snippets toward produc
 
 ### 1. Better Evaluation
 
+Proposal:
+- [evaluation-harness-expansion](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/evaluation-harness-expansion/proposal.md)
+
 The current fixture-driven evaluation harness is useful, but still narrow.
 
 Likely next improvements:
@@ -34,6 +37,9 @@ Why it matters:
 - later tuning will get subjective again if quality is not measured broadly enough
 
 ### 2. Stronger Story Assembly
+
+Proposal:
+- [story-assembly-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/story-assembly-improvements/proposal.md)
 
 The current story assembly is a solid first heuristic pass, but it is still mostly rule-based.
 
@@ -48,6 +54,9 @@ Why it matters:
 
 ### 3. Better Speech Understanding
 
+Proposal:
+- [speech-understanding-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/speech-understanding-improvements/proposal.md)
+
 Transcript turns improved speech-heavy footage, but spoken structure is still only partially modeled.
 
 Likely next improvements:
@@ -60,6 +69,9 @@ Why it matters:
 - dialogue and interview footage still exposes the biggest structural weaknesses when speech understanding is too shallow
 
 ### 4. Runtime And Reliability
+
+Proposal:
+- [runtime-reliability-hardening](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/runtime-reliability-hardening/proposal.md)
 
 The analyzer is now more capable, but also more layered.
 
@@ -102,7 +114,14 @@ Why it matters:
 
 ## Current Direction
 
-There is no active chained analyzer follow-up in this area right now. Future work should be proposed from the current shipped baseline. The currently identified product-facing next step is [standalone-desktop-distribution](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-desktop-distribution/proposal.md).
+The current planned analyzer follow-up is now split into four concrete proposals:
+
+1. [evaluation-harness-expansion](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/evaluation-harness-expansion/proposal.md)
+2. [story-assembly-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/story-assembly-improvements/proposal.md)
+3. [speech-understanding-improvements](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/speech-understanding-improvements/proposal.md)
+4. [runtime-reliability-hardening](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/runtime-reliability-hardening/proposal.md)
+
+The currently identified product-facing desktop step remains [standalone-desktop-distribution](/Users/florin/Projects/personal/roughcut-stdio/openspec/changes/standalone-desktop-distribution/proposal.md).
 
 ## Guiding Principle
 
