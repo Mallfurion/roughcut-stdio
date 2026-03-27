@@ -220,6 +220,7 @@ export type AppState = {
   exportPath: string;
   exportBusy: boolean;
   exportMessage: string;
+  timelinePreviewOpen: boolean;
 };
 
 export type ClipView = {

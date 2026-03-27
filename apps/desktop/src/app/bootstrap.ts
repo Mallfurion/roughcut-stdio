@@ -157,6 +157,10 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
       case "toggle-all-clips":
         toggleAllClips();
         return;
+      case "toggle-timeline-preview":
+        appState.timelinePreviewOpen = !appState.timelinePreviewOpen;
+        render();
+        return;
       case "reset-workflow":
         await resetWorkflow();
         return;
@@ -255,6 +259,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
   async function handleProcessCompleted() {
     await refreshProject();
     appState.currentStep = hasGeneratedResults(appState) ? "results" : "process";
+    appState.timelinePreviewOpen = false;
     ensureFirstExpandedClip();
     syncAllClipsExpanded();
     render();
@@ -302,6 +307,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     appState.exportPath = "";
     appState.exportBusy = false;
     appState.exportMessage = "";
+    appState.timelinePreviewOpen = false;
     appState.processLogsExpanded = false;
     clearPersistedMediaDir();
     render();

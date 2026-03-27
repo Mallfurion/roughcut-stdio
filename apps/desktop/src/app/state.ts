@@ -71,6 +71,7 @@ export function createInitialAppState(): AppState {
     exportPath: "",
     exportBusy: false,
     exportMessage: "",
+    timelinePreviewOpen: false,
   };
 }
 

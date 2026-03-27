@@ -43,6 +43,7 @@ export function renderSegmentCard(
     timelineItem?.sequence_role ? `Role ${timelineItem.sequence_role}` : "",
     typeof timelineItem?.sequence_score === "number" ? `Sequence ${formatScore(timelineItem.sequence_score)}` : "",
   ].filter(Boolean);
+  const detailPanels: string[] = [];
   const quietFacts = [
     score > 0 ? `Prefilter ${formatScore(score)}` : "",
     clipScore !== undefined ? `CLIP ${formatScore(clipScore)}` : "",
@@ -53,6 +54,38 @@ export function renderSegmentCard(
     !isDeduplicated && dedupGroupId !== undefined ? `Dedup keeper G${dedupGroupId}` : "",
   ].filter(Boolean);
   const tonalMeta = [ai?.shot_type, ai?.camera_motion, ai?.mood].filter(Boolean);
+
+  if (timelineItem?.sequence_rationale?.length) {
+    detailPanels.push(`
+      <section class="section-provenance">
+        <div class="section-provenance-head">
+          <span class="eyebrow section-provenance-eyebrow">Sequence</span>
+        </div>
+        ${
+          sequenceFacts.length > 0
+            ? `<div class="meta-list section-source-facts">${sequenceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+            : ""
+        }
+        <div class="section-provenance-list">
+          ${timelineItem.sequence_rationale.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
+        </div>
+      </section>`);
+  }
+
+  if (provenanceFacts.length > 0) {
+    detailPanels.push(`
+      <section class="section-provenance">
+        <div class="section-provenance-head">
+          <span class="eyebrow section-provenance-eyebrow">Provenance</span>
+        </div>
+        <div class="section-provenance-list">
+          ${provenanceFacts.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
+        </div>
+        <div class="meta-list section-source-facts">
+          ${sourceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}
+        </div>
+      </section>`);
+  }
 
   return `
     <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}">
@@ -93,40 +126,10 @@ export function renderSegmentCard(
           : ""
       }
       ${
-        timelineItem?.sequence_rationale?.length
-          ? `
-      <section class="section-provenance">
-        <div class="section-provenance-head">
-          <span class="eyebrow section-provenance-eyebrow">Sequence</span>
-        </div>
-        ${
-          sequenceFacts.length > 0
-            ? `<div class="meta-list section-source-facts">${sequenceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
-            : ""
-        }
-        <div class="section-provenance-list">
-          ${timelineItem.sequence_rationale.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
-        </div>
-      </section>`
+        detailPanels.length > 0
+          ? `<div class="section-detail-grid${detailPanels.length === 1 ? " section-detail-grid--single" : ""}">${detailPanels.join("")}</div>`
           : ""
       }
-      ${
-        provenanceFacts.length > 0
-          ? `
-      <section class="section-provenance">
-        <div class="section-provenance-head">
-          <span class="eyebrow section-provenance-eyebrow">Provenance</span>
-        </div>
-        <div class="section-provenance-list">
-          ${provenanceFacts.map((fact) => `<p class="section-provenance-item">${escapeHtml(fact)}</p>`).join("")}
-        </div>
-        <div class="meta-list section-source-facts">
-          ${sourceFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}
-        </div>
-      </section>`
-          : ""
-      }
-      ${review.analysisPathSummary ? `<p class="muted section-analysis-path">${escapeHtml(review.analysisPathSummary)}</p>` : ""}
       <div class="meta-list section-meta">
         ${tonalMeta.map(renderOptionalMeta).join("")}
         ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}

@@ -1,4 +1,7 @@
-import type { AppState } from "../app/types.ts";
+import { convertFileSrc } from "@tauri-apps/api/core";
+
+import type { AppState, TimelineProject } from "../app/types.ts";
+import { formatSegmentRange } from "../lib/format.ts";
 import { escapeHtml } from "../lib/html.ts";
 import { renderMetric } from "./shared.ts";
 import { resolveClipViews } from "./view-models.ts";
@@ -25,6 +28,8 @@ export function renderResultsStep(appState: AppState) {
   const analysisSummary = project.project.analysis_summary ?? {};
   const vlmAnalyzedCount =
     Number(analysisSummary.ai_live_segment_count ?? 0) + Number(analysisSummary.ai_cached_segment_count ?? 0);
+  const sectionsMetricValue = `${project.candidate_segments.length} (${vlmAnalyzedCount} VLM)`;
+  const timelinePreviewItems = resolveTimelinePreviewItems(project);
 
   return `
     <section class="card view-card">
@@ -34,9 +39,17 @@ export function renderResultsStep(appState: AppState) {
           <h2>View results</h2>
           <p class="muted">Review the selected shots and export the generated timeline.</p>
         </div>
-        <div class="action-row">
+        <div class="action-row results-actions">
           <button data-action="export-timeline" class="button" ${appState.exportBusy ? "disabled" : ""}>
             ${appState.exportBusy ? "Exporting..." : "Export to Davinci Resolve Timeline"}
+          </button>
+          <button
+            data-action="toggle-timeline-preview"
+            class="button secondary"
+            aria-expanded="${appState.timelinePreviewOpen ? "true" : "false"}"
+            aria-controls="timeline-preview-strip"
+          >
+            Preview Timeline
           </button>
         </div>
       </div>
@@ -45,12 +58,17 @@ export function renderResultsStep(appState: AppState) {
         ${escapeHtml(appState.exportMessage || "Export the current generated timeline to an FCPXML file for DaVinci Resolve.")}
       </p>
 
+      ${
+        appState.timelinePreviewOpen
+          ? renderTimelinePreview(timelinePreviewItems)
+          : ""
+      }
+
       <div class="review-summary">
         <div class="review-summary-metrics">
           ${renderMetric("Project", project.project.name)}
           ${renderMetric("Clips", String(clipViews.length))}
-          ${renderMetric("Sections", String(project.candidate_segments.length))}
-          ${renderMetric("VLM analyzed", String(vlmAnalyzedCount))}
+          ${renderMetric("Sections", sectionsMetricValue)}
         </div>
         <button
           data-action="toggle-all-clips"
@@ -64,10 +82,6 @@ export function renderResultsStep(appState: AppState) {
         </button>
       </div>
 
-      ${renderRuntimeReliabilitySummary(analysisSummary)}
-
-      <p class="muted">${escapeHtml(project.timeline.story_summary || "The rough timeline is ready for review.")}</p>
-
       <div class="clip-grid">
         ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds)).join("")}
       </div>
@@ -75,44 +89,81 @@ export function renderResultsStep(appState: AppState) {
   `;
 }
 
-function renderRuntimeReliabilitySummary(analysisSummary: Record<string, string | number | boolean | string[]>) {
-  const overallMode = String(analysisSummary.runtime_reliability_mode ?? "").trim();
-  const summary = String(analysisSummary.runtime_reliability_summary ?? "").trim();
-  if (!overallMode && !summary) {
-    return "";
-  }
+type TimelinePreviewItem = {
+  id: string;
+  title: string;
+  durationLabel: string;
+  imageSrc: string;
+};
 
-  const aiMode = String(analysisSummary.ai_runtime_mode ?? "unknown");
-  const transcriptMode = String(analysisSummary.transcript_runtime_mode ?? "unknown");
-  const semanticMode = String(analysisSummary.semantic_boundary_runtime_mode ?? "unknown");
-  const cacheMode = String(analysisSummary.cache_runtime_mode ?? "unknown");
-  const degradedReasons = Array.isArray(analysisSummary.runtime_degraded_reasons)
-    ? analysisSummary.runtime_degraded_reasons.map((value) => String(value)).filter(Boolean)
-    : [];
-  const intentionalSkipReasons = Array.isArray(analysisSummary.runtime_intentional_skip_reasons)
-    ? analysisSummary.runtime_intentional_skip_reasons.map((value) => String(value)).filter(Boolean)
-    : [];
+function resolveTimelinePreviewItems(project: TimelineProject): TimelinePreviewItem[] {
+  const recommendationsById = new Map(project.take_recommendations.map((recommendation) => [recommendation.id, recommendation]));
+  const segmentsById = new Map(project.candidate_segments.map((segment) => [segment.id, segment]));
+  return project.timeline.items.flatMap((item, index) => {
+    const recommendation = recommendationsById.get(item.take_recommendation_id);
+    if (!recommendation) {
+      return [];
+    }
 
+    const segment = segmentsById.get(recommendation.candidate_segment_id);
+    if (!segment) {
+      return [];
+    }
+
+    const previewPath = segment.evidence_bundle?.keyframe_paths[0] || segment.evidence_bundle?.contact_sheet_path || "";
+    const durationSec = item.trim_out_sec > item.trim_in_sec ? item.trim_out_sec - item.trim_in_sec : segment.end_sec - segment.start_sec;
+
+    return [
+      {
+        id: item.id,
+        title: item.label || segment.description || `Shot ${index + 1}`,
+        durationLabel: formatPreviewDuration(durationSec),
+        imageSrc: previewPath ? resolvePreviewImageSrc(previewPath) : "",
+      },
+    ];
+  });
+}
+
+function renderTimelinePreview(items: TimelinePreviewItem[]) {
   return `
-    <div class="review-summary">
-      <div class="review-summary-metrics">
-        ${renderMetric("Runtime", overallMode || "unknown")}
-        ${renderMetric("AI", aiMode)}
-        ${renderMetric("Transcript", transcriptMode)}
-        ${renderMetric("Semantic", semanticMode)}
-        ${renderMetric("Cache", cacheMode)}
+    <section class="timeline-preview" id="timeline-preview-strip">
+      <div class="timeline-preview-head">
+        <span class="eyebrow">Timeline Preview</span>
       </div>
-    </div>
-    ${summary ? `<p class="muted">${escapeHtml(summary)}</p>` : ""}
-    ${
-      degradedReasons.length > 0
-        ? `<p class="muted">Degraded modes: ${escapeHtml(degradedReasons.join("; "))}</p>`
-        : ""
-    }
-    ${
-      intentionalSkipReasons.length > 0
-        ? `<p class="muted">Intentional skips: ${escapeHtml(intentionalSkipReasons.join("; "))}</p>`
-        : ""
-    }
+      ${
+        items.length > 0
+          ? `
+      <div class="timeline-preview-track">
+        ${items
+          .map(
+            (item) => `
+          <article class="timeline-preview-shot">
+            <div class="timeline-preview-frame${item.imageSrc ? "" : " timeline-preview-frame--empty"}">
+              ${
+                item.imageSrc
+                  ? `<img src="${escapeHtml(item.imageSrc)}" alt="${escapeHtml(item.title)}" />`
+                  : `<span>No frame</span>`
+              }
+              <span class="pill timeline-preview-duration">${escapeHtml(item.durationLabel)}</span>
+            </div>
+          </article>`,
+          )
+          .join("")}
+      </div>`
+          : `<p class="muted timeline-preview-empty">No selected timeline shots are available for preview yet.</p>`
+      }
+    </section>
   `;
+}
+
+function resolvePreviewImageSrc(path: string) {
+  if (typeof window === "undefined") {
+    return path;
+  }
+  return convertFileSrc(path);
+}
+
+function formatPreviewDuration(durationSec: number) {
+  const rounded = Math.round(durationSec * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}s` : `${rounded.toFixed(1)}s`;
 }
