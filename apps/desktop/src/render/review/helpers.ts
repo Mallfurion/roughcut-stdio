@@ -82,6 +82,9 @@ export function resolveSegmentImageSrc(evidence?: SegmentEvidence) {
   if (!sourcePath) {
     return "";
   }
+  if (typeof window === "undefined") {
+    return sourcePath;
+  }
   return convertFileSrc(sourcePath);
 }
 

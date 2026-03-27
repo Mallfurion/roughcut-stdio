@@ -2,6 +2,7 @@ export type Step = "choose" | "process" | "results";
 export type AIMode = "fast" | "full";
 export type AIProvider = "deterministic" | "lmstudio" | "mlx-vlm-local";
 export type TranscriptProvider = "auto" | "disabled" | "faster-whisper";
+export type ResultsOrdering = "clip" | "score";
 
 export type ProcessState = {
   running: boolean;
@@ -266,15 +267,20 @@ export type AppState = {
   exportBusy: boolean;
   exportMessage: string;
   timelinePreviewOpen: boolean;
+  resultsOrdering: ResultsOrdering;
+};
+
+export type SegmentView = {
+  asset: Asset;
+  segment: CandidateSegment;
+  recommendation?: TakeRecommendation;
+  timelineItem?: TimelineItem;
+  orderingScore: number;
 };
 
 export type ClipView = {
   asset: Asset;
-  segments: {
-    segment: CandidateSegment;
-    recommendation?: TakeRecommendation;
-    timelineItem?: TimelineItem;
-  }[];
+  segments: SegmentView[];
 };
 
 export type BlockedBadge = {

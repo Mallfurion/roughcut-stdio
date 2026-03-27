@@ -1,10 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { AppState, TimelineProject } from "../app/types.ts";
+import type { AppState, SegmentView, TimelineProject } from "../app/types.ts";
+import { formatScore } from "../lib/format.ts";
 import { escapeHtml } from "../lib/html.ts";
 import { renderMetric } from "./shared.ts";
-import { resolveClipViews } from "./view-models.ts";
+import { resolveClipViews, resolveRankedSegmentViews } from "./view-models.ts";
 import { renderClipCard } from "./review/clip-list.ts";
+import { renderSegmentCard } from "./review/segment-card.ts";
 
 export function renderResultsStep(appState: AppState) {
   const project = appState.project?.project;
@@ -24,11 +26,13 @@ export function renderResultsStep(appState: AppState) {
   }
 
   const clipViews = resolveClipViews(project);
+  const rankedSegmentViews = resolveRankedSegmentViews(project);
   const analysisSummary = project.project.analysis_summary ?? {};
   const vlmAnalyzedCount =
     Number(analysisSummary.ai_live_segment_count ?? 0) + Number(analysisSummary.ai_cached_segment_count ?? 0);
   const sectionsMetricValue = `${project.candidate_segments.length} (${vlmAnalyzedCount} VLM)`;
   const timelinePreviewItems = resolveTimelinePreviewItems(project);
+  const showClipGrouping = appState.resultsOrdering === "clip";
 
   return `
     <section class="card view-card">
@@ -69,6 +73,9 @@ export function renderResultsStep(appState: AppState) {
           ${renderMetric("Clips", String(clipViews.length))}
           ${renderMetric("Sections", sectionsMetricValue)}
         </div>
+        ${
+          showClipGrouping
+            ? `
         <button
           data-action="toggle-all-clips"
           class="icon-button"
@@ -78,12 +85,33 @@ export function renderResultsStep(appState: AppState) {
           <svg viewBox="0 0 24 24" aria-hidden="true">
             ${appState.allClipsExpanded ? '<path d="M19 13H5v-2h14v2Z" />' : '<path d="M4 14h6v6h2v-6h6v-2h-6V6h-2v6H4v2Z" />'}
           </svg>
-        </button>
+        </button>`
+            : ""
+        }
       </div>
 
+      <div class="review-controls">
+        <label class="field field-compact results-order-field">
+          <span>Order</span>
+          <select data-action="set-results-order" aria-label="Choose results ordering">
+            <option value="clip" ${showClipGrouping ? "selected" : ""}>By clip</option>
+            <option value="score" ${showClipGrouping ? "" : "selected"}>By score</option>
+          </select>
+        </label>
+      </div>
+
+      ${
+        showClipGrouping
+          ? `
       <div class="clip-grid">
         ${clipViews.map((view) => renderClipCard(view, appState.expandedClipIds, appState.project?.source === "generated", appState.reviewBusy)).join("")}
-      </div>
+      </div>`
+          : renderRankedSegmentList(
+              rankedSegmentViews,
+              appState.project?.source === "generated",
+              appState.reviewBusy,
+            )
+      }
     </section>
   `;
 }
@@ -152,6 +180,38 @@ function renderTimelinePreview(items: TimelinePreviewItem[]) {
           : `<p class="muted timeline-preview-empty">No selected timeline shots are available for preview yet.</p>`
       }
     </section>
+  `;
+}
+
+function renderRankedSegmentList(views: SegmentView[], allowOverrides: boolean, reviewBusy: boolean) {
+  if (views.length === 0) {
+    return `<p class="muted ranked-segment-empty">No sections are available to rank yet.</p>`;
+  }
+
+  return `
+    <div class="ranked-segment-list">
+      ${views
+        .map((view, index) => {
+          const sourceLabel = `${view.asset.name} · ${view.asset.interchange_reel_name}`;
+          const rankingLabel = view.recommendation
+            ? `Overall ${formatScore(view.orderingScore)}`
+            : `Prefilter ${formatScore(view.orderingScore)}`;
+
+          return `
+            <section class="ranked-segment-row">
+              <div class="ranked-segment-head">
+                <div>
+                  <p class="eyebrow ranked-segment-eyebrow">Rank ${index + 1}</p>
+                  <p class="muted ranked-segment-subtitle">${escapeHtml(sourceLabel)}</p>
+                </div>
+                <span class="pill ranked-segment-score">${escapeHtml(rankingLabel)}</span>
+              </div>
+              ${renderSegmentCard(view, view.asset, { allowOverrides, reviewBusy, sourceLabel })}
+            </section>
+          `;
+        })
+        .join("")}
+    </div>
   `;
 }
 

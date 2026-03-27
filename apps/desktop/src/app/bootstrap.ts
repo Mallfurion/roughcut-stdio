@@ -6,7 +6,7 @@ import {
   hasGeneratedResults,
   persistMediaDir,
 } from "./state.ts";
-import type { AppSettings, TranscriptProvider } from "./types.ts";
+import type { AppSettings, ResultsOrdering, TranscriptProvider } from "./types.ts";
 import { stringifyError } from "../lib/format.ts";
 import { renderAppShell } from "../render/app-shell.ts";
 import { resolveClipViews } from "../render/view-models.ts";
@@ -54,6 +54,12 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
 
     if (target instanceof HTMLSelectElement && target.dataset.action === "set-ai-mode") {
       setAIMode(target.value);
+      render();
+      return;
+    }
+
+    if (target instanceof HTMLSelectElement && target.dataset.action === "set-results-order") {
+      setResultsOrdering(target.value);
       render();
       return;
     }
@@ -363,6 +369,7 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     appState.exportBusy = false;
     appState.exportMessage = "";
     appState.timelinePreviewOpen = false;
+    appState.resultsOrdering = "clip";
     appState.processLogsExpanded = false;
     clearPersistedMediaDir();
     render();
@@ -546,6 +553,14 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
     render();
   }
 
+  function setResultsOrdering(value: string) {
+    appState.resultsOrdering = coerceResultsOrdering(value);
+    if (appState.resultsOrdering === "clip") {
+      ensureFirstExpandedClip();
+      syncAllClipsExpanded();
+    }
+  }
+
   function toggleClip(clipId: string) {
     if (appState.expandedClipIds.includes(clipId)) {
       appState.expandedClipIds = appState.expandedClipIds.filter((value) => value !== clipId);
@@ -688,6 +703,10 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
       [field]: coerceSettingsValue(field, value),
     };
   }
+}
+
+function coerceResultsOrdering(value: string): ResultsOrdering {
+  return value === "score" ? "score" : "clip";
 }
 
 function coerceSettingsValue(field: keyof AppSettings, value: string | boolean) {

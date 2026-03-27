@@ -1,5 +1,5 @@
 import { buildSegmentReviewModel } from "../../review-model.ts";
-import type { Asset, CandidateSegment, TakeRecommendation } from "../../app/types.ts";
+import type { Asset, SegmentView } from "../../app/types.ts";
 import { formatSegmentDuration, formatSegmentRange, formatScore } from "../../lib/format.ts";
 import { escapeHtml } from "../../lib/html.ts";
 import {
@@ -12,9 +12,12 @@ import {
 } from "./helpers.ts";
 
 export function renderSegmentCard(
-  view: { segment: CandidateSegment; recommendation?: TakeRecommendation; timelineItem?: { sequence_group?: string; sequence_role?: string; sequence_score?: number; sequence_rationale?: string[] } },
+  view: SegmentView,
   asset: Asset,
-  options: { allowOverrides: boolean; reviewBusy: boolean } = { allowOverrides: false, reviewBusy: false },
+  options: { allowOverrides: boolean; reviewBusy: boolean; sourceLabel?: string } = {
+    allowOverrides: false,
+    reviewBusy: false,
+  },
 ) {
   const { segment, recommendation, timelineItem } = view;
   const ai = segment.ai_understanding;
@@ -102,6 +105,7 @@ export function renderSegmentCard(
           <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
           <span class="pill section-pill">${escapeHtml(formatSegmentDuration(segment.start_sec, segment.end_sec))}</span>
           <span class="pill section-pill section-outcome-pill section-outcome-pill--${escapeHtml(review.outcome)}">${escapeHtml(review.outcomeLabel)}</span>
+          ${options.sourceLabel ? `<span class="pill section-pill">${escapeHtml(options.sourceLabel)}</span>` : ""}
           ${providerLabel ? `<span class="pill section-pill">${escapeHtml(providerLabel)}</span>` : ""}
           ${blockedBadge ? `<span class="pill section-pill ${blockedBadge.className}">${escapeHtml(blockedBadge.label)}</span>` : ""}
         </div>

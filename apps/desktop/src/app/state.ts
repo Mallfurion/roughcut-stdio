@@ -76,6 +76,7 @@ export function createInitialAppState(): AppState {
     exportBusy: false,
     exportMessage: "",
     timelinePreviewOpen: false,
+    resultsOrdering: "clip",
   };
 }
 

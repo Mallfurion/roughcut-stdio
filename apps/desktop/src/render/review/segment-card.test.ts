@@ -75,6 +75,7 @@ test("renderSegmentCard places sequence and provenance in the detail grid and om
 
   const html = renderSegmentCard(
     {
+      asset,
       segment,
       recommendation: {
         id: "take-1",
@@ -90,6 +91,14 @@ test("renderSegmentCard places sequence and provenance in the detail grid and om
         within_asset_rank: 1,
       },
       timelineItem: {
+        id: "timeline-item-1",
+        take_recommendation_id: "take-1",
+        trim_in_sec: 0,
+        trim_out_sec: 6,
+        label: "Development beat",
+        notes: "",
+        source_asset_path: "/tmp/a.mov",
+        source_reel: "A001",
         sequence_group: "development",
         sequence_role: "visual bridge",
         sequence_score: 0.6,
@@ -98,6 +107,7 @@ test("renderSegmentCard places sequence and provenance in the detail grid and om
           "Adds role variety instead of repeating the same beat type.",
         ],
       },
+      orderingScore: 0.72,
     },
     asset,
   );
@@ -142,6 +152,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
 
   const backupHtml = renderSegmentCard(
     {
+      asset,
       segment,
       recommendation: {
         id: "take-backup",
@@ -154,6 +165,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
         outcome: "backup",
         within_asset_rank: 2,
       },
+      orderingScore: 0.61,
     },
     asset,
     { allowOverrides: true, reviewBusy: false },
@@ -164,6 +176,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
 
   const analyzerBestHtml = renderSegmentCard(
     {
+      asset,
       segment,
       recommendation: {
         id: "take-analyzer-best",
@@ -176,6 +189,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
         outcome: "best",
         within_asset_rank: 1,
       },
+      orderingScore: 0.72,
     },
     asset,
     { allowOverrides: true, reviewBusy: false },
@@ -186,6 +200,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
 
   const overriddenHtml = renderSegmentCard(
     {
+      asset,
       segment,
       recommendation: {
         id: "take-best",
@@ -198,6 +213,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
         outcome: "best",
         within_asset_rank: 2,
       },
+      orderingScore: 0.61,
     },
     asset,
     { allowOverrides: true, reviewBusy: false },
@@ -208,6 +224,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
 
   const clearedHtml = renderSegmentCard(
     {
+      asset,
       segment,
       recommendation: {
         id: "take-cleared",
@@ -221,6 +238,7 @@ test("renderSegmentCard exposes promote and clear override controls with overrid
         outcome: "backup",
         within_asset_rank: 1,
       },
+      orderingScore: 0.72,
     },
     asset,
     { allowOverrides: true, reviewBusy: false },

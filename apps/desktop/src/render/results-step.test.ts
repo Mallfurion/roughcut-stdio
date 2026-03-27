@@ -93,6 +93,9 @@ function buildAppState(): AppState {
     settingsMessage: "",
     mediaSummary: null,
     mediaSummaryError: "",
+    runtimeCheck: null,
+    runtimeBusy: false,
+    runtimeMessage: "",
     process: {
       running: false,
       status: "idle",
@@ -114,6 +117,7 @@ function buildAppState(): AppState {
     exportBusy: false,
     exportMessage: "",
     timelinePreviewOpen: false,
+    resultsOrdering: "clip",
   };
   return appState;
 }
@@ -246,4 +250,44 @@ test("renderResultsStep shows timeline preview frames in timeline order when ena
   assert.match(html, /timeline-preview-duration">4s</);
   assert.doesNotMatch(html, /1\. Opener/);
   assert.doesNotMatch(html, /2\. Bridge/);
+});
+
+test("renderResultsStep switches to a flat score-ranked view when requested", () => {
+  const appState = buildAppState();
+  appState.resultsOrdering = "score";
+  appState.project = buildProject();
+
+  appState.project.project.candidate_segments[0]!.prefilter = {
+    score: 0.7,
+    shortlisted: true,
+    filtered_before_vlm: false,
+    selection_reason: "Scored well",
+  };
+  appState.project.project.candidate_segments[1]!.prefilter = {
+    score: 0.8,
+    shortlisted: true,
+    filtered_before_vlm: false,
+    selection_reason: "Top score",
+  };
+  appState.project.project.candidate_segments[2]!.prefilter = {
+    score: 0.2,
+    shortlisted: true,
+    filtered_before_vlm: false,
+    selection_reason: "Low score",
+  };
+
+  const html = renderResultsStep(appState);
+  const rankOneIndex = html.indexOf("Rank 1");
+  const segmentTwoIndex = html.indexOf("Segment 2");
+  const segmentOneIndex = html.indexOf("Segment 1");
+
+  assert.match(html, /<select data-action="set-results-order"/);
+  assert.match(html, /<option value="score" selected>By score<\/option>/);
+  assert.match(html, /ranked-segment-list/);
+  assert.match(html, /Overall 80/);
+  assert.match(html, /Clip A · A001/);
+  assert.doesNotMatch(html, /data-action="toggle-all-clips"/);
+  assert.ok(rankOneIndex >= 0);
+  assert.ok(segmentTwoIndex > rankOneIndex);
+  assert.ok(segmentOneIndex > segmentTwoIndex);
 });
