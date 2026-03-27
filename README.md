@@ -17,7 +17,7 @@ The goal is to help editors skip raw footage scrubbing and move directly from me
 
 📖 **Read the full vision:** [docs/manifesto.md](docs/manifesto.md)
 
-![Roughcut Stdio desktop app](docs/images/app-160.png)
+![Roughcut Stdio desktop app](docs/images/app-2.png)
 
 ## Quick Start
 
