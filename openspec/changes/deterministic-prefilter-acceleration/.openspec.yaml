@@ -1,0 +1,8 @@
+schema: spec-driven
+created: 2026-03-27
+
+x-roughcut:
+  kind: implementation
+  phase: 6
+  depends_on:
+    - runtime-performance-optimization

@@ -1,6 +1,7 @@
 ## Why
 
 Recent process benchmarks show that repeated runs are acceptably fast once AI cache is warm, but cold runs still spend too much time on avoidable local-runtime overhead. The current analyzer does more semantic validation than the documented budget implies, rebuilds some image evidence unnecessarily, and reports MLX-local runtime cost in a way that makes configured concurrency and actual work harder to reconcile.
+This change deliberately stays focused on later-stage analyzer overhead and runtime-reporting truthfulness. Larger deterministic prefilter throughput work is tracked separately in the chained `deterministic-prefilter-acceleration` follow-up.
 
 ## What Changes
 
@@ -8,6 +9,7 @@ Recent process benchmarks show that repeated runs are acceptably fast once AI ca
 - Reduce per-segment evidence generation cost by reusing prepared evidence where safe and by collapsing avoidable ffmpeg work in the keyframe/contact-sheet path.
 - Make MLX-local runtime behavior match its configured execution semantics more closely, so concurrency controls and benchmark counters reflect real analyzer behavior.
 - Extend benchmark and process reporting so cold-vs-warm AI work, semantic-validation request volume, and effective local-runtime activity are easier to compare.
+- Tighten process-summary and benchmark bookkeeping so the expanded runtime fields do not depend on repeated end-of-run status resolution or avoidable late-stage lookup churn.
 
 ## Capabilities
 

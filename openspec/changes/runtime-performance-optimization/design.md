@@ -3,6 +3,7 @@
 The current analyzer is functionally strong, but recent benchmarks show a large gap between cold and warm runs on the same dataset. The gap is not only model inference. It also reflects semantic validation activating more often than the documented budget suggests, repeated image-evidence preparation for some segments, and benchmark artifacts that do not yet explain all expensive local-runtime work clearly.
 
 This change targets runtime cost without changing the editorial contract. It keeps the analyzer local-first, preserves deterministic fallback, and does not move any Resolve-critical behavior into model-only paths.
+It intentionally focuses on later-stage analyzer cost and truthful runtime reporting before the broader deterministic prefilter acceleration work captured by the chained `deterministic-prefilter-acceleration` follow-up.
 
 ## Goals / Non-Goals
 
@@ -11,12 +12,14 @@ This change targets runtime cost without changing the editorial contract. It kee
 - Make semantic boundary validation budgets real at run scope instead of effectively resetting them per asset.
 - Cut avoidable ffmpeg and evidence-preparation work for shortlisted or semantically validated segments.
 - Make MLX-local execution and benchmark counters explain actual work more faithfully.
+- Keep the touched reporting paths lean so expanded runtime diagnostics do not add avoidable bookkeeping churn.
 
 **Non-Goals:**
 - Changing story-assembly heuristics for editorial quality.
 - Replacing MLX-VLM with a different provider.
 - Solving missing-proxy workflows by generating proxy media inside this change.
 - Expanding desktop UX beyond the diagnostics already exposed through process artifacts.
+- Rewriting the deterministic prefilter front half around batched frame/audio extraction or persistent preprocessing caches; that work belongs to `deterministic-prefilter-acceleration`.
 
 ## Decisions
 
@@ -67,6 +70,17 @@ Rationale:
 Alternatives considered:
 - Keep only aggregate runtime deltas. Rejected because aggregate runtime alone does not explain cold-vs-warm changes or budget behavior.
 
+### 5. Keep reporting cleanup local to the touched runtime paths
+
+As benchmark and process-summary fields expand, the analyzer will avoid repeated end-of-run runtime-status resolution and avoidable late-stage candidate lookups in the same reporting paths. This is not the primary runtime win, but it keeps the new diagnostics from adding unnecessary bookkeeping overhead while the same code is already being touched.
+
+Rationale:
+- The reporting path is already being modified for new counters and configured-vs-effective execution context.
+- Small repeated lookups are not the dominant cold-run cost, but they are cheap to remove while the runtime-reporting slice is open.
+
+Alternatives considered:
+- Ignore the repeated bookkeeping because media decode dominates runtime. Rejected because the touched reporting path can be tightened now without expanding scope into a separate subsystem rewrite.
+
 ## Risks / Trade-offs
 
 - [Run-scoped semantic budgets may change which late-run segments receive validation] -> Preserve explicit skip metadata and benchmark counters so the trade-off is measurable and reviewable.
@@ -79,9 +93,10 @@ Alternatives considered:
 1. Introduce run-scoped semantic-validation budget accounting and preserve over-budget skip metadata.
 2. Tighten evidence reuse/regeneration rules and reduce avoidable keyframe extraction overhead.
 3. Extend benchmark/process reporting with semantic-request volume and configured-vs-effective AI execution context.
-4. Re-run cold and warm benchmark comparisons on the same dataset to validate that the new counters explain the runtime change.
+4. Tighten the touched end-of-run reporting paths so the new counters do not rely on repeated runtime-status resolution or avoidable lookup scans.
+5. Re-run cold and warm benchmark comparisons on the same dataset to validate that the new counters explain the runtime change.
 
 ## Open Questions
 
 - Should MLX-local follow-up work attempt true multi-segment batching once effective execution reporting is in place?
-- Do we want a separate future change for proxy-generation or stronger proxy discovery, since source-only runs still amplify decode cost even after these optimizations?
+- How much of the deterministic front half should the chained `deterministic-prefilter-acceleration` follow-up absorb beyond frame/audio batching and preprocessing-cache reuse?
