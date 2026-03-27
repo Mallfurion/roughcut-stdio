@@ -15,7 +15,7 @@ The pipeline runs in four phases:
 
 Each phase narrows the candidate pool so expensive work only happens on stronger segments.
 
-Generated process summaries and benchmark artifacts also preserve a normalized runtime reliability block so repeated runs on the same dataset can explain capability changes alongside runtime deltas.
+Generated process summaries and benchmark artifacts also preserve a normalized runtime reliability block so repeated runs on the same dataset can explain capability changes alongside runtime deltas. They now also record semantic boundary request counts, AI cache warmth, and configured-versus-effective AI execution context so cold and warm runs are easier to compare honestly.
 
 ## Evaluation Modes
 
@@ -332,6 +332,12 @@ The process step also writes:
 - `generated/benchmarks/<run-id>/benchmark.json`
 - `generated/benchmarks/<run-id>/process-output.txt`
 
+Those benchmark artifacts now keep enough runtime context to answer three common questions directly:
+
+- Was semantic boundary validation actually invoked, or just eligible?
+- Was the run cold, warm, or mixed from the AI cache perspective?
+- Did the configured AI concurrency match the provider's effective execution path?
+
 ## Segmentation Evaluation Workflow
 
 The repository also has a fixture-driven segmentation evaluation workflow layered on top of the normal process run.
@@ -364,7 +370,7 @@ The pipeline filters progressively:
 | --- | --- |
 | Seed-region dedup | overlapping low-cost seed regions are collapsed before scoring |
 | Prefilter shortlist | low-scoring segments do not reach the evidence and VLM stages in `fast` mode |
-| Semantic validation | only ambiguous segments are eligible, and only within runtime limits |
+| Semantic validation | only ambiguous segments are eligible, and the configured budget is consumed across the full run |
 | CLIP gate | weak semantic matches are excluded from VLM targeting when CLIP is enabled |
 | Deduplication | near-duplicate segments are collapsed to one keeper |
 | VLM budget cap | remaining eligible segments can still be excluded by budget limits |

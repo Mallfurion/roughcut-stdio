@@ -6,7 +6,11 @@ from tempfile import TemporaryDirectory
 import unittest
 import unittest.mock
 
-from services.analyzer.app.ai import DeterministicVisionLanguageAnalyzer, load_ai_analysis_config
+from services.analyzer.app.ai import (
+    DeterministicVisionLanguageAnalyzer,
+    build_segment_evidence as ai_build_segment_evidence,
+    load_ai_analysis_config,
+)
 from services.analyzer.app.analysis import (
     FasterWhisperAdapter,
     NoOpTranscriptProvider,
@@ -2708,6 +2712,234 @@ class AnalysisPipelineTests(unittest.TestCase):
         results = [segment.boundary_validation for segment in project.candidate_segments]
         self.assertEqual(sum(1 for result in results if result and result.status == "validated"), 1)
         self.assertEqual(sum(1 for result in results if result and result.skip_reason == "over_budget"), 1)
+
+    def test_semantic_boundary_validation_budget_caps_validation_across_assets(self) -> None:
+        assets = [
+            Asset(
+                id="asset-semantic-budget-a",
+                name="Budgeted Interview A",
+                source_path="/tmp/budget-a.mov",
+                proxy_path="/tmp/budget-a.mov",
+                duration_sec=18.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=True,
+                interchange_reel_name="A001_C123A",
+            ),
+            Asset(
+                id="asset-semantic-budget-b",
+                name="Budgeted Interview B",
+                source_path="/tmp/budget-b.mov",
+                proxy_path="/tmp/budget-b.mov",
+                duration_sec=18.0,
+                fps=24.0,
+                width=1920,
+                height=1080,
+                has_speech=True,
+                interchange_reel_name="A001_C123B",
+            ),
+        ]
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 3.5, "Budgeted beat.")])
+        validate_mock = unittest.mock.Mock(
+            side_effect=lambda **kwargs: {
+                kwargs["tasks"][0][0].id: BoundaryValidationResult(
+                    status="validated",
+                    decision="keep",
+                    reason="Keep it.",
+                    confidence=0.72,
+                    provider="lmstudio",
+                    provider_model="qwen3.5-9b",
+                    original_range_sec=[kwargs["tasks"][0][0].start_sec, kwargs["tasks"][0][0].end_sec],
+                    suggested_range_sec=[kwargs["tasks"][0][0].start_sec, kwargs["tasks"][0][0].end_sec],
+                )
+            }
+        )
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS": "1",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT": "100",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                side_effect=[
+                    [RefinedSegmentCandidate(1.0, 3.5, "duration-rule", 0.41, ["seed-1"], ["peak"], [[1.0, 3.5]])],
+                    [RefinedSegmentCandidate(1.0, 3.5, "duration-rule", 0.4, ["seed-2"], ["peak"], [[1.0, 3.5]])],
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    validate_mock,
+                ):
+                    project = analyze_assets(
+                        project=ProjectMeta(
+                            id="test-project",
+                            name="Test Project",
+                            story_prompt="Build a rough cut",
+                            status="draft",
+                            media_roots=["/tmp"],
+                        ),
+                        assets=assets,
+                        scene_detector=StaticSceneDetector([(0.0, 18.0)]),
+                        transcript_provider=transcript_provider,
+                        segment_analyzer=ExpensiveAnalyzerStub(),
+                    )
+
+        results = [segment.boundary_validation for segment in project.candidate_segments]
+        self.assertEqual(validate_mock.call_count, 1)
+        self.assertEqual(sum(1 for result in results if result and result.status == "validated"), 1)
+        self.assertEqual(sum(1 for result in results if result and result.skip_reason == "over_budget"), 1)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_validated_count"), 1)
+        self.assertEqual(project.project.analysis_summary.get("semantic_boundary_skipped_count"), 1)
+
+    def test_shortlist_reuses_semantic_validation_evidence_when_bounds_do_not_change(self) -> None:
+        asset = Asset(
+            id="asset-semantic-reuse",
+            name="Semantic Reuse",
+            source_path="/tmp/semantic-reuse.mov",
+            proxy_path="/tmp/semantic-reuse.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C126",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.5, "Keep this exact beat.")])
+        build_calls = 0
+
+        def counting_build_segment_evidence(**kwargs):
+            nonlocal build_calls
+            build_calls += 1
+            return ai_build_segment_evidence(**kwargs)
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 4.5, "duration-rule", 0.39, ["seed-1"], ["peak"], [[1.0, 4.5]]),
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    return_value={
+                        "asset-semantic-reuse-segment-01": BoundaryValidationResult(
+                            status="validated",
+                            decision="keep",
+                            reason="Keep it.",
+                            confidence=0.81,
+                            provider="lmstudio",
+                            provider_model="qwen3.5-9b",
+                            original_range_sec=[1.0, 4.5],
+                            suggested_range_sec=[1.0, 4.5],
+                        )
+                    },
+                ):
+                    with unittest.mock.patch(
+                        "services.analyzer.app.analysis.build_segment_evidence",
+                        side_effect=counting_build_segment_evidence,
+                    ):
+                        project = analyze_assets(
+                            project=ProjectMeta(
+                                id="test-project",
+                                name="Test Project",
+                                story_prompt="Build a rough cut",
+                                status="draft",
+                                media_roots=["/tmp"],
+                            ),
+                            assets=[asset],
+                            scene_detector=StaticSceneDetector([(0.0, 10.0)]),
+                            transcript_provider=transcript_provider,
+                            segment_analyzer=ExpensiveAnalyzerStub(),
+                        )
+
+        self.assertEqual(build_calls, 1)
+        self.assertIsNotNone(project.candidate_segments[0].evidence_bundle)
+
+    def test_shortlist_rebuilds_evidence_when_semantic_validation_changes_bounds(self) -> None:
+        asset = Asset(
+            id="asset-semantic-rebuild",
+            name="Semantic Rebuild",
+            source_path="/tmp/semantic-rebuild.mov",
+            proxy_path="/tmp/semantic-rebuild.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C127",
+        )
+        transcript_provider = TimedTranscriptProvider([TranscriptSpan(1.0, 4.5, "Trim into the stronger answer.")])
+        build_calls = 0
+
+        def counting_build_segment_evidence(**kwargs):
+            nonlocal build_calls
+            build_calls += 1
+            return ai_build_segment_evidence(**kwargs)
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_SEGMENT_BOUNDARY_REFINEMENT": "true",
+                "TIMELINE_SEGMENT_SEMANTIC_VALIDATION": "true",
+            },
+            clear=False,
+        ):
+            with unittest.mock.patch(
+                "services.analyzer.app.analysis.refine_seed_regions",
+                return_value=[
+                    RefinedSegmentCandidate(1.0, 4.5, "duration-rule", 0.39, ["seed-1"], ["peak"], [[1.0, 4.5]]),
+                ],
+            ):
+                with unittest.mock.patch(
+                    "services.analyzer.app.analysis.validate_segment_boundaries",
+                    return_value={
+                        "asset-semantic-rebuild-segment-01": BoundaryValidationResult(
+                            status="validated",
+                            decision="trim",
+                            reason="Trim the loose lead-in.",
+                            confidence=0.86,
+                            provider="lmstudio",
+                            provider_model="qwen3.5-9b",
+                            original_range_sec=[1.0, 4.5],
+                            suggested_range_sec=[1.4, 4.1],
+                        )
+                    },
+                ):
+                    with unittest.mock.patch(
+                        "services.analyzer.app.analysis.build_segment_evidence",
+                        side_effect=counting_build_segment_evidence,
+                    ):
+                        project = analyze_assets(
+                            project=ProjectMeta(
+                                id="test-project",
+                                name="Test Project",
+                                story_prompt="Build a rough cut",
+                                status="draft",
+                                media_roots=["/tmp"],
+                            ),
+                            assets=[asset],
+                            scene_detector=StaticSceneDetector([(0.0, 10.0)]),
+                            transcript_provider=transcript_provider,
+                            segment_analyzer=ExpensiveAnalyzerStub(),
+                        )
+
+        self.assertEqual(build_calls, 2)
+        self.assertAlmostEqual(project.candidate_segments[0].start_sec, 1.4, places=3)
+        self.assertAlmostEqual(project.candidate_segments[0].end_sec, 4.1, places=3)
 
     def test_semantic_boundary_validation_trims_ambiguous_speech_segment(self) -> None:
         asset = Asset(

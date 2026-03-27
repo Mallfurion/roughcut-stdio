@@ -72,6 +72,8 @@ If `TIMELINE_AI_CACHE=true`, transcript spans are cached between process runs un
 
 Semantic boundary validation no longer depends only on the primary threshold. If no segment clears `TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD`, the analyzer can still activate the pass for a very small number of floor-qualified segments using `TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD` and `TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS`. This keeps the pass measurable without turning it into a blanket second stage on every segment.
 
+When semantic validation is enabled, both `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` and `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` are consumed across the entire process run, not separately for each asset. Segments that stay eligible after the run budget is exhausted keep explicit persisted `over_budget` skip metadata instead of silently receiving a refreshed per-asset allowance.
+
 See [.env.example](../.env.example) for the baseline project settings. The analyzer source in [ai.py](../services/analyzer/app/ai.py) is the source of truth for advanced runtime defaults.
 
 ---

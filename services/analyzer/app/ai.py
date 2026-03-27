@@ -1313,6 +1313,7 @@ def build_segment_evidence(
         context_window_start_sec=round(context_window_start_sec, 3),
         context_window_end_sec=round(context_window_end_sec, 3),
         metrics_snapshot=dict(segment.quality_metrics),
+        keyframe_max_width=keyframe_max_width if extract_keyframes else 0,
         transcript_turn_count=(
             len(segment.prefilter.transcript_turn_ids)
             if segment.prefilter is not None
@@ -1338,6 +1339,53 @@ def build_segment_evidence(
             segment.prefilter.speech_structure_confidence,
             4,
         ) if segment.prefilter is not None else 0.0,
+    )
+
+
+def segment_evidence_matches(
+    *,
+    evidence: SegmentEvidence | None,
+    asset: Asset,
+    segment: CandidateSegment,
+    asset_segments: list[CandidateSegment],
+    segment_index: int,
+    story_prompt: str,
+    extract_keyframes: bool,
+    transcript_status: str = "",
+    speech_mode_source: str = "",
+    max_keyframes_per_segment: int = 3,
+    keyframe_max_width: int = 640,
+) -> bool:
+    if evidence is None:
+        return False
+
+    expected_timestamps = [
+        round(timestamp, 3)
+        for timestamp in keyframe_timestamps_for_segment(
+            segment.start_sec,
+            segment.end_sec,
+            target_count=max_keyframes_per_segment,
+        )
+    ]
+    expected_context_window_start_sec = segment.start_sec
+    expected_context_window_end_sec = segment.end_sec
+    if segment_index > 0:
+        expected_context_window_start_sec = asset_segments[segment_index - 1].start_sec
+    if segment_index < len(asset_segments) - 1:
+        expected_context_window_end_sec = asset_segments[segment_index + 1].end_sec
+
+    return (
+        evidence.media_path == asset.proxy_path
+        and evidence.transcript_excerpt == segment.transcript_excerpt
+        and evidence.story_prompt == story_prompt
+        and evidence.analysis_mode == segment.analysis_mode
+        and evidence.transcript_status == transcript_status
+        and evidence.speech_mode_source == speech_mode_source
+        and evidence.keyframe_timestamps_sec == expected_timestamps
+        and evidence.context_window_start_sec == round(expected_context_window_start_sec, 3)
+        and evidence.context_window_end_sec == round(expected_context_window_end_sec, 3)
+        and evidence.metrics_snapshot == dict(segment.quality_metrics)
+        and evidence.keyframe_max_width == (keyframe_max_width if extract_keyframes else 0)
     )
 
 
@@ -1367,19 +1415,89 @@ def extract_segment_keyframes(
     segment_dir = Path(artifacts_root) / "keyframes" / asset.id
     segment_dir.mkdir(parents=True, exist_ok=True)
 
-    extracted: list[str] = []
-    for index, timestamp in enumerate(timestamps, start=1):
-        target = segment_dir / f"{segment.id}-k{index:02d}.jpg"
-        process = subprocess.run(
+    targets = [
+        segment_dir / f"{segment.id}-k{index:02d}.jpg"
+        for index, _timestamp in enumerate(timestamps, start=1)
+    ]
+    extracted_by_target: dict[Path, str] = {}
+
+    if len(targets) > 1:
+        for path in _extract_segment_keyframes_batched(
+            media_path=asset.proxy_path,
+            timestamps=timestamps,
+            targets=targets,
+            max_width=max_width,
+        ):
+            extracted_by_target[Path(path)] = path
+
+    for timestamp, target in zip(timestamps, targets):
+        if target in extracted_by_target:
+            continue
+        extracted = _extract_single_segment_keyframe(
+            media_path=asset.proxy_path,
+            timestamp=timestamp,
+            target=target,
+            max_width=max_width,
+        )
+        if extracted:
+            extracted_by_target[target] = extracted
+
+    return [
+        extracted_by_target[target]
+        for target in targets
+        if target in extracted_by_target
+    ]
+
+
+def _extract_single_segment_keyframe(
+    *,
+    media_path: str,
+    timestamp: float,
+    target: Path,
+    max_width: int,
+) -> str:
+    process = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{timestamp:.3f}",
+            "-i",
+            media_path,
+            "-vf",
+            f"scale=min({max_width}\\,iw):-2",
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            str(target),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode == 0 and target.exists():
+        return str(target)
+    return ""
+
+
+def _extract_segment_keyframes_batched(
+    *,
+    media_path: str,
+    timestamps: list[float],
+    targets: list[Path],
+    max_width: int,
+) -> list[str]:
+    command = ["ffmpeg", "-y", "-v", "error"]
+    for timestamp in timestamps:
+        command.extend(["-ss", f"{timestamp:.3f}", "-i", media_path])
+    for index, target in enumerate(targets):
+        command.extend(
             [
-                "ffmpeg",
-                "-y",
-                "-v",
-                "error",
-                "-ss",
-                f"{timestamp:.3f}",
-                "-i",
-                asset.proxy_path,
+                "-map",
+                f"{index}:v:0",
                 "-vf",
                 f"scale=min({max_width}\\,iw):-2",
                 "-frames:v",
@@ -1387,15 +1505,18 @@ def extract_segment_keyframes(
                 "-q:v",
                 "4",
                 str(target),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+            ]
         )
-        if process.returncode == 0 and target.exists():
-            extracted.append(str(target))
 
-    return extracted
+    process = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode != 0:
+        return []
+    return [str(target) for target in targets if target.exists()]
 
 
 def create_segment_contact_sheet(

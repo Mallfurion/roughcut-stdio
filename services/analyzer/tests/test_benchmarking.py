@@ -47,6 +47,7 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "semantic_boundary_validated_count": 1,
                     "semantic_boundary_applied_count": 1,
                     "semantic_boundary_noop_count": 0,
+                    "semantic_boundary_request_count": 1,
                     "semantic_boundary_threshold_targeted_count": 1,
                     "semantic_boundary_floor_targeted_count": 0,
                     "semantic_boundary_skipped_count": 0,
@@ -100,6 +101,9 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             "media_dir_input": "./media-one",
             "ai_provider_effective": "deterministic",
             "ai_mode": "fast",
+            "ai_concurrency": 4,
+            "ai_effective_concurrency": 0,
+            "ai_execution_context": "deterministic-fallback",
         }
 
         with TemporaryDirectory() as temp_dir:
@@ -177,6 +181,8 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertEqual(comparison.baseline_run_id, "run-001")
             self.assertIn("Benchmark comparison: vs run-001", "\n".join(summary_lines))
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
+            self.assertIn("AI execution: configured concurrency 4, effective concurrency 0, deterministic-fallback", "\n".join(summary_lines))
+            self.assertIn("AI cache activity: warm-cache (0 live, 1 cached, 0 live requests)", "\n".join(summary_lines))
             self.assertIn("Runtime reliability:", "\n".join(summary_lines))
             self.assertIn("Overall mode: degraded", "\n".join(summary_lines))
             self.assertIn("Runtime degraded modes: transcript fallback on 1 asset; deterministic AI fallback on 1 segment", "\n".join(summary_lines))
@@ -185,10 +191,18 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
             self.assertIn("Speech structure: 2 structured beats, 1 question/answer, 1 monologue", "\n".join(summary_lines))
             self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
+            self.assertIn("Semantic boundary requests: 1", "\n".join(summary_lines))
             self.assertIn("Story assembly: sequence-heuristic-v2, 2 mode alternations, 3 roles, 1 prompt-fit beats, 1 tradeoffs", "\n".join(summary_lines))
             self.assertIn("Story assembly anchors: open on A001 (opener), release on A003 (release)", "\n".join(summary_lines))
             self.assertEqual(benchmark_payload["runtime_stability"]["overall_mode"], "degraded")
             self.assertTrue((benchmark_root / "history.jsonl").is_file())
+            history_entries = [
+                json.loads(line)
+                for line in (benchmark_root / "history.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(history_entries[-1]["runtime_configuration"]["ai_effective_concurrency"], 0)
+            self.assertEqual(history_entries[-1]["workload_counts"]["semantic_boundary_request_count"], 1)
 
     def test_matching_benchmark_lookup_ignores_other_datasets(self) -> None:
         payload_one = {
@@ -402,6 +416,82 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                 history_entries[-1]["runtime_stability"]["intentional_skip_reasons"],
                 ["transcript targeting kept cost bounded: 2 transcript-target skips"],
             )
+
+    def test_benchmark_comparison_reports_cache_warmth_and_execution_context(self) -> None:
+        baseline = {
+            "run_id": "run-001",
+            "total_runtime_sec": 30.0,
+            "runtime_configuration": {
+                "media_dir": "/tmp/media-one",
+                "ai_provider_effective": "lmstudio",
+                "ai_mode": "fast",
+                "ai_effective_concurrency": 2,
+                "ai_execution_context": "configured-parallel-requests",
+            },
+            "runtime_stability": {
+                "overall_mode": "active",
+                "component_modes": {
+                    "ai": "active",
+                    "transcript": "active",
+                    "semantic_boundary": "active",
+                    "cache": "inactive",
+                },
+            },
+            "dataset_identity": {"fingerprint": "dataset-1", "label": "media-one"},
+            "workload_counts": {
+                "asset_count": 1,
+                "candidate_segment_count": 2,
+                "semantic_boundary_request_count": 2,
+                "ai_live_segment_count": 2,
+                "ai_cached_segment_count": 0,
+            },
+        }
+        current = build_process_benchmark(
+            run_id="run-002",
+            started_at="2026-03-26T10:02:00Z",
+            completed_at="2026-03-26T10:02:20Z",
+            total_runtime_sec=20.0,
+            project_payload={
+                "project": {
+                    "analysis_summary": {
+                        "candidate_segment_count": 2,
+                        "semantic_boundary_request_count": 1,
+                        "ai_live_segment_count": 0,
+                        "ai_cached_segment_count": 2,
+                        "ai_runtime_mode": "active",
+                        "transcript_runtime_mode": "active",
+                        "semantic_boundary_runtime_mode": "active",
+                        "cache_runtime_mode": "active",
+                        "runtime_reliability_mode": "active",
+                        "runtime_ready": True,
+                        "runtime_reliability_summary": "AI active, transcript active, semantic active, cache active",
+                    }
+                },
+                "assets": [{"id": "asset-1", "interchange_reel_name": "A001", "source_path": "/tmp/a.mov"}],
+            },
+            runtime_configuration={
+                "media_dir": "/tmp/media-one",
+                "media_dir_input": "./media-one",
+                "ai_provider_effective": "mlx-vlm-local",
+                "ai_mode": "fast",
+                "ai_concurrency": 4,
+                "ai_effective_concurrency": 1,
+                "ai_execution_context": "serialized-local-model",
+            },
+            artifact_paths={"benchmark_json": "/tmp/benchmark.json"},
+        )
+
+        comparison = compare_benchmarks(current, baseline)
+
+        self.assertIsNotNone(comparison)
+        assert comparison is not None
+        self.assertIn("effective AI concurrency changed (2 -> 1)", comparison.context_differences)
+        self.assertIn(
+            "AI execution context changed (configured-parallel-requests -> serialized-local-model)",
+            comparison.context_differences,
+        )
+        self.assertIn("semantic boundary request volume changed (2 -> 1)", comparison.context_differences)
+        self.assertIn("AI cache activity changed (cold-cache -> warm-cache)", comparison.context_differences)
 
 
 if __name__ == "__main__":

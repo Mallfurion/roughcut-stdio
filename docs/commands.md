@@ -80,7 +80,7 @@ Generates:
 - `generated/process-output.txt` with the exact terminal-facing output from the latest run
 - `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
-The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset.
+The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset. They also record semantic boundary request volume, AI cache activity, and configured-versus-effective AI execution context, so warm-cache speedups and MLX-local serialization are visible in the same benchmark history.
 
 **Evaluate segmentation quality**:
 

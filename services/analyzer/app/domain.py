@@ -45,6 +45,7 @@ class SegmentEvidence:
     context_window_start_sec: float
     context_window_end_sec: float
     metrics_snapshot: dict[str, float]
+    keyframe_max_width: int = 0
     transcript_status: str = ""
     speech_mode_source: str = ""
     contact_sheet_path: str = ""

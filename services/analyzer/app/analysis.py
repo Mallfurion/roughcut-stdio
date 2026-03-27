@@ -23,6 +23,7 @@ from .ai import (
     default_vision_language_analyzer,
     get_ai_runtime_stats,
     load_ai_analysis_config,
+    segment_evidence_matches,
     validate_segment_boundaries,
 )
 
@@ -57,6 +58,8 @@ from .domain import (
 )
 from .media import FFprobeRunner, build_assets_from_matches, discover_media_files, match_media_files
 from .prefilter import (
+    AudioSignal,
+    FrameSignal,
     SeedRegion,
     aggregate_segment_prefilter,
     build_prefilter_seed_regions,
@@ -136,6 +139,21 @@ class TranscriptTurn:
     end_sec: float
     text: str
     span_count: int
+
+
+@dataclass(slots=True)
+class AssetAnalysisContext:
+    asset: Asset
+    asset_segments: list[CandidateSegment]
+    base_ranges: list[tuple[float, float]]
+    prefilter_signals: list[FrameSignal]
+    audio_signals: list[AudioSignal]
+    transcript_spans: list[TranscriptSpan]
+    transcript_turns: list[TranscriptTurn]
+    transcript_lookup_enabled: bool
+    ambiguity_by_id: dict[str, float]
+    semantic_target_order: list[str]
+    semantic_target_reasons: dict[str, str]
 
 
 @dataclass(slots=True)
@@ -1862,16 +1880,14 @@ def select_semantic_boundary_validation_targets(
     ambiguity_threshold: float,
     floor_threshold: float,
     min_targets: int,
-    budget_pct: int,
-    max_segments: int,
-) -> tuple[dict[str, float], set[str], dict[str, str]]:
+) -> tuple[dict[str, float], list[str], dict[str, str]]:
     ambiguity_by_id = {
         segment.id: semantic_boundary_ambiguity_score(segment)
         for segment in segments
     }
     target_reasons: dict[str, str] = {}
     if not enabled or not analyzer_available:
-        return ambiguity_by_id, set(), target_reasons
+        return ambiguity_by_id, [], target_reasons
 
     eligible = [
         segment
@@ -1906,16 +1922,24 @@ def select_semantic_boundary_validation_targets(
     else:
         target_reasons = {segment.id: "threshold" for segment in ordered}
 
-    if not ordered or max_segments <= 0 or budget_pct <= 0:
-        return ambiguity_by_id, set(), {}
+    return ambiguity_by_id, [segment.id for segment in ordered], target_reasons
 
-    pct_limit = max(1, int(len(ordered) * budget_pct / 100.0))
-    effective_limit = min(len(ordered), max_segments, pct_limit)
-    selected = ordered[:effective_limit]
-    return ambiguity_by_id, {segment.id for segment in selected}, {
-        segment.id: target_reasons.get(segment.id, "threshold")
-        for segment in selected
-    }
+
+def run_scoped_semantic_validation_budget(
+    *,
+    target_orders: list[list[str]],
+    budget_pct: int,
+    max_segments: int,
+) -> int:
+    if max_segments <= 0 or budget_pct <= 0:
+        return 0
+
+    total_candidates = sum(len(order) for order in target_orders)
+    if total_candidates <= 0:
+        return 0
+
+    pct_limit = max(1, int(total_candidates * budget_pct / 100.0))
+    return min(total_candidates, max_segments, pct_limit)
 
 
 def initial_boundary_validation_result(
@@ -2328,6 +2352,7 @@ def analyze_assets(
         analysis_config=ai_config,
     )
     deterministic_analyzer = DeterministicVisionLanguageAnalyzer()
+    semantic_available = semantic_validation_is_available(analyzer)
     candidate_segments: list[CandidateSegment] = []
     total_prefilter_samples = 0
     total_prefilter_shortlisted = 0
@@ -2344,6 +2369,7 @@ def analyze_assets(
     total_clip_scored = 0
     total_clip_gated = 0
     total_semantic_boundary_eligible = 0
+    total_semantic_boundary_request_count = 0
     total_semantic_boundary_validated = 0
     total_semantic_boundary_skipped = 0
     total_semantic_boundary_fallback = 0
@@ -2357,6 +2383,7 @@ def analyze_assets(
     total_dedup_eliminated_count = 0  # Accumulate deduplicated segment count
 
     total_assets = len(assets)
+    analysis_contexts: list[AssetAnalysisContext] = []
     all_frame_signals_by_id: dict[str, list] = {}  # Accumulate frame signals for histogram dedup fallback
     per_asset_analysis_started_at = time.monotonic()
 
@@ -2369,9 +2396,9 @@ def analyze_assets(
         )
         status_callback(transcript_status.detail)
 
-    for asset_index, asset in enumerate(assets, start=1):
+    for asset in assets:
         if status_callback is not None:
-            status_callback(f"[{asset_index}/{total_assets}] Analyzing: {asset.name}")
+            status_callback(f"[{len(analysis_contexts) + 1}/{total_assets}] Analyzing: {asset.name}")
 
         base_ranges = detector.detect(asset) if asset.duration_sec > 0 else [(0.0, 4.0)]
         if not base_ranges:
@@ -2541,22 +2568,59 @@ def analyze_assets(
             if segment.analysis_mode == "speech" and not segment.transcript_excerpt.strip()
         )
 
-        semantic_available = semantic_validation_is_available(analyzer)
-        ambiguity_by_id, semantic_target_ids, semantic_target_reasons = select_semantic_boundary_validation_targets(
+        ambiguity_by_id, semantic_target_order, semantic_target_reasons = select_semantic_boundary_validation_targets(
             segments=asset_segments,
             enabled=ai_config.semantic_boundary_validation_enabled and ai_config.boundary_refinement_enabled,
             analyzer_available=semantic_available,
             ambiguity_threshold=ai_config.semantic_boundary_ambiguity_threshold,
             floor_threshold=ai_config.semantic_boundary_floor_threshold,
             min_targets=ai_config.semantic_boundary_min_targets,
-            budget_pct=ai_config.semantic_boundary_validation_budget_pct,
-            max_segments=ai_config.semantic_boundary_validation_max_segments,
         )
         total_semantic_boundary_eligible += sum(
             1
             for segment in asset_segments
             if ambiguity_by_id.get(segment.id, 0.0) >= ai_config.semantic_boundary_ambiguity_threshold
         )
+
+        analysis_contexts.append(
+            AssetAnalysisContext(
+                asset=asset,
+                asset_segments=asset_segments,
+                base_ranges=base_ranges,
+                prefilter_signals=prefilter_signals,
+                audio_signals=audio_signals,
+                transcript_spans=transcript_spans,
+                transcript_turns=transcript_turns,
+                transcript_lookup_enabled=transcript_lookup_enabled,
+                ambiguity_by_id=ambiguity_by_id,
+                semantic_target_order=semantic_target_order,
+                semantic_target_reasons=semantic_target_reasons,
+            )
+        )
+
+    remaining_semantic_budget = run_scoped_semantic_validation_budget(
+        target_orders=[context.semantic_target_order for context in analysis_contexts],
+        budget_pct=ai_config.semantic_boundary_validation_budget_pct,
+        max_segments=ai_config.semantic_boundary_validation_max_segments,
+    )
+
+    for asset_index, context in enumerate(analysis_contexts, start=1):
+        asset = context.asset
+        asset_segments = context.asset_segments
+        base_ranges = context.base_ranges
+        prefilter_signals = context.prefilter_signals
+        audio_signals = context.audio_signals
+        transcript_spans = context.transcript_spans
+        transcript_turns = context.transcript_turns
+        transcript_lookup_enabled = context.transcript_lookup_enabled
+        ambiguity_by_id = context.ambiguity_by_id
+        semantic_target_ids = set(context.semantic_target_order[:remaining_semantic_budget])
+        semantic_target_reasons = {
+            segment_id: context.semantic_target_reasons.get(segment_id, "threshold")
+            for segment_id in semantic_target_ids
+        }
+        remaining_semantic_budget = max(0, remaining_semantic_budget - len(semantic_target_ids))
+
         for segment in asset_segments:
             segment.boundary_validation = initial_boundary_validation_result(
                 segment=segment,
@@ -2601,6 +2665,7 @@ def analyze_assets(
                 segment.evidence_bundle = evidence
                 semantic_tasks.append((segment, evidence, project.story_prompt))
 
+            total_semantic_boundary_request_count += len(semantic_tasks)
             semantic_results = validate_segment_boundaries(
                 analyzer=analyzer,
                 asset=asset,
@@ -2719,24 +2784,41 @@ def analyze_assets(
 
             evidence = None
             if segment.id in prefilter_shortlist_ids:
-                evidence = build_segment_evidence(
+                segment_transcript_state = segment_transcript_status(
+                    asset=asset,
+                    segment=segment,
+                    runtime_status=transcript_status,
+                    transcript_lookup_attempted=transcript_lookup_enabled,
+                )
+                segment_speech_source = segment_speech_mode_source(asset=asset, segment=segment)
+                if segment_evidence_matches(
+                    evidence=segment.evidence_bundle,
                     asset=asset,
                     segment=segment,
                     asset_segments=asset_segments,
                     segment_index=index,
                     story_prompt=project.story_prompt,
-                    artifacts_root=artifacts_root,
                     extract_keyframes=analyzer.requires_keyframes,
-                    transcript_status=segment_transcript_status(
-                        asset=asset,
-                        segment=segment,
-                        runtime_status=transcript_status,
-                        transcript_lookup_attempted=transcript_lookup_enabled,
-                    ),
-                    speech_mode_source=segment_speech_mode_source(asset=asset, segment=segment),
+                    transcript_status=segment_transcript_state,
+                    speech_mode_source=segment_speech_source,
                     max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
                     keyframe_max_width=ai_config.keyframe_max_width,
-                )
+                ):
+                    evidence = segment.evidence_bundle
+                else:
+                    evidence = build_segment_evidence(
+                        asset=asset,
+                        segment=segment,
+                        asset_segments=asset_segments,
+                        segment_index=index,
+                        story_prompt=project.story_prompt,
+                        artifacts_root=artifacts_root,
+                        extract_keyframes=analyzer.requires_keyframes,
+                        transcript_status=segment_transcript_state,
+                        speech_mode_source=segment_speech_source,
+                        max_keyframes_per_segment=ai_config.max_keyframes_per_segment,
+                        keyframe_max_width=ai_config.keyframe_max_width,
+                    )
                 segment.evidence_bundle = evidence
 
         # CLIP scoring pass (if enabled and available)
@@ -2904,6 +2986,7 @@ def analyze_assets(
         story_prompt=project.story_prompt,
     )
     timeline_assembly_duration = time.monotonic() - timeline_assembly_started_at
+    final_transcript_status = transcript_runtime_status(transcriber)
 
     project.analysis_summary = {
         "asset_count": total_assets,
@@ -2921,23 +3004,24 @@ def analyze_assets(
         "transcript_skipped_asset_count": total_transcript_skipped_assets,
         "transcript_probed_asset_count": total_transcript_probed_assets,
         "transcript_probe_rejected_asset_count": total_transcript_probe_rejected_assets,
-        "transcript_provider_configured": transcript_status.configured_provider,
-        "transcript_provider_effective": transcript_status.effective_provider,
-        "transcript_status": transcript_status.status,
-        "transcript_available": transcript_status.available,
-        "transcript_enabled": transcript_status.enabled,
-        "transcript_model_size": transcript_status.model_size,
-        "transcript_detail": transcript_status.detail,
-        "transcribed_asset_count": transcript_runtime_status(transcriber).transcribed_asset_count,
-        "transcript_failed_asset_count": transcript_runtime_status(transcriber).failed_asset_count,
-        "transcript_cached_asset_count": transcript_runtime_status(transcriber).cached_asset_count,
-        "transcript_runtime_probed_asset_count": transcript_runtime_status(transcriber).probed_asset_count,
-        "transcript_runtime_probe_rejected_asset_count": transcript_runtime_status(transcriber).probe_rejected_asset_count,
+        "transcript_provider_configured": final_transcript_status.configured_provider,
+        "transcript_provider_effective": final_transcript_status.effective_provider,
+        "transcript_status": final_transcript_status.status,
+        "transcript_available": final_transcript_status.available,
+        "transcript_enabled": final_transcript_status.enabled,
+        "transcript_model_size": final_transcript_status.model_size,
+        "transcript_detail": final_transcript_status.detail,
+        "transcribed_asset_count": final_transcript_status.transcribed_asset_count,
+        "transcript_failed_asset_count": final_transcript_status.failed_asset_count,
+        "transcript_cached_asset_count": final_transcript_status.cached_asset_count,
+        "transcript_runtime_probed_asset_count": final_transcript_status.probed_asset_count,
+        "transcript_runtime_probe_rejected_asset_count": final_transcript_status.probe_rejected_asset_count,
         "transcript_excerpt_segment_count": total_transcript_excerpt_segments,
         "speech_fallback_segment_count": total_speech_fallback_segments,
         "clip_scored_count": total_clip_scored if (ai_config.clip_enabled and is_clip_available()) else 0,
         "clip_gated_count": total_clip_gated if (ai_config.clip_enabled and is_clip_available()) else 0,
         "semantic_boundary_eligible_count": total_semantic_boundary_eligible,
+        "semantic_boundary_request_count": total_semantic_boundary_request_count,
         "semantic_boundary_validated_count": total_semantic_boundary_validated,
         "semantic_boundary_skipped_count": total_semantic_boundary_skipped,
         "semantic_boundary_fallback_count": total_semantic_boundary_fallback,
@@ -2962,18 +3046,6 @@ def analyze_assets(
             "ai_cached_segment_count": ai_runtime_stats.cached_segment_count,
             "ai_fallback_segment_count": ai_runtime_stats.fallback_segment_count,
             "ai_live_request_count": ai_runtime_stats.live_request_count,
-        }
-    )
-    final_transcript_status = transcript_runtime_status(transcriber)
-    project.analysis_summary.update(
-        {
-            "transcribed_asset_count": final_transcript_status.transcribed_asset_count,
-            "transcript_failed_asset_count": final_transcript_status.failed_asset_count,
-            "transcript_cached_asset_count": final_transcript_status.cached_asset_count,
-            "transcript_runtime_probed_asset_count": final_transcript_status.probed_asset_count,
-            "transcript_runtime_probe_rejected_asset_count": final_transcript_status.probe_rejected_asset_count,
-            "transcript_status": final_transcript_status.status,
-            "transcript_detail": final_transcript_status.detail,
         }
     )
     project.analysis_summary["transcript_runtime_mode"] = runtime_status_label(
@@ -3006,15 +3078,13 @@ def analyze_assets(
     )
     if timeline.items:
         best_take_by_id = {take.id: take for take in take_recommendations}
+        candidate_segments_by_id = {segment.id: segment for segment in candidate_segments}
         timeline_modes: list[str] = []
         for item in timeline.items:
             take = best_take_by_id.get(item.take_recommendation_id)
             if take is None:
                 continue
-            segment = next(
-                (candidate for candidate in candidate_segments if candidate.id == take.candidate_segment_id),
-                None,
-            )
+            segment = candidate_segments_by_id.get(take.candidate_segment_id)
             if segment is None:
                 continue
             timeline_modes.append(segment.analysis_mode)

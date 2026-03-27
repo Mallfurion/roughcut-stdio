@@ -41,6 +41,7 @@ WORKLOAD_COUNT_KEYS = (
     "transcript_excerpt_segment_count",
     "speech_fallback_segment_count",
     "semantic_boundary_eligible_count",
+    "semantic_boundary_request_count",
     "semantic_boundary_validated_count",
     "semantic_boundary_skipped_count",
     "semantic_boundary_fallback_count",
@@ -82,6 +83,43 @@ class BenchmarkComparison:
     context_differences: list[str]
 
 
+def classify_ai_cache_activity(*, workload_counts: dict[str, Any]) -> str:
+    live_segments = int(workload_counts.get("ai_live_segment_count", 0) or 0)
+    cached_segments = int(workload_counts.get("ai_cached_segment_count", 0) or 0)
+    if live_segments > 0 and cached_segments > 0:
+        return "mixed-cache"
+    if cached_segments > 0:
+        return "warm-cache"
+    if live_segments > 0:
+        return "cold-cache"
+    return "inactive"
+
+
+def derive_ai_execution_context(
+    *,
+    provider_effective: str,
+    configured_concurrency: int,
+) -> dict[str, Any]:
+    configured = max(1, int(configured_concurrency))
+    if provider_effective == "mlx-vlm-local":
+        return {
+            "ai_concurrency": configured,
+            "ai_effective_concurrency": 1,
+            "ai_execution_context": "serialized-local-model",
+        }
+    if provider_effective == "lmstudio":
+        return {
+            "ai_concurrency": configured,
+            "ai_effective_concurrency": configured,
+            "ai_execution_context": "configured-parallel-requests",
+        }
+    return {
+        "ai_concurrency": configured,
+        "ai_effective_concurrency": 0,
+        "ai_execution_context": "deterministic-fallback",
+    }
+
+
 def build_runtime_stability_context(
     *,
     project_payload: dict[str, Any],
@@ -114,6 +152,9 @@ def build_runtime_stability_context(
             )
         ),
         "ai_provider_effective": str(runtime_configuration.get("ai_provider_effective", "")),
+        "ai_execution_context": str(runtime_configuration.get("ai_execution_context", "")),
+        "ai_effective_concurrency": int(runtime_configuration.get("ai_effective_concurrency", 0) or 0),
+        "ai_cache_activity": classify_ai_cache_activity(workload_counts=analysis_summary),
     }
 
 
@@ -214,6 +255,10 @@ def derive_dataset_identity(
 def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[str, Any]:
     provider_status = inspect_ai_provider_status(runtime_probe=True)
     analysis_config = load_ai_analysis_config()
+    ai_execution_context = derive_ai_execution_context(
+        provider_effective=provider_status.effective_provider,
+        configured_concurrency=analysis_config.concurrency,
+    )
     return {
         "media_dir": media_dir,
         "media_dir_input": media_dir_input,
@@ -230,7 +275,7 @@ def load_runtime_configuration(*, media_dir: str, media_dir_input: str) -> dict[
         "ai_max_segments_per_asset": analysis_config.max_segments_per_asset,
         "ai_max_keyframes_per_segment": analysis_config.max_keyframes_per_segment,
         "ai_keyframe_max_width": analysis_config.keyframe_max_width,
-        "ai_concurrency": analysis_config.concurrency,
+        **ai_execution_context,
         "ai_cache_enabled": analysis_config.cache_enabled,
         "transcript_provider_configured": analysis_config.transcript_provider,
         "transcript_model_size": analysis_config.transcript_model_size,
@@ -363,6 +408,16 @@ def compare_benchmarks(
         differences.append(
             f"AI mode changed ({baseline_cfg.get('ai_mode', 'unknown')} -> {current_cfg.get('ai_mode', 'unknown')})"
         )
+    if current_cfg.get("ai_effective_concurrency") != baseline_cfg.get("ai_effective_concurrency"):
+        differences.append(
+            "effective AI concurrency changed "
+            f"({baseline_cfg.get('ai_effective_concurrency', 'unknown')} -> {current_cfg.get('ai_effective_concurrency', 'unknown')})"
+        )
+    if current_cfg.get("ai_execution_context") != baseline_cfg.get("ai_execution_context"):
+        differences.append(
+            "AI execution context changed "
+            f"({baseline_cfg.get('ai_execution_context', 'unknown')} -> {current_cfg.get('ai_execution_context', 'unknown')})"
+        )
     if current_cfg.get("semantic_boundary_ambiguity_threshold") != baseline_cfg.get("semantic_boundary_ambiguity_threshold"):
         differences.append(
             "semantic ambiguity threshold changed "
@@ -376,6 +431,18 @@ def compare_benchmarks(
         differences.append(
             "candidate segment count changed "
             f"({baseline_workload.get('candidate_segment_count', 0)} -> {current_workload.get('candidate_segment_count', 0)})"
+        )
+    if current_workload.get("semantic_boundary_request_count") != baseline_workload.get("semantic_boundary_request_count"):
+        differences.append(
+            "semantic boundary request volume changed "
+            f"({baseline_workload.get('semantic_boundary_request_count', 0)} -> "
+            f"{current_workload.get('semantic_boundary_request_count', 0)})"
+        )
+    current_ai_cache_activity = classify_ai_cache_activity(workload_counts=current_workload)
+    baseline_ai_cache_activity = classify_ai_cache_activity(workload_counts=baseline_workload)
+    if current_ai_cache_activity != baseline_ai_cache_activity:
+        differences.append(
+            f"AI cache activity changed ({baseline_ai_cache_activity} -> {current_ai_cache_activity})"
         )
     current_runtime_stability = dict(current.runtime_stability or {})
     if current_runtime_stability.get("overall_mode") != baseline_runtime_stability.get("overall_mode"):
@@ -427,23 +494,10 @@ def write_benchmark_artifacts(
         "completed_at": benchmark.completed_at,
         "total_runtime_sec": benchmark.total_runtime_sec,
         "phase_timings_sec": benchmark.phase_timings_sec,
-        "runtime_configuration": {
-            "media_dir": benchmark.runtime_configuration.get("media_dir"),
-            "ai_provider_effective": benchmark.runtime_configuration.get("ai_provider_effective"),
-            "ai_mode": benchmark.runtime_configuration.get("ai_mode"),
-        },
+        "runtime_configuration": dict(benchmark.runtime_configuration),
         "runtime_stability": benchmark.runtime_stability,
         "dataset_identity": dict(benchmark.runtime_configuration.get("dataset_identity") or {}),
-        "workload_counts": {
-            "asset_count": benchmark.workload_counts.get("asset_count", 0),
-            "candidate_segment_count": benchmark.workload_counts.get("candidate_segment_count", 0),
-            "transcript_target_asset_count": benchmark.workload_counts.get("transcript_target_asset_count", 0),
-            "transcript_skipped_asset_count": benchmark.workload_counts.get("transcript_skipped_asset_count", 0),
-            "transcript_probed_asset_count": benchmark.workload_counts.get("transcript_probed_asset_count", 0),
-            "transcript_probe_rejected_asset_count": benchmark.workload_counts.get("transcript_probe_rejected_asset_count", 0),
-            "transcribed_asset_count": benchmark.workload_counts.get("transcribed_asset_count", 0),
-            "transcript_cached_asset_count": benchmark.workload_counts.get("transcript_cached_asset_count", 0),
-        },
+        "workload_counts": dict(benchmark.workload_counts),
         "benchmark_json": str(benchmark_path),
     }
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -515,6 +569,27 @@ def build_process_summary_lines(
         f"Run ID: {benchmark.run_id}",
         f"Total runtime: {format_runtime(benchmark.total_runtime_sec)}",
     ]
+    configured_ai_concurrency = benchmark.runtime_configuration.get("ai_concurrency")
+    effective_ai_concurrency = benchmark.runtime_configuration.get("ai_effective_concurrency")
+    ai_execution_context = str(benchmark.runtime_configuration.get("ai_execution_context", "")).strip()
+    ai_provider = str(benchmark.runtime_configuration.get("ai_provider_effective", "")).strip()
+    ai_cache_activity = classify_ai_cache_activity(workload_counts=benchmark.workload_counts)
+    if ai_provider:
+        lines.append(f"AI provider: {ai_provider}")
+    if configured_ai_concurrency is not None and effective_ai_concurrency is not None:
+        lines.append(
+            "AI execution: "
+            f"configured concurrency {configured_ai_concurrency}, "
+            f"effective concurrency {effective_ai_concurrency}"
+            + (f", {ai_execution_context}" if ai_execution_context else "")
+        )
+    lines.append(
+        "AI cache activity: "
+        f"{ai_cache_activity} "
+        f"({benchmark.workload_counts.get('ai_live_segment_count', 0)} live, "
+        f"{benchmark.workload_counts.get('ai_cached_segment_count', 0)} cached, "
+        f"{benchmark.workload_counts.get('ai_live_request_count', 0)} live requests)"
+    )
     if benchmark.phase_timings_sec:
         for phase_name, label in PHASE_LABELS.items():
             if phase_name in benchmark.phase_timings_sec:
@@ -629,6 +704,9 @@ def build_process_summary_lines(
             f"{analysis_summary.get('semantic_boundary_validated_count', 0)} validated, "
             f"{analysis_summary.get('semantic_boundary_applied_count', 0)} applied, "
             f"{analysis_summary.get('semantic_boundary_noop_count', 0)} no-op"
+        )
+        lines.append(
+            f"Semantic boundary requests: {analysis_summary.get('semantic_boundary_request_count', 0)}"
         )
         lines.append(
             "Semantic targeting: "

@@ -21,6 +21,7 @@ from services.analyzer.app.ai import (
     boundary_validation_user_prompt,
     build_segment_evidence,
     encode_image_as_data_url,
+    extract_segment_keyframes,
     inspect_ai_provider_status,
     keyframe_timestamps_for_segment,
     local_vlm_boundary_validation_prompt,
@@ -29,6 +30,7 @@ from services.analyzer.app.ai import (
     normalize_boundary_validation_output,
     normalize_model_output,
     resolve_mlx_device,
+    segment_evidence_matches,
     validate_single_segment_boundary,
 )
 from services.analyzer.app.domain import Asset, CandidateSegment
@@ -102,6 +104,176 @@ class AIPhaseOneTests(unittest.TestCase):
         self.assertEqual(evidence.context_window_end_sec, 15.0)
         self.assertEqual(evidence.story_prompt, "Build a warm opener.")
         self.assertEqual(evidence.keyframe_paths, [])
+
+    def test_segment_evidence_matches_reusable_request(self) -> None:
+        asset = Asset(
+            id="asset-evidence-match",
+            name="Reusable Evidence",
+            source_path="/tmp/reusable.mov",
+            proxy_path="/tmp/reusable.mov",
+            duration_sec=20.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C010",
+        )
+        segments = [
+            CandidateSegment(
+                id="segment-1",
+                asset_id=asset.id,
+                start_sec=0.0,
+                end_sec=4.0,
+                analysis_mode="speech",
+                transcript_excerpt="Lead in.",
+                description="Lead in.",
+                quality_metrics={"story_alignment": 0.61},
+            ),
+            CandidateSegment(
+                id="segment-2",
+                asset_id=asset.id,
+                start_sec=4.0,
+                end_sec=8.0,
+                analysis_mode="speech",
+                transcript_excerpt="Main beat.",
+                description="Main beat.",
+                quality_metrics={"story_alignment": 0.79, "turn_completeness": 0.83},
+            ),
+        ]
+
+        evidence = build_segment_evidence(
+            asset=asset,
+            segment=segments[1],
+            asset_segments=segments,
+            segment_index=1,
+            story_prompt="Build an answer-led sequence.",
+            artifacts_root=None,
+            extract_keyframes=False,
+            transcript_status="excerpt-available",
+            speech_mode_source="transcript",
+            max_keyframes_per_segment=3,
+            keyframe_max_width=448,
+        )
+
+        self.assertTrue(
+            segment_evidence_matches(
+                evidence=evidence,
+                asset=asset,
+                segment=segments[1],
+                asset_segments=segments,
+                segment_index=1,
+                story_prompt="Build an answer-led sequence.",
+                extract_keyframes=False,
+                transcript_status="excerpt-available",
+                speech_mode_source="transcript",
+                max_keyframes_per_segment=3,
+                keyframe_max_width=448,
+            )
+        )
+        self.assertFalse(
+            segment_evidence_matches(
+                evidence=evidence,
+                asset=asset,
+                segment=segments[1],
+                asset_segments=segments,
+                segment_index=1,
+                story_prompt="Build an answer-led sequence.",
+                extract_keyframes=False,
+                transcript_status="fallback-no-transcript",
+                speech_mode_source="speech_fallback",
+                max_keyframes_per_segment=3,
+                keyframe_max_width=448,
+            )
+        )
+
+    def test_extract_segment_keyframes_batches_and_falls_back(self) -> None:
+        asset = Asset(
+            id="asset-keyframes",
+            name="Keyframe Batch",
+            source_path="/tmp/keyframes.mov",
+            proxy_path="/tmp/keyframes.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C011",
+        )
+        segment = CandidateSegment(
+            id="segment-keyframes",
+            asset_id=asset.id,
+            start_sec=1.0,
+            end_sec=5.0,
+            analysis_mode="visual",
+            transcript_excerpt="",
+            description="Keyframe batch.",
+            quality_metrics={"story_alignment": 0.7},
+        )
+        timestamps = [1.5, 2.5, 3.5]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            media_path = Path(tempdir) / "asset.mov"
+            media_path.write_bytes(b"fake")
+            asset.proxy_path = str(media_path)
+            artifacts_root = Path(tempdir) / "artifacts"
+            commands: list[list[str]] = []
+
+            def fake_run(cmd, check=False, capture_output=True, text=True):
+                commands.append(list(cmd))
+                jpg_targets = [Path(part) for part in cmd if isinstance(part, str) and part.endswith(".jpg")]
+                if cmd.count("-map") > 1:
+                    for target in jpg_targets:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(b"batch")
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                for target in jpg_targets:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"single")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("services.analyzer.app.ai.shutil.which", return_value="/usr/bin/ffmpeg"):
+                with patch("services.analyzer.app.ai.subprocess.run", side_effect=fake_run):
+                    extracted = extract_segment_keyframes(
+                        asset=asset,
+                        segment=segment,
+                        timestamps=timestamps,
+                        artifacts_root=artifacts_root,
+                        max_width=448,
+                    )
+
+            self.assertEqual(len(extracted), 3)
+            self.assertEqual(len(commands), 1)
+            self.assertGreater(commands[0].count("-map"), 1)
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            media_path = Path(tempdir) / "asset.mov"
+            media_path.write_bytes(b"fake")
+            asset.proxy_path = str(media_path)
+            artifacts_root = Path(tempdir) / "artifacts"
+            commands = []
+
+            def fake_run_with_fallback(cmd, check=False, capture_output=True, text=True):
+                commands.append(list(cmd))
+                jpg_targets = [Path(part) for part in cmd if isinstance(part, str) and part.endswith(".jpg")]
+                if cmd.count("-map") > 1:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="batch failed")
+                for target in jpg_targets:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"single")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("services.analyzer.app.ai.shutil.which", return_value="/usr/bin/ffmpeg"):
+                with patch("services.analyzer.app.ai.subprocess.run", side_effect=fake_run_with_fallback):
+                    extracted = extract_segment_keyframes(
+                        asset=asset,
+                        segment=segment,
+                        timestamps=timestamps,
+                        artifacts_root=artifacts_root,
+                        max_width=448,
+                    )
+
+            self.assertEqual(len(extracted), 3)
+            self.assertEqual(len(commands), 1 + len(timestamps))
 
     def test_deterministic_analyzer_returns_structured_output(self) -> None:
         asset = Asset(
