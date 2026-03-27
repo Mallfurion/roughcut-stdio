@@ -1320,6 +1320,20 @@ def build_segment_evidence(
             else []
         ),
         turn_completeness=round(segment.quality_metrics.get("turn_completeness", 0.0), 4),
+        speech_structure_label=(
+            segment.prefilter.speech_structure_label
+            if segment.prefilter is not None
+            else ""
+        ),
+        speech_structure_cues=(
+            list(segment.prefilter.speech_structure_cues)
+            if segment.prefilter is not None
+            else []
+        ),
+        speech_structure_confidence=round(
+            segment.prefilter.speech_structure_confidence,
+            4,
+        ) if segment.prefilter is not None else 0.0,
     )
 
 

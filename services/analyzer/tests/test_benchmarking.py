@@ -40,6 +40,9 @@ class ProcessBenchmarkingTests(unittest.TestCase):
                     "transcript_failed_asset_count": 1,
                     "transcript_excerpt_segment_count": 2,
                     "speech_fallback_segment_count": 1,
+                    "speech_structure_segment_count": 2,
+                    "speech_structure_question_answer_count": 1,
+                    "speech_structure_monologue_count": 1,
                     "semantic_boundary_validated_count": 1,
                     "semantic_boundary_applied_count": 1,
                     "semantic_boundary_noop_count": 0,
@@ -162,6 +165,7 @@ class ProcessBenchmarkingTests(unittest.TestCase):
             self.assertIn("Comparison context: media root changed", "\n".join(summary_lines))
             self.assertIn("Transcript runtime: partial-fallback (faster-whisper)", "\n".join(summary_lines))
             self.assertIn("Speech fallback segments: 1", "\n".join(summary_lines))
+            self.assertIn("Speech structure: 2 structured beats, 1 question/answer, 1 monologue", "\n".join(summary_lines))
             self.assertIn("Semantic boundary validation: 1 validated, 1 applied, 0 no-op", "\n".join(summary_lines))
             self.assertIn("Story assembly: sequence-heuristic-v2, 2 mode alternations, 3 roles, 1 prompt-fit beats, 1 tradeoffs", "\n".join(summary_lines))
             self.assertIn("Story assembly anchors: open on A001 (opener), release on A003 (release)", "\n".join(summary_lines))

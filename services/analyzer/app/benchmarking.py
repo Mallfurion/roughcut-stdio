@@ -525,6 +525,13 @@ def build_process_summary_lines(
         lines.append(f"Transcript cache hits: {analysis_summary.get('transcript_cached_asset_count', 0)}")
         lines.append(f"Transcript excerpt segments: {analysis_summary.get('transcript_excerpt_segment_count', 0)}")
         lines.append(f"Speech fallback segments: {analysis_summary.get('speech_fallback_segment_count', 0)}")
+        if analysis_summary.get("speech_structure_segment_count", 0) > 0:
+            lines.append(
+                "Speech structure: "
+                f"{analysis_summary.get('speech_structure_segment_count', 0)} structured beats, "
+                f"{analysis_summary.get('speech_structure_question_answer_count', 0)} question/answer, "
+                f"{analysis_summary.get('speech_structure_monologue_count', 0)} monologue"
+            )
         lines.append(
             "Semantic boundary validation: "
             f"{analysis_summary.get('semantic_boundary_validated_count', 0)} validated, "

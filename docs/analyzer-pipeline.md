@@ -103,7 +103,11 @@ Only assets whose probe returns real transcript text are promoted into the full 
 
 If transcript support is unavailable, processing continues and spoken clips can still enter speech-aware scoring through deterministic fallback.
 
-When transcript spans are available, the analyzer also derives lightweight **transcript turns** by grouping adjacent spans with short internal gaps. These turns become first-class structure for downstream speech segmentation and scoring.
+When transcript spans are available, the analyzer also derives lightweight **transcript turns** by grouping adjacent spans with short internal gaps. Those turns remain the base transcript structure, and the analyzer can now derive richer spoken-beat cues on top of them, such as:
+
+- question/answer flow
+- monologue continuity across adjacent transcript spans
+- spoken-beat completeness beyond a single raw turn boundary
 
 ### Step 2.5 - Seed Region Building
 
@@ -162,6 +166,7 @@ When transcript turns are present, each speech-heavy segment also records:
 - which turns it overlaps
 - whether it is turn-aligned, mostly complete, or partial
 - a `turn_completeness` score used later during speech scoring
+- richer spoken-structure cues such as `question_answer_flow`, `monologue_continuity`, and `spoken_beat_completeness`
 
 **Output:** `CandidateSegment` records with quality metrics attached.
 
@@ -201,9 +206,9 @@ For each shortlisted segment, the analyzer extracts keyframes and prepares an ev
 - keyframes are stitched into a contact sheet when possible
 - neighboring time context is recorded for downstream analysis
 - transcript status and speech-mode source are recorded for review and prompt building
-- transcript turn count, turn ranges, and turn completeness are attached for review and downstream debugging
+- transcript turn count, turn ranges, turn completeness, and speech-structure metadata are attached for review and downstream debugging
 
-**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript evidence, transcript status, speech-mode source, transcript-turn metadata, and metrics.
+**Output:** `SegmentEvidence` records with keyframe paths, contact sheet path, transcript evidence, transcript status, speech-mode source, transcript-turn metadata, speech-structure metadata, and metrics.
 
 ### Step 2.12 - CLIP Semantic Scoring
 

@@ -51,6 +51,9 @@ class SegmentEvidence:
     transcript_turn_count: int = 0
     transcript_turn_ranges_sec: list[list[float]] = field(default_factory=list)
     turn_completeness: float = 0.0
+    speech_structure_label: str = ""
+    speech_structure_cues: list[str] = field(default_factory=list)
+    speech_structure_confidence: float = 0.0
 
 
 @dataclass(slots=True)
@@ -79,6 +82,9 @@ class PrefilterDecision:
     transcript_turn_ids: list[str] = field(default_factory=list)
     transcript_turn_ranges_sec: list[list[float]] = field(default_factory=list)
     transcript_turn_alignment: str = ""
+    speech_structure_label: str = ""
+    speech_structure_cues: list[str] = field(default_factory=list)
+    speech_structure_confidence: float = 0.0
 
 
 @dataclass(slots=True)
@@ -127,6 +133,7 @@ class SegmentReviewState:
     transcript_summary: str = ""
     speech_mode_source: str = ""
     turn_summary: str = ""
+    speech_structure_summary: str = ""
 
 
 @dataclass(slots=True)
@@ -265,6 +272,9 @@ class ProjectData:
                             transcript_turn_ids=segment["prefilter"].get("transcript_turn_ids", []),
                             transcript_turn_ranges_sec=segment["prefilter"].get("transcript_turn_ranges_sec", []),
                             transcript_turn_alignment=segment["prefilter"].get("transcript_turn_alignment", ""),
+                            speech_structure_label=segment["prefilter"].get("speech_structure_label", ""),
+                            speech_structure_cues=segment["prefilter"].get("speech_structure_cues", []),
+                            speech_structure_confidence=segment["prefilter"].get("speech_structure_confidence", 0.0),
                         )
                         if segment.get("prefilter") is not None
                         else None

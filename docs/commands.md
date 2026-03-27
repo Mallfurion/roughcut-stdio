@@ -159,6 +159,12 @@ If you want to compare against transcript-disabled behavior:
 TIMELINE_TRANSCRIPT_PROVIDER=disabled npm run process
 ```
 
+For richer spoken-beat diagnostics, inspect:
+
+```bash
+cat generated/project.json | jq '.project.analysis_summary | {speech_structure_segment_count, speech_structure_question_answer_count, speech_structure_monologue_count}'
+```
+
 ### Debug CLIP deduplication
 
 Set media directory and enable CLIP:

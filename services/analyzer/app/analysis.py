@@ -107,6 +107,8 @@ TRANSCRIPT_TURN_BREAK_GAP_SEC = 1.35
 TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC = 0.45
 TRANSCRIPT_TURN_REFINE_MARGIN_SEC = 0.75
 TRANSCRIPT_TURN_CONTINUITY_GAP_SEC = 0.55
+SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC = 0.95
+SPOKEN_STRUCTURE_QUESTION_ANSWER_GAP_SEC = 1.6
 TIMELINE_VISUAL_BASE_MAX_DURATION_SEC = 5.0
 TIMELINE_VISUAL_REFINED_MAX_DURATION_SEC = 6.5
 TIMELINE_VISUAL_MERGED_MAX_DURATION_SEC = 7.0
@@ -134,6 +136,16 @@ class TranscriptTurn:
     end_sec: float
     text: str
     span_count: int
+
+
+@dataclass(slots=True)
+class SpokenStructureEvidence:
+    label: str
+    cues: list[str]
+    confidence: float
+    question_answer_flow: float
+    monologue_continuity: float
+    spoken_beat_completeness: float
 
 
 @dataclass(slots=True)
@@ -179,6 +191,8 @@ class AssemblyContinuitySignals:
     shared_turn: bool
     consecutive_turns: bool
     strong_turn_break_between: bool
+    question_answer_flow: bool
+    monologue_continuity: bool
 
 
 @dataclass(slots=True)
@@ -814,6 +828,112 @@ def transcript_turn_alignment(
     return matched, alignment, completeness
 
 
+QUESTION_WORDS = {
+    "how",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "is",
+    "are",
+    "should",
+    "will",
+    "would",
+}
+
+
+def is_question_like_text(text: str) -> bool:
+    normalized = text.strip().lower()
+    if not normalized:
+        return False
+    if "?" in normalized:
+        return True
+    words = re.findall(r"[a-z0-9']+", normalized)
+    return bool(words) and words[0] in QUESTION_WORDS
+
+
+def derive_spoken_structure(
+    transcript_spans: list[TranscriptSpan],
+    *,
+    start_sec: float,
+    end_sec: float,
+    turn_completeness: float,
+) -> SpokenStructureEvidence:
+    matching_spans = [
+        span
+        for span in transcript_spans
+        if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text.strip()
+    ]
+    if not matching_spans:
+        return SpokenStructureEvidence("", [], 0.0, 0.0, 0.0, round(turn_completeness, 4))
+
+    ordered = sorted(matching_spans, key=lambda span: (span.start_sec, span.end_sec))
+    question_answer_flow = 0.0
+    monologue_continuity = 0.0
+    cues: list[str] = []
+
+    for earlier, later in zip(ordered, ordered[1:]):
+        gap_sec = max(0.0, later.start_sec - earlier.end_sec)
+        if (
+            is_question_like_text(earlier.text)
+            and not is_question_like_text(later.text)
+            and gap_sec <= SPOKEN_STRUCTURE_QUESTION_ANSWER_GAP_SEC
+        ):
+            question_answer_flow = 0.9
+            cues.extend(["question_prompt", "answer_followthrough"])
+            break
+
+    if len(ordered) >= 2 and question_answer_flow == 0.0:
+        max_gap = max(
+            (max(0.0, later.start_sec - earlier.end_sec) for earlier, later in zip(ordered, ordered[1:])),
+            default=0.0,
+        )
+        question_count = sum(1 for span in ordered if is_question_like_text(span.text))
+        if max_gap <= SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC and question_count == 0:
+            monologue_continuity = 0.82
+            cues.extend(["monologue_continuity", "multi_span_flow"])
+        elif max_gap <= SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC and question_count == 1 and not is_question_like_text(ordered[-1].text):
+            monologue_continuity = 0.68
+            cues.extend(["answer_continuation"])
+
+    edge_start = clamp(1.0 - abs(start_sec - ordered[0].start_sec) / TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC)
+    edge_end = clamp(1.0 - abs(end_sec - ordered[-1].end_sec) / TRANSCRIPT_TURN_BOUNDARY_TOLERANCE_SEC)
+    spoken_beat_completeness = clamp(
+        (turn_completeness * 0.6)
+        + (((edge_start + edge_end) / 2.0) * 0.25)
+        + (question_answer_flow * 0.1)
+        + (monologue_continuity * 0.05)
+    )
+
+    label = ""
+    confidence = 0.0
+    if question_answer_flow >= 0.85:
+        label = "question-answer-flow"
+        confidence = clamp((question_answer_flow * 0.75) + (spoken_beat_completeness * 0.25))
+    elif monologue_continuity >= 0.75:
+        label = "monologue-continuity"
+        confidence = clamp((monologue_continuity * 0.7) + (spoken_beat_completeness * 0.3))
+    elif spoken_beat_completeness >= 0.82 and len(ordered) >= 2:
+        label = "spoken-beat-complete"
+        confidence = spoken_beat_completeness
+
+    return SpokenStructureEvidence(
+        label=label,
+        cues=dedupe_labels(cues),
+        confidence=round(confidence, 4),
+        question_answer_flow=round(question_answer_flow, 4),
+        monologue_continuity=round(monologue_continuity, 4),
+        spoken_beat_completeness=round(spoken_beat_completeness, 4),
+    )
+
+
 def transcript_excerpt_for_range(
     transcriber: TranscriptProvider,
     asset: Asset,
@@ -857,11 +977,20 @@ def make_candidate_segment(
     assembly_source_segment_ids: list[str] | None = None,
     assembly_source_ranges_sec: list[list[float]] | None = None,
 ) -> CandidateSegment:
+    matching_spans = (
+        [
+            span
+            for span in transcript_spans
+            if span.end_sec >= start_sec and span.start_sec <= end_sec and span.text.strip()
+        ]
+        if asset.has_speech
+        else []
+    )
     excerpt = (
         transcript_excerpt_for_range(
             transcriber,
             asset,
-            transcript_spans,
+            matching_spans,
             start_sec,
             end_sec,
             allow_provider_lookup=transcript_lookup_enabled,
@@ -873,6 +1002,12 @@ def make_candidate_segment(
         transcript_turns,
         start_sec,
         end_sec,
+    )
+    spoken_structure = derive_spoken_structure(
+        matching_spans,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        turn_completeness=turn_completeness,
     )
     prefilter_snapshot = aggregate_segment_prefilter(
         signals=prefilter_signals,
@@ -889,6 +1024,9 @@ def make_candidate_segment(
     )
     metrics["turn_completeness"] = turn_completeness
     metrics["transcript_turn_count"] = float(len(matched_turns))
+    metrics["question_answer_flow"] = spoken_structure.question_answer_flow
+    metrics["monologue_continuity"] = spoken_structure.monologue_continuity
+    metrics["spoken_beat_completeness"] = spoken_structure.spoken_beat_completeness
     analysis_mode, _analysis_mode_source = infer_analysis_mode(asset, excerpt, metrics)
     return CandidateSegment(
         id=segment_id,
@@ -920,6 +1058,9 @@ def make_candidate_segment(
             transcript_turn_ids=[turn.id for turn in matched_turns],
             transcript_turn_ranges_sec=[[turn.start_sec, turn.end_sec] for turn in matched_turns],
             transcript_turn_alignment=turn_alignment,
+            speech_structure_label=spoken_structure.label,
+            speech_structure_cues=list(spoken_structure.cues),
+            speech_structure_confidence=spoken_structure.confidence,
         ),
     )
 
@@ -959,6 +1100,7 @@ def _refine_seed_with_transcript(
     if transcript_turns:
         matching_turns = transcript_turns_for_range(transcript_turns, expanded_start, expanded_end)
         if matching_turns:
+            matching_turns = extend_transcript_turn_window(matching_turns, transcript_turns)
             start_sec = max(0.0, min(turn.start_sec for turn in matching_turns))
             end_sec = min(asset.duration_sec, max(turn.end_sec for turn in matching_turns))
             if end_sec - start_sec >= 1.0:
@@ -999,6 +1141,33 @@ def _refine_seed_with_transcript(
         transcript_turn_ranges_sec=[],
         transcript_turn_alignment="span-aligned",
     )
+
+
+def extend_transcript_turn_window(
+    matching_turns: list[TranscriptTurn],
+    transcript_turns: list[TranscriptTurn],
+) -> list[TranscriptTurn]:
+    if not matching_turns or not transcript_turns:
+        return matching_turns
+    ordered_all = {turn.id: index for index, turn in enumerate(transcript_turns)}
+    extended = list(matching_turns)
+    last_turn = extended[-1]
+    last_index = ordered_all.get(last_turn.id, -1)
+    if last_index < 0 or last_index >= len(transcript_turns) - 1:
+        return extended
+    next_turn = transcript_turns[last_index + 1]
+    gap_sec = max(0.0, next_turn.start_sec - last_turn.end_sec)
+    if is_question_like_text(last_turn.text) and gap_sec <= SPOKEN_STRUCTURE_QUESTION_ANSWER_GAP_SEC:
+        extended.append(next_turn)
+        return extended
+    if (
+        not is_question_like_text(last_turn.text)
+        and not is_question_like_text(next_turn.text)
+        and gap_sec <= SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC
+        and len(extended) == 1
+    ):
+        extended.append(next_turn)
+    return extended
 
 
 def _refine_seed_with_audio(
@@ -1320,6 +1489,8 @@ def collect_assembly_continuity_signals(
     shared_turn = bool(left_turn_ids.intersection(right_turn_ids))
     consecutive_turns = False
     strong_turn_break_between = False
+    question_answer_flow = False
+    monologue_continuity = False
     if left_turn_ids and right_turn_ids and transcript_turns:
         order_by_id = {turn.id: index for index, turn in enumerate(transcript_turns)}
         left_last = max((order_by_id[turn_id] for turn_id in left_turn_ids if turn_id in order_by_id), default=-1)
@@ -1328,6 +1499,25 @@ def collect_assembly_continuity_signals(
             consecutive_turns = True
             turn_gap = transcript_turns[right_first].start_sec - transcript_turns[left_last].end_sec
             strong_turn_break_between = turn_gap >= TRANSCRIPT_TURN_BREAK_GAP_SEC
+    left_is_question = bool(left.transcript_excerpt.strip()) and is_question_like_text(left.transcript_excerpt)
+    right_is_question = bool(right.transcript_excerpt.strip()) and is_question_like_text(right.transcript_excerpt)
+    if (
+        left.analysis_mode == "speech"
+        and right.analysis_mode == "speech"
+        and left_is_question
+        and not right_is_question
+        and gap_sec <= SPOKEN_STRUCTURE_QUESTION_ANSWER_GAP_SEC
+    ):
+        question_answer_flow = True
+    if (
+        left.analysis_mode == "speech"
+        and right.analysis_mode == "speech"
+        and not left_is_question
+        and not right_is_question
+        and gap_sec <= SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC
+        and not scene_divider_between
+    ):
+        monologue_continuity = True
     return AssemblyContinuitySignals(
         gap_sec=gap_sec,
         transcript_span_count=len(matching_spans),
@@ -1340,6 +1530,8 @@ def collect_assembly_continuity_signals(
         shared_turn=shared_turn,
         consecutive_turns=consecutive_turns,
         strong_turn_break_between=strong_turn_break_between,
+        question_answer_flow=question_answer_flow,
+        monologue_continuity=monologue_continuity,
     )
 
 
@@ -1360,6 +1552,18 @@ def merge_rule_family(
         return ""
     if signals.gap_sec > ASSEMBLY_MERGE_MAX_GAP_SEC:
         return ""
+    if (
+        signals.question_answer_flow
+        and not signals.scene_divider_between
+        and not signals.strong_turn_break_between
+    ):
+        return "question-answer-flow"
+    if (
+        signals.monologue_continuity
+        and not signals.scene_divider_between
+        and signals.gap_sec <= SPOKEN_STRUCTURE_MONOLOGUE_GAP_SEC
+    ):
+        return "monologue-continuity"
     if (
         (signals.shared_turn or signals.consecutive_turns)
         and not signals.strong_turn_break_between
@@ -2753,6 +2957,21 @@ def analyze_assets(
     timeline_prompt_fit_count = 0
     timeline_tradeoff_count = 0
     timeline_repetition_control_count = 0
+    speech_structure_segment_count = sum(
+        1
+        for segment in candidate_segments
+        if segment.prefilter is not None and bool(segment.prefilter.speech_structure_label)
+    )
+    question_answer_segment_count = sum(
+        1
+        for segment in candidate_segments
+        if segment.prefilter is not None and segment.prefilter.speech_structure_label == "question-answer-flow"
+    )
+    monologue_segment_count = sum(
+        1
+        for segment in candidate_segments
+        if segment.prefilter is not None and segment.prefilter.speech_structure_label == "monologue-continuity"
+    )
     if timeline.items:
         best_take_by_id = {take.id: take for take in take_recommendations}
         timeline_modes: list[str] = []
@@ -2794,6 +3013,9 @@ def analyze_assets(
             "story_assembly_prompt_fit_count": timeline_prompt_fit_count,
             "story_assembly_tradeoff_count": timeline_tradeoff_count,
             "story_assembly_repetition_control_count": timeline_repetition_control_count,
+            "speech_structure_segment_count": speech_structure_segment_count,
+            "speech_structure_question_answer_count": question_answer_segment_count,
+            "speech_structure_monologue_count": monologue_segment_count,
         }
     )
     if status_callback is not None:
@@ -3614,6 +3836,7 @@ def build_segment_review_state(segment: CandidateSegment) -> SegmentReviewState:
         transcript_summary=transcript_summary(segment, transcript_status, speech_mode_source),
         speech_mode_source=speech_mode_source,
         turn_summary=turn_summary(segment),
+        speech_structure_summary=speech_structure_summary(segment),
     )
 
 
@@ -3764,6 +3987,10 @@ def turn_summary(segment: CandidateSegment) -> str:
     count = len(prefilter.transcript_turn_ids)
     if prefilter.assembly_rule_family == "turn-continuity":
         return f"Merged {count} transcript turns via turn continuity."
+    if prefilter.assembly_rule_family == "question-answer-flow":
+        return "Merged across a question/answer flow."
+    if prefilter.assembly_rule_family == "monologue-continuity":
+        return "Merged across continuous monologue flow."
     if prefilter.assembly_rule_family == "turn-break":
         return "Split at a strong transcript turn break."
     alignment = prefilter.transcript_turn_alignment or "turn-aware"
@@ -3772,6 +3999,17 @@ def turn_summary(segment: CandidateSegment) -> str:
     if alignment == "mostly-complete":
         return f"Mostly covers {count} transcript turn{'s' if count != 1 else ''}."
     return f"Partially overlaps {count} transcript turn{'s' if count != 1 else ''}."
+
+
+def speech_structure_summary(segment: CandidateSegment) -> str:
+    prefilter = segment.prefilter
+    if prefilter is None or not prefilter.speech_structure_label:
+        return ""
+    label = prefilter.speech_structure_label.replace("-", " ")
+    if prefilter.speech_structure_cues:
+        cues = human_join([cue.replace("_", " ") for cue in prefilter.speech_structure_cues[:3]])
+        return f"Speech structure reads as {label} ({cues})."
+    return f"Speech structure reads as {label}."
 
 
 def semantic_validation_summary(segment: CandidateSegment) -> str:

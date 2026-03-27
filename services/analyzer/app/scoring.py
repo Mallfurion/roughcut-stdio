@@ -35,12 +35,15 @@ DRIVER_LABELS = {
     "hook_strength": "hook strength",
     "motion_energy": "motion energy",
     "sharpness": "sharpness",
+    "question_answer_flow": "question/answer flow",
     "speech_ratio": "speech ratio",
+    "spoken_beat_completeness": "spoken beat completeness",
     "stability": "stability",
     "story_alignment": "story alignment",
     "subject_clarity": "subject clarity",
     "turn_completeness": "turn completeness",
     "visual_novelty": "visual novelty",
+    "monologue_continuity": "monologue continuity",
 }
 
 SPEECH_FALLBACK_MIN_SPEECH_RATIO = 0.65
@@ -106,6 +109,12 @@ def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str
         "turn_completeness",
         0.75 if segment.transcript_excerpt.strip() else 0.0,
     )
+    spoken_beat_completeness = metrics.get(
+        "spoken_beat_completeness",
+        turn_completeness,
+    )
+    question_answer_flow = metrics.get("question_answer_flow", 0.0)
+    monologue_continuity = metrics.get("monologue_continuity", 0.0)
 
     technical_values = {
         "sharpness": metrics.get("sharpness", 0.0),
@@ -133,12 +142,22 @@ def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str
             "turn_completeness": turn_completeness,
         }
         semantic_weights = {
-            "hook_strength": 0.26,
-            "story_alignment": 0.24,
-            "speech_ratio": 0.2,
+            "hook_strength": 0.22,
+            "story_alignment": 0.2,
+            "speech_ratio": 0.16,
             "subject_clarity": 0.12,
-            "turn_completeness": 0.18,
+            "turn_completeness": 0.14,
         }
+        if question_answer_flow > 0.0:
+            semantic_values["question_answer_flow"] = question_answer_flow
+            semantic_weights["question_answer_flow"] = 0.1
+            semantic_weights["hook_strength"] = 0.18
+            semantic_weights["story_alignment"] = 0.18
+        if monologue_continuity > 0.0:
+            semantic_values["monologue_continuity"] = monologue_continuity
+            semantic_weights["monologue_continuity"] = 0.06
+            semantic_weights["speech_ratio"] = 0.13
+            semantic_weights["subject_clarity"] = 0.1
         story_values = {
             "story_alignment": metrics.get("story_alignment", 0.0),
             "hook_strength": metrics.get("hook_strength", 0.0),
@@ -151,6 +170,15 @@ def score_component_inputs(asset: Asset, segment: CandidateSegment) -> tuple[str
             "duration_fit": 0.2,
             "turn_completeness": 0.22,
         }
+        if spoken_beat_completeness > turn_completeness + 0.01:
+            story_values["spoken_beat_completeness"] = spoken_beat_completeness
+            story_weights["spoken_beat_completeness"] = 0.12
+            story_weights["duration_fit"] = 0.14
+            story_weights["hook_strength"] = 0.18
+        if question_answer_flow > 0.0:
+            story_values["question_answer_flow"] = question_answer_flow
+            story_weights["question_answer_flow"] = 0.06
+            story_weights["story_alignment"] = 0.32
     else:
         semantic_values = {
             "visual_novelty": metrics.get("visual_novelty", 0.0),

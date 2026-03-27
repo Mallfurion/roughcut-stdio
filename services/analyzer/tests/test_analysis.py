@@ -366,6 +366,49 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertEqual(turns[0].id, "turn-01")
         self.assertIn("strongest frame", turns[0].text)
 
+    def test_make_candidate_segment_derives_question_answer_structure(self) -> None:
+        asset = Asset(
+            id="asset-qa",
+            name="Interview QA",
+            source_path="/tmp/qa.mov",
+            proxy_path="/tmp/qa.mov",
+            duration_sec=12.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A008_C002",
+        )
+        segment = make_candidate_segment(
+            asset=asset,
+            segment_id="asset-qa-segment-01",
+            start_sec=1.0,
+            end_sec=5.0,
+            transcriber=TimedTranscriptProvider([]),
+            transcript_spans=[
+                TranscriptSpan(1.0, 2.0, "How do we start?"),
+                TranscriptSpan(3.0, 5.0, "We start with the strongest answer."),
+            ],
+            transcript_turns=derive_transcript_turns(
+                [
+                    TranscriptSpan(1.0, 2.0, "How do we start?"),
+                    TranscriptSpan(3.0, 5.0, "We start with the strongest answer."),
+                ]
+            ),
+            prefilter_signals=[FrameSignal(1.0, 0.7, 0.6, 0.5, 0.2, 0.4, 0.7, 0.6, "deterministic")],
+            audio_signals=[AudioSignal(1.0, 0.03, 0.0, False, "ffmpeg")],
+            boundary_strategy="turn-snap",
+            boundary_confidence=0.9,
+            seed_region_ids=["seed-1"],
+            seed_region_sources=["transcript"],
+            seed_region_ranges_sec=[[1.0, 5.0]],
+        )
+
+        self.assertEqual(segment.prefilter.speech_structure_label, "question-answer-flow")
+        self.assertIn("question_prompt", segment.prefilter.speech_structure_cues)
+        self.assertGreater(segment.quality_metrics.get("question_answer_flow", 0.0), 0.8)
+        self.assertGreater(segment.quality_metrics.get("spoken_beat_completeness", 0.0), 0.8)
+
     def test_should_request_transcript_for_asset_uses_selective_thresholds(self) -> None:
         asset = Asset(
             id="asset-selective",
@@ -1800,12 +1843,107 @@ class AnalysisPipelineTests(unittest.TestCase):
         segment = assembled[0]
         self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
         self.assertEqual(segment.prefilter.assembly_operation, "merge")
-        self.assertEqual(segment.prefilter.assembly_rule_family, "turn-continuity")
+        self.assertEqual(segment.prefilter.assembly_rule_family, "question-answer-flow")
         self.assertEqual(
             segment.prefilter.assembly_source_segment_ids,
             ["asset-merge-region-01", "asset-merge-region-02"],
         )
         self.assertEqual(segment.prefilter.transcript_turn_alignment, "turn-aligned")
+
+    def test_assemble_narrative_units_merges_question_answer_flow(self) -> None:
+        asset = Asset(
+            id="asset-qa-merge",
+            name="Interview QA Merge",
+            source_path="/tmp/qa-merge.mov",
+            proxy_path="/tmp/qa-merge.mov",
+            duration_sec=14.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A001_C118B",
+        )
+        segments = [
+            CandidateSegment(
+                id="asset-qa-merge-region-01",
+                asset_id=asset.id,
+                start_sec=1.0,
+                end_sec=2.0,
+                analysis_mode="speech",
+                transcript_excerpt="How do we start?",
+                description="Question",
+                quality_metrics={"question_answer_flow": 0.0, "spoken_beat_completeness": 0.42},
+                prefilter=PrefilterDecision(
+                    score=0.78,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[1.5],
+                    top_frame_timestamps_sec=[1.5],
+                    metrics_snapshot={},
+                    boundary_strategy="transcript-snap",
+                    boundary_confidence=0.9,
+                    seed_region_ids=["seed-1"],
+                    seed_region_sources=["transcript"],
+                    seed_region_ranges_sec=[[1.0, 2.0]],
+                    transcript_turn_ids=["turn-01"],
+                    transcript_turn_ranges_sec=[[1.0, 2.0]],
+                    transcript_turn_alignment="partial-turn",
+                ),
+            ),
+            CandidateSegment(
+                id="asset-qa-merge-region-02",
+                asset_id=asset.id,
+                start_sec=2.8,
+                end_sec=5.1,
+                analysis_mode="speech",
+                transcript_excerpt="We start with the strongest answer.",
+                description="Answer",
+                quality_metrics={"question_answer_flow": 0.0, "spoken_beat_completeness": 0.52},
+                prefilter=PrefilterDecision(
+                    score=0.8,
+                    shortlisted=False,
+                    filtered_before_vlm=False,
+                    selection_reason="",
+                    sampled_frame_count=1,
+                    sampled_frame_timestamps_sec=[3.8],
+                    top_frame_timestamps_sec=[3.8],
+                    metrics_snapshot={},
+                    boundary_strategy="transcript-snap",
+                    boundary_confidence=0.89,
+                    seed_region_ids=["seed-2"],
+                    seed_region_sources=["transcript"],
+                    seed_region_ranges_sec=[[2.8, 5.1]],
+                    transcript_turn_ids=["turn-02"],
+                    transcript_turn_ranges_sec=[[2.8, 5.1]],
+                    transcript_turn_alignment="partial-turn",
+                ),
+            ),
+        ]
+
+        assembled = assemble_narrative_units(
+            asset=asset,
+            segments=segments,
+            base_ranges=[(0.0, 14.0)],
+            transcript_spans=[
+                TranscriptSpan(1.0, 2.0, "How do we start?"),
+                TranscriptSpan(2.8, 5.1, "We start with the strongest answer."),
+            ],
+            transcript_turns=derive_transcript_turns(
+                [
+                    TranscriptSpan(1.0, 2.0, "How do we start?"),
+                    TranscriptSpan(2.8, 5.1, "We start with the strongest answer."),
+                ]
+            ),
+            transcriber=TimedTranscriptProvider([]),
+            prefilter_signals=[],
+            audio_signals=[],
+        )
+
+        self.assertEqual(len(assembled), 1)
+        self.assertEqual(assembled[0].prefilter.assembly_rule_family, "question-answer-flow")
+        self.assertEqual(assembled[0].prefilter.speech_structure_label, "question-answer-flow")
 
     def test_assemble_narrative_units_splits_region_on_transcript_gap(self) -> None:
         asset = Asset(
@@ -2039,10 +2177,13 @@ class AnalysisPipelineTests(unittest.TestCase):
         segment = project.candidate_segments[0]
         self.assertEqual((segment.start_sec, segment.end_sec), (1.0, 5.4))
         self.assertEqual(segment.prefilter.assembly_operation, "merge")
-        self.assertEqual(segment.prefilter.assembly_rule_family, "turn-continuity")
+        self.assertEqual(segment.prefilter.assembly_rule_family, "question-answer-flow")
         self.assertEqual(segment.prefilter.assembly_source_segment_ids, ["asset-1-region-01", "asset-1-region-02"])
         self.assertEqual(project.take_recommendations[0].candidate_segment_id, segment.id)
         self.assertEqual(project.timeline.items[0].source_asset_path, asset.source_path)
+        self.assertEqual(segment.prefilter.speech_structure_label, "question-answer-flow")
+        self.assertIn("question_prompt", segment.prefilter.speech_structure_cues)
+        self.assertIn("question answer flow", segment.review_state.speech_structure_summary)
 
     def test_analyze_assets_assembles_silent_regions_on_structural_continuity(self) -> None:
         asset = Asset(

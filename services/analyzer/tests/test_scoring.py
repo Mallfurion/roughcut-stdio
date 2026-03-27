@@ -166,6 +166,8 @@ class ScoreSegmentTests(unittest.TestCase):
                 "hook_strength": 0.82,
                 "story_alignment": 0.87,
                 "turn_completeness": 0.95,
+                "spoken_beat_completeness": 0.96,
+                "question_answer_flow": 0.78,
             },
         )
         truncated = CandidateSegment(
@@ -188,6 +190,8 @@ class ScoreSegmentTests(unittest.TestCase):
                 "hook_strength": 0.82,
                 "story_alignment": 0.87,
                 "turn_completeness": 0.42,
+                "spoken_beat_completeness": 0.41,
+                "question_answer_flow": 0.12,
             },
         )
 
@@ -197,6 +201,76 @@ class ScoreSegmentTests(unittest.TestCase):
         self.assertGreater(complete_score.semantic, truncated_score.semantic)
         self.assertGreater(complete_score.story, truncated_score.story)
         self.assertGreater(complete_score.total, truncated_score.total)
+
+    def test_question_answer_flow_boosts_speech_story_score(self) -> None:
+        asset = Asset(
+            id="asset-qa",
+            name="Interview QA",
+            source_path="/tmp/qa.mov",
+            proxy_path="/tmp/qa.mov",
+            duration_sec=18.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=True,
+            interchange_reel_name="A002_C013",
+        )
+        plain = CandidateSegment(
+            id="segment-plain",
+            asset_id=asset.id,
+            start_sec=2.0,
+            end_sec=6.0,
+            analysis_mode="speech",
+            transcript_excerpt="We start with the answer.",
+            description="Plain spoken beat.",
+            quality_metrics={
+                "sharpness": 0.74,
+                "stability": 0.7,
+                "visual_novelty": 0.45,
+                "subject_clarity": 0.83,
+                "motion_energy": 0.28,
+                "duration_fit": 0.88,
+                "audio_energy": 0.78,
+                "speech_ratio": 0.94,
+                "hook_strength": 0.82,
+                "story_alignment": 0.87,
+                "turn_completeness": 0.82,
+                "spoken_beat_completeness": 0.82,
+                "question_answer_flow": 0.0,
+                "monologue_continuity": 0.0,
+            },
+        )
+        structured = CandidateSegment(
+            id="segment-structured",
+            asset_id=asset.id,
+            start_sec=2.0,
+            end_sec=6.0,
+            analysis_mode="speech",
+            transcript_excerpt="How do we start? We start with the answer.",
+            description="Question and answer beat.",
+            quality_metrics={
+                "sharpness": 0.74,
+                "stability": 0.7,
+                "visual_novelty": 0.45,
+                "subject_clarity": 0.83,
+                "motion_energy": 0.28,
+                "duration_fit": 0.88,
+                "audio_energy": 0.78,
+                "speech_ratio": 0.94,
+                "hook_strength": 0.82,
+                "story_alignment": 0.87,
+                "turn_completeness": 0.82,
+                "spoken_beat_completeness": 0.93,
+                "question_answer_flow": 0.9,
+                "monologue_continuity": 0.0,
+            },
+        )
+
+        plain_score = score_segment(asset, plain)
+        structured_score = score_segment(asset, structured)
+
+        self.assertGreater(structured_score.story, plain_score.story)
+        self.assertGreater(structured_score.semantic, plain_score.semantic)
 
     def test_top_score_driver_labels_follow_weighted_formula(self) -> None:
         asset = Asset(
