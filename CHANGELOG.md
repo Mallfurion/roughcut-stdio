@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-03-27
+
+### 🚀 Features
+
+- Ship the standalone desktop app with bundled runtime, packaged processing/export orchestration, startup bootstrap, and app-managed storage.
+
+### 🛠 Fixes & Improvements
+
+- Default the project and desktop app to `mlx-vlm-local`, `mlx-community/Qwen3.5-0.8B-4bit`, `TIMELINE_AI_MODE=full`, and `TIMELINE_AI_CLIP_MIN_SCORE=0.1`.
+- Serialize local MLX-VLM runtime calls on Metal for safer packaged execution.
+- Refresh implementation docs, archive the completed standalone distribution change, and add follow-up proposals for desktop polish and runtime size optimization.
+
+### 📦 Other
+
+- Add the docs-sync skill workflow and refresh project branding assets.
+
 ## [1.6.0] - 2026-03-27
 
 ### 🚀 Features
