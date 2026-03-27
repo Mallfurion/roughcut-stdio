@@ -1,0 +1,10 @@
+{
+  "last_reviewed_commit": "a5a5a826b7e0c47e74c1f4c4d29ebd680ac97985",
+  "notes": "Initial baseline for the docs-update skill. Documentation under docs/ and the repo README should be reviewed against commits after this implementation commit.",
+  "schema_version": 1,
+  "tracked_paths": [
+    "README.md",
+    "docs/**"
+  ],
+  "updated_at_utc": "2026-03-27T00:00:00Z"
+}

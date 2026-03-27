@@ -1,0 +1,7 @@
+interface:
+  display_name: "Docs Update"
+  short_description: "Refresh repo docs from shipped changes"
+  default_prompt: "Use $docs-update to update docs/ and README.md from code changes since the last recorded docs baseline."
+
+policy:
+  allow_implicit_invocation: true
