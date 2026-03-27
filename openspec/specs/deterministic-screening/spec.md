@@ -36,7 +36,7 @@ The analyzer SHALL generate candidate segments for each valid asset using scene 
 - **THEN** the analyzer SHALL keep the deterministically refined regions as the final candidate segments
 
 ### Requirement: System SHALL produce deterministic take recommendations from candidate segments
-The analyzer SHALL compute deterministic quality metrics for candidate segments using `audio_energy` and `speech_ratio` as continuous inputs in place of the binary `speech_presence` metric. Deterministic recommendation behavior SHALL remain available even when no VLM provider is used and SHALL behave identically for silent assets. When transcript-backed excerpts are available, the analyzer SHALL classify and score spoken segments using transcript-backed speech mode. When transcript excerpts are unavailable, the analyzer SHALL still support a speech-aware fallback path for segments with strong speech evidence instead of forcing them into purely visual scoring. When transcript-turn structure is available, the analyzer SHALL be able to incorporate turn completeness and continuity signals into speech-oriented segment scoring.
+The analyzer SHALL compute deterministic quality metrics for candidate segments using `audio_energy` and `speech_ratio` as continuous inputs in place of the binary `speech_presence` metric. Deterministic recommendation behavior SHALL remain available even when no VLM provider is used and SHALL behave identically for silent assets. For every candidate segment, the analyzer SHALL also persist review-facing recommendation data aligned with the active selection logic, including total and component scores, recommendation outcome, within-asset rank, score gap to the winning segment, and a concise explanation of the strongest score drivers or limiting factors. When transcript-backed excerpts are available, the analyzer SHALL classify and score spoken segments using transcript-backed speech mode. When transcript excerpts are unavailable, the analyzer SHALL still support a speech-aware fallback path for segments with strong speech evidence instead of forcing them into purely visual scoring. When transcript-turn structure is available, the analyzer SHALL be able to incorporate turn completeness and continuity signals into speech-oriented segment scoring.
 
 #### Scenario: Segment in an asset with audio contains measurable speech energy
 - **WHEN** a candidate segment has `audio_energy > 0.0` and `speech_ratio > 0.0`
@@ -56,6 +56,16 @@ The analyzer SHALL compute deterministic quality metrics for candidate segments 
 #### Scenario: Spoken segment aligns to a complete turn
 - **WHEN** a speech-heavy candidate segment aligns closely to a complete transcript turn or complete spoken exchange
 - **THEN** deterministic scoring SHALL be allowed to reward that segment relative to an equally strong but truncated spoken segment
+
+#### Scenario: Segment wins recommendation within its asset
+- **WHEN** a candidate segment is the highest-ranked selected segment for its asset
+- **THEN** its persisted recommendation record SHALL identify it as the winning outcome for that asset
+- **THEN** the record SHALL include total score, technical score, semantic score, story score, within-asset rank, and an explanation grounded in the active scoring formula
+
+#### Scenario: Segment does not win recommendation within its asset
+- **WHEN** a candidate segment remains a non-winning alternate or backup for its asset
+- **THEN** its persisted recommendation record SHALL still include total score, component scores, within-asset rank, and score gap to the winner
+- **THEN** the record SHALL explain whether it lost by rank, minimum-score threshold, or alternate-selection gap
 
 #### Scenario: Segment in an asset with audio is silent
 - **WHEN** a candidate segment has `audio_energy = 0.0` and `speech_ratio = 0.0` due to silent content within an audio-present asset
