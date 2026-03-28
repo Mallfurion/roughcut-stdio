@@ -14,6 +14,7 @@ import tempfile
 from typing import Any
 
 from .domain import Asset
+from .shared.numbers import average, clamp
 
 
 DETERMINISTIC_PREPROCESSING_SCHEMA_VERSION = 1
@@ -412,16 +413,6 @@ def aggregate_segment_prefilter(
         "metrics_snapshot": metrics_snapshot,
     }
 
-
-def average(values) -> float:
-    values = list(values)
-    if not values:
-        return 0.0
-    return sum(values) / len(values)
-
-
-def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
-    return max(minimum, min(maximum, value))
 
 
 def normalized_ranges(ranges: list[tuple[float, float]], duration_sec: float) -> list[tuple[float, float]]:

@@ -124,31 +124,11 @@ def deduplicate_segments(
     if not similarity_computer:
         similarity_computer = HistogramSimilarity(frame_signals_by_id)
 
-    result: dict[str, tuple[bool, int | None]] = {}
-    processed = set[str]()
-    dedup_group_id = 0
-
-    for segment in sorted(segments, key=lambda s: s.prefilter.score if s.prefilter else 0, reverse=True):
-        if segment.id in processed:
-            continue
-
-        # This segment is the highest-scoring in its group, keep it
-        result[segment.id] = (False, dedup_group_id)
-        processed.add(segment.id)
-
-        # Find all similar segments and mark as deduplicated
-        for other in segments:
-            if other.id in processed:
-                continue
-
-            similarity = similarity_computer.compute_similarity(segment, other)
-            if similarity >= similarity_threshold:
-                result[other.id] = (True, dedup_group_id)
-                processed.add(other.id)
-
-        dedup_group_id += 1
-
-    return result
+    return _group_similar_segments(
+        segments=segments,
+        similarity_computer=similarity_computer,
+        similarity_threshold=similarity_threshold,
+    )
 
 
 def apply_deduplication_results(
@@ -226,40 +206,15 @@ class HistogramDeduplicator:
             logger.debug(f"Skipping histogram dedup: only {len(segments)} segment(s)")
             return segments
 
-        # Use existing dedup logic but adapted for cross-asset operation
-        dedup_results = {}
-        processed = set()
-        dedup_group_id = 0
-
-        # Sort by prefilter score descending (keeper is highest-scoring)
-        sorted_segments = sorted(
-            segments,
-            key=lambda s: s.prefilter.score if s.prefilter else 0,
-            reverse=True
+        dedup_results = _group_similar_segments(
+            segments=segments,
+            similarity_computer=self.similarity_computer,
+            similarity_threshold=self.threshold,
         )
-
-        for segment in sorted_segments:
-            if segment.id in processed:
-                continue
-
-            # This segment is the highest-scoring in its group, keep it
-            dedup_results[segment.id] = (False, dedup_group_id)
-            processed.add(segment.id)
-
-            # Find all similar segments and mark as deduplicated
-            for other in segments:
-                if other.id in processed:
-                    continue
-
-                similarity = self.similarity_computer.compute_similarity(segment, other)
-                if similarity >= self.threshold:
-                    dedup_results[other.id] = (True, dedup_group_id)
-                    processed.add(other.id)
-
-            dedup_group_id += 1
 
         # Apply results
         dedup_count = 0
+        dedup_group_count = len({group_id for _deduplicated, group_id in dedup_results.values() if group_id is not None})
         for seg in segments:
             if seg.id in dedup_results:
                 deduplicated, group_id = dedup_results[seg.id]
@@ -272,5 +227,35 @@ class HistogramDeduplicator:
                     if keeper:
                         seg.prefilter.selection_reason = f"Duplicate of segment {keeper.id} (histogram similarity)"
 
-        logger.info(f"Histogram dedup: {dedup_group_id} groups formed, {dedup_count} duplicates marked")
+        logger.info(f"Histogram dedup: {dedup_group_count} groups formed, {dedup_count} duplicates marked")
         return segments
+
+
+def _group_similar_segments(
+    *,
+    segments: list[CandidateSegment],
+    similarity_computer: SimilarityComputer,
+    similarity_threshold: float,
+) -> dict[str, tuple[bool, int | None]]:
+    result: dict[str, tuple[bool, int | None]] = {}
+    processed: set[str] = set()
+    dedup_group_id = 0
+
+    for segment in sorted(segments, key=lambda s: s.prefilter.score if s.prefilter else 0, reverse=True):
+        if segment.id in processed:
+            continue
+
+        result[segment.id] = (False, dedup_group_id)
+        processed.add(segment.id)
+
+        for other in segments:
+            if other.id in processed:
+                continue
+            similarity = similarity_computer.compute_similarity(segment, other)
+            if similarity >= similarity_threshold:
+                result[other.id] = (True, dedup_group_id)
+                processed.add(other.id)
+
+        dedup_group_id += 1
+
+    return result

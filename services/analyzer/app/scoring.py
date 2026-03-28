@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 from .domain import Asset, CandidateSegment
+from .shared.numbers import clamp
 
 
 @dataclass(slots=True)
@@ -281,9 +282,6 @@ def label_for_driver(key: str) -> str:
     return DRIVER_LABELS.get(key, key.replace("_", " "))
 
 
-def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
-    return max(minimum, min(maximum, float(value)))
-
 
 def weighted_average(
     values: dict[str, float],
@@ -302,7 +300,3 @@ def weighted_average(
         return 0.0
 
     return numerator / denominator
-
-
-def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
-    return max(minimum, min(maximum, value))

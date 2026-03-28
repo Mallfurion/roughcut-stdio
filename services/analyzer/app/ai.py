@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from base64 import b64encode
-from contextlib import contextmanager
-from dataclasses import asdict, dataclass
-from hashlib import sha1
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import importlib
-import importlib.util
 import json
-import os
 import platform
 from pathlib import Path
 import re
@@ -18,25 +13,59 @@ import threading
 from typing import Any, Protocol
 from urllib import error, request
 
+from .ai_runtime.adapters import CachedFallbackAdapter
+from .ai_runtime.cache import SCHEMA_VERSION
+from .ai_runtime.config import (
+    AIAnalysisConfig,
+    AIProviderConfig,
+    AIProviderStatus,
+    AIRuntimeStats,
+    bootstrap_mlx_vlm_model,
+    load_ai_analysis_config,
+    load_ai_provider_config,
+    missing_mlx_vlm_dependencies,
+    model_cache_environment,
+    model_matches,
+    resolve_mlx_device,
+    resolve_prepared_mlx_vlm_model_path,
+)
+from .ai_runtime.evidence import (
+    batch_image_path_for_evidence,
+    build_segment_evidence,
+    create_segment_contact_sheet,
+    extract_segment_keyframes,
+    keyframe_timestamps_for_segment,
+    segment_evidence_matches,
+)
+from .ai_runtime.normalize import (
+    boundary_validation_fallback_result,
+    close_partial_json,
+    extract_generation_text,
+    keep_label_or_default,
+    list_or_default,
+    looks_like_placeholder_text,
+    normalize_batch_model_output,
+    normalize_boundary_validation_output,
+    normalize_model_output,
+    number_or_default,
+    parse_json_object,
+    parse_key_value_object,
+    rounded_metric,
+    salvage_partial_json_object,
+    string_or_default,
+)
+from .ai_runtime.prompts import (
+    boundary_validation_system_prompt,
+    boundary_validation_user_prompt,
+    local_vlm_boundary_validation_prompt,
+    local_vlm_segment_understanding_prompt,
+    segment_batch_understanding_system_prompt,
+    segment_batch_understanding_user_prompt,
+    segment_understanding_system_prompt,
+    segment_understanding_user_prompt,
+)
 from .domain import Asset, BoundaryValidationResult, CandidateSegment, SegmentEvidence, SegmentUnderstanding
-
-
-SCHEMA_VERSION = "segment-understanding-v1"
-MLX_MODEL_MANIFEST = "mlx-vlm-manifest.json"
-PLACEHOLDER_TEXT_VALUES = {
-    "short label",
-    "short sentence",
-    "item1",
-    "item2",
-    "item 1",
-    "item 2",
-    "label",
-    "sentence",
-    "n/a",
-    "none",
-    "null",
-    "placeholder",
-}
+from .shared.env import parse_bool_env, parse_float_env, parse_int_env
 
 
 class ProviderClient(Protocol):
@@ -94,66 +123,243 @@ class RankingPlanner(Protocol):
         ...
 
 
-@dataclass(slots=True)
-class AIProviderConfig:
-    provider: str
-    model: str
-    base_url: str
-    timeout_sec: float
-    revision: str = ""
-    cache_dir: str = ""
-    device: str = "auto"
-
-
-@dataclass(slots=True)
-class AIAnalysisConfig:
-    mode: str
-    max_segments_per_asset: int
-    max_keyframes_per_segment: int
-    keyframe_max_width: int
-    concurrency: int
-    cache_enabled: bool
-    transcript_provider: str = "auto"
-    transcript_model_size: str = "small"
-    clip_enabled: bool = True
-    clip_min_score: float = 0.1
-    vlm_budget_pct: int = 100
-    clip_model: str = "ViT-B-32"
-    clip_model_pretrained: str = "laion2b_s34b_b79k"
-    boundary_refinement_enabled: bool = True
-    boundary_refinement_legacy_fallback: bool = True
-    semantic_boundary_validation_enabled: bool = True
-    semantic_boundary_ambiguity_threshold: float = 0.6
-    semantic_boundary_floor_threshold: float = 0.45
-    semantic_boundary_min_targets: int = 1
-    semantic_boundary_validation_budget_pct: int = 100
-    semantic_boundary_validation_max_segments: int = 2
-    semantic_boundary_max_adjustment_sec: float = 1.5
-
-
-@dataclass(slots=True)
-class AIProviderStatus:
-    configured_provider: str
-    effective_provider: str
-    model: str
-    base_url: str
-    revision: str
-    cache_dir: str
-    device: str
-    available: bool
-    detail: str
-
-
-@dataclass(slots=True)
-class AIRuntimeStats:
-    live_segment_count: int = 0
-    cached_segment_count: int = 0
-    fallback_segment_count: int = 0
-    live_request_count: int = 0
-
-
 class AIProviderRequestError(RuntimeError):
     pass
+
+
+def inspect_mlx_vlm_provider_status(
+    config: AIProviderConfig,
+    *,
+    runtime_probe: bool = False,
+) -> AIProviderStatus:
+    missing = missing_mlx_vlm_dependencies()
+    ffmpeg_available = shutil.which("ffmpeg") is not None
+    cache_path = Path(config.cache_dir).expanduser() if config.cache_dir else None
+    cache_exists = bool(cache_path and cache_path.exists())
+    prepared_model_path = resolve_prepared_mlx_vlm_model_path(
+        model_id=config.model,
+        revision=config.revision,
+        cache_dir=config.cache_dir,
+    )
+    apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+    if missing:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend is not ready because required Python modules are missing: "
+                + ", ".join(missing)
+                + ". Falling back to deterministic analysis."
+            ),
+        )
+
+    if not apple_silicon:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend requires Apple Silicon on macOS. "
+                "Falling back to deterministic analysis."
+            ),
+        )
+
+    if not ffmpeg_available:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend requires ffmpeg to extract keyframes and build contact sheets, "
+                "but ffmpeg is not installed or not on PATH. Falling back to deterministic analysis."
+            ),
+        )
+
+    if prepared_model_path is None:
+        return AIProviderStatus(
+            configured_provider="mlx-vlm-local",
+            effective_provider="deterministic",
+            model=config.model,
+            base_url=config.base_url,
+            revision=config.revision,
+            cache_dir=config.cache_dir,
+            device=config.device,
+            available=False,
+            detail=(
+                "MLX-VLM local backend has no prepared local model files yet. "
+                "Run `npm run setup` to download the configured model before processing."
+            ),
+        )
+
+    if runtime_probe:
+        try:
+            runtime = MLXVLMRuntime(
+                model_id=config.model,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=config.device,
+            )
+            runtime.ensure_loaded()
+            return AIProviderStatus(
+                configured_provider="mlx-vlm-local",
+                effective_provider="mlx-vlm-local",
+                model=config.model,
+                base_url=config.base_url,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=runtime.device,
+                available=True,
+                detail=(
+                    f"MLX-VLM local backend is ready; model '{config.model}'"
+                    + (f" revision '{config.revision}'" if config.revision else "")
+                    + f" loaded on device '{runtime.device}'."
+                ),
+            )
+        except Exception as exc:
+            return AIProviderStatus(
+                configured_provider="mlx-vlm-local",
+                effective_provider="deterministic",
+                model=config.model,
+                base_url=config.base_url,
+                revision=config.revision,
+                cache_dir=config.cache_dir,
+                device=config.device,
+                available=False,
+                detail=(
+                    "MLX-VLM local backend could not load the configured model. "
+                    f"Falling back to deterministic analysis. Error: {exc}"
+                ),
+            )
+
+    detail = (
+        f"MLX-VLM local backend is configured for model '{config.model}'"
+        + (f" revision '{config.revision}'" if config.revision else "")
+        + (f"; cache {'found' if cache_exists else 'not found yet'} at {config.cache_dir}" if config.cache_dir else "")
+        + (f"; prepared model path {prepared_model_path}" if prepared_model_path else "")
+        + f"; requested runtime '{resolve_mlx_device(requested=config.device)}'."
+    )
+    return AIProviderStatus(
+        configured_provider="mlx-vlm-local",
+        effective_provider="mlx-vlm-local",
+        model=config.model,
+        base_url=config.base_url,
+        revision=config.revision,
+        cache_dir=config.cache_dir,
+        device=resolve_mlx_device(requested=config.device),
+        available=True,
+        detail=detail,
+    )
+
+
+def inspect_ai_provider_status(
+    config: AIProviderConfig | None = None,
+    *,
+    runtime_probe: bool = False,
+) -> AIProviderStatus:
+    effective_config = config or load_ai_provider_config()
+    if effective_config.provider == "mlx-vlm-local":
+        return inspect_mlx_vlm_provider_status(effective_config, runtime_probe=runtime_probe)
+    if effective_config.provider != "lmstudio":
+        return AIProviderStatus(
+            configured_provider=effective_config.provider,
+            effective_provider="deterministic",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
+            available=True,
+            detail="Deterministic structured analysis is active.",
+        )
+
+    if not effective_config.model:
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="deterministic",
+            model="",
+            base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
+            available=False,
+            detail=(
+                "LM Studio was requested but TIMELINE_AI_MODEL is empty. "
+                "Falling back to deterministic analysis."
+            ),
+        )
+
+    models_url = f"{effective_config.base_url.rstrip('/')}/models"
+    try:
+        req = request.Request(models_url, method="GET")
+        with request.urlopen(req, timeout=min(effective_config.timeout_sec, 3.0)) as response:
+            raw = response.read().decode("utf-8")
+        payload = json.loads(raw)
+        advertised = [
+            str(item.get("id", "")).strip()
+            for item in payload.get("data", [])
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        ]
+        if advertised and not any(model_matches(effective_config.model, identifier) for identifier in advertised):
+            return AIProviderStatus(
+                configured_provider="lmstudio",
+                effective_provider="deterministic",
+                model=effective_config.model,
+                base_url=effective_config.base_url,
+                revision=effective_config.revision,
+                cache_dir=effective_config.cache_dir,
+                device=effective_config.device,
+                available=False,
+                detail=(
+                    f"LM Studio is reachable at {effective_config.base_url}, but model "
+                    f"'{effective_config.model}' was not listed. Falling back to deterministic analysis."
+                ),
+            )
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="lmstudio",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
+            available=True,
+            detail=(
+                f"LM Studio is reachable at {effective_config.base_url}; "
+                f"model '{effective_config.model}' will be used."
+            ),
+        )
+    except (OSError, error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        return AIProviderStatus(
+            configured_provider="lmstudio",
+            effective_provider="deterministic",
+            model=effective_config.model,
+            base_url=effective_config.base_url,
+            revision=effective_config.revision,
+            cache_dir=effective_config.cache_dir,
+            device=effective_config.device,
+            available=False,
+            detail=(
+                f"LM Studio is not reachable at {effective_config.base_url}. "
+                "Falling back to deterministic analysis."
+            ),
+        )
 
 
 class OpenAICompatibleProviderClient:
@@ -489,7 +695,7 @@ class DeterministicVisionLanguageAnalyzer:
         return AIRuntimeStats()
 
 
-class LMStudioVisionLanguageAnalyzer:
+class LMStudioVisionLanguageAnalyzer(CachedFallbackAdapter):
     requires_keyframes = True
 
     def __init__(
@@ -502,10 +708,11 @@ class LMStudioVisionLanguageAnalyzer:
     ) -> None:
         self.config = config
         self.client = client
-        self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
-        self.last_error_detail = ""
-        self.cache_root = Path(cache_root) if cache_root is not None else None
-        self._runtime_stats = AIRuntimeStats()
+        super().__init__(
+            model=config.model,
+            fallback=fallback or DeterministicVisionLanguageAnalyzer(),
+            cache_root=cache_root,
+        )
 
     def analyze(
         self,
@@ -515,20 +722,17 @@ class LMStudioVisionLanguageAnalyzer:
         evidence: SegmentEvidence,
         story_prompt: str,
     ) -> SegmentUnderstanding:
-        cache_key = build_segment_cache_key(
-            model=self.config.model,
+        cache_key, cached = self._prepare_cached_request(
             asset=asset,
             segment=segment,
             evidence=evidence,
             story_prompt=story_prompt,
         )
-        cached = load_cached_understanding(self.cache_root, cache_key)
         if cached is not None:
-            self._runtime_stats.cached_segment_count += 1
             return cached
 
         try:
-            self._runtime_stats.live_request_count += 1
+            self._record_live_request()
             payload = self.client.create_json_completion(
                 model=self.config.model,
                 system_prompt=segment_understanding_system_prompt(),
@@ -551,27 +755,23 @@ class LMStudioVisionLanguageAnalyzer:
                 evidence=evidence,
                 story_prompt=story_prompt,
             )
-            if understanding.provider == "lmstudio":
-                self._runtime_stats.live_segment_count += 1
-            else:
-                self._runtime_stats.fallback_segment_count += 1
-            store_cached_understanding(self.cache_root, cache_key, understanding)
-            return understanding
+            return self._record_understanding(
+                cache_key=cache_key,
+                understanding=understanding,
+                live_provider="lmstudio",
+            )
         except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             self.last_error_detail = str(exc)
-            fallback = self.fallback.analyze(
+            fallback = self._make_fallback_understanding(
                 asset=asset,
                 segment=segment,
                 evidence=evidence,
                 story_prompt=story_prompt,
+                detail=self.last_error_detail,
+                risk_flag="lmstudio_request_failed",
+                failure_label="LM Studio request failed, so deterministic fallback was used",
             )
-            fallback.provider = "deterministic"
-            fallback.provider_model = "fallback-v1"
-            fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_request_failed"]))
-            fallback.rationale = (
-                f"{fallback.rationale} LM Studio request failed, so deterministic fallback was used: {self.last_error_detail}"
-            )
-            self._runtime_stats.fallback_segment_count += 1
+            self._record_fallback_result()
             return fallback
 
     def analyze_asset_segments(
@@ -583,23 +783,7 @@ class LMStudioVisionLanguageAnalyzer:
         if not tasks:
             return {}
 
-        results: dict[str, SegmentUnderstanding] = {}
-        pending: list[tuple[CandidateSegment, SegmentEvidence, str, str]] = []
-
-        for segment, evidence, story_prompt in tasks:
-            cache_key = build_segment_cache_key(
-                model=self.config.model,
-                asset=asset,
-                segment=segment,
-                evidence=evidence,
-                story_prompt=story_prompt,
-            )
-            cached = load_cached_understanding(self.cache_root, cache_key)
-            if cached is not None:
-                self._runtime_stats.cached_segment_count += 1
-                results[segment.id] = cached
-            else:
-                pending.append((segment, evidence, story_prompt, cache_key))
+        results, pending = self._collect_pending_tasks(asset=asset, tasks=tasks)
 
         if not pending:
             return results
@@ -610,7 +794,7 @@ class LMStudioVisionLanguageAnalyzer:
         ]
 
         try:
-            self._runtime_stats.live_request_count += 1
+            self._record_live_request()
             payload = self.client.create_json_completion(
                 model=self.config.model,
                 system_prompt=segment_batch_understanding_system_prompt(),
@@ -633,43 +817,30 @@ class LMStudioVisionLanguageAnalyzer:
                 understanding = normalized.get(segment.id)
                 if understanding is None:
                     continue
-                if understanding.provider == "lmstudio":
-                    self._runtime_stats.live_segment_count += 1
-                else:
-                    self._runtime_stats.fallback_segment_count += 1
-                store_cached_understanding(self.cache_root, cache_key, understanding)
-                results[segment.id] = understanding
+                results[segment.id] = self._record_understanding(
+                    cache_key=cache_key,
+                    understanding=understanding,
+                    live_provider="lmstudio",
+                )
         except (AIProviderRequestError, OSError, ValueError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             self.last_error_detail = str(exc)
             for segment, evidence, story_prompt, _cache_key in pending:
-                fallback = self.fallback.analyze(
+                fallback = self._make_fallback_understanding(
                     asset=asset,
                     segment=segment,
                     evidence=evidence,
                     story_prompt=story_prompt,
+                    detail=self.last_error_detail,
+                    risk_flag="lmstudio_request_failed",
+                    failure_label="LM Studio batch request failed, so deterministic fallback was used",
                 )
-                fallback.provider = "deterministic"
-                fallback.provider_model = "fallback-v1"
-                fallback.risk_flags = sorted(set([*fallback.risk_flags, "lmstudio_request_failed"]))
-                fallback.rationale = (
-                    f"{fallback.rationale} LM Studio batch request failed, so deterministic fallback was used: "
-                    f"{self.last_error_detail}"
-                )
-                self._runtime_stats.fallback_segment_count += 1
+                self._record_fallback_result()
                 results[segment.id] = fallback
 
         return results
 
-    def runtime_stats(self) -> AIRuntimeStats:
-        return AIRuntimeStats(
-            live_segment_count=self._runtime_stats.live_segment_count,
-            cached_segment_count=self._runtime_stats.cached_segment_count,
-            fallback_segment_count=self._runtime_stats.fallback_segment_count,
-            live_request_count=self._runtime_stats.live_request_count,
-        )
 
-
-class MLXVLMVisionLanguageAnalyzer:
+class MLXVLMVisionLanguageAnalyzer(CachedFallbackAdapter):
     requires_keyframes = True
 
     def __init__(
@@ -683,11 +854,12 @@ class MLXVLMVisionLanguageAnalyzer:
     ) -> None:
         self.config = config
         self.runtime = runtime
-        self.fallback = fallback or DeterministicVisionLanguageAnalyzer()
-        self.last_error_detail = ""
-        self.cache_root = Path(cache_root) if cache_root is not None else None
         self.debug_log_path = Path(debug_log_path) if debug_log_path is not None else None
-        self._runtime_stats = AIRuntimeStats()
+        super().__init__(
+            model=config.model,
+            fallback=fallback or DeterministicVisionLanguageAnalyzer(),
+            cache_root=cache_root,
+        )
 
     def analyze(
         self,
@@ -697,33 +869,31 @@ class MLXVLMVisionLanguageAnalyzer:
         evidence: SegmentEvidence,
         story_prompt: str,
     ) -> SegmentUnderstanding:
-        cache_key = build_segment_cache_key(
-            model=self.config.model,
+        cache_key, cached = self._prepare_cached_request(
             asset=asset,
             segment=segment,
             evidence=evidence,
             story_prompt=story_prompt,
         )
-        cached = load_cached_understanding(self.cache_root, cache_key)
         if cached is not None:
-            self._runtime_stats.cached_segment_count += 1
             return cached
 
         image_path = batch_image_path_for_evidence(evidence)
         if not image_path:
-            understanding = self._fallback_understanding(
+            understanding = self._make_fallback_understanding(
                 asset=asset,
                 segment=segment,
                 evidence=evidence,
                 story_prompt=story_prompt,
                 detail="No image evidence was available for mlx-vlm-local.",
                 risk_flag="mlx_vlm_no_image_evidence",
+                failure_label="MLX-VLM local analysis failed, so deterministic fallback was used",
             )
-            self._runtime_stats.fallback_segment_count += 1
+            self._record_fallback_result()
             return understanding
 
         try:
-            self._runtime_stats.live_request_count += 1
+            self._record_live_request()
             raw = self.runtime.query_image(
                 image_path=image_path,
                 prompt=local_vlm_segment_understanding_prompt(
@@ -783,12 +953,11 @@ class MLXVLMVisionLanguageAnalyzer:
                     "parsed_payload": payload,
                 },
             )
-            if understanding.provider == "mlx-vlm-local":
-                self._runtime_stats.live_segment_count += 1
-            else:
-                self._runtime_stats.fallback_segment_count += 1
-            store_cached_understanding(self.cache_root, cache_key, understanding)
-            return understanding
+            return self._record_understanding(
+                cache_key=cache_key,
+                understanding=understanding,
+                live_provider="mlx-vlm-local",
+            )
         except (AIProviderRequestError, OSError, ValueError, RuntimeError, TimeoutError, json.JSONDecodeError, ImportError) as exc:
             self.last_error_detail = str(exc)
             self._write_debug_entry(
@@ -803,15 +972,16 @@ class MLXVLMVisionLanguageAnalyzer:
                     "error": self.last_error_detail,
                 },
             )
-            understanding = self._fallback_understanding(
+            understanding = self._make_fallback_understanding(
                 asset=asset,
                 segment=segment,
                 evidence=evidence,
                 story_prompt=story_prompt,
                 detail=self.last_error_detail,
                 risk_flag="mlx_vlm_local_failed",
+                failure_label="MLX-VLM local analysis failed, so deterministic fallback was used",
             )
-            self._runtime_stats.fallback_segment_count += 1
+            self._record_fallback_result()
             return understanding
 
     def analyze_asset_segments(
@@ -829,14 +999,6 @@ class MLXVLMVisionLanguageAnalyzer:
             )
             for segment, evidence, story_prompt in tasks
         }
-
-    def runtime_stats(self) -> AIRuntimeStats:
-        return AIRuntimeStats(
-            live_segment_count=self._runtime_stats.live_segment_count,
-            cached_segment_count=self._runtime_stats.cached_segment_count,
-            fallback_segment_count=self._runtime_stats.fallback_segment_count,
-            live_request_count=self._runtime_stats.live_request_count,
-        )
 
     def _write_debug_entry(
         self,
@@ -863,30 +1025,6 @@ class MLXVLMVisionLanguageAnalyzer:
         }
         with self.debug_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=True) + "\n")
-
-    def _fallback_understanding(
-        self,
-        *,
-        asset: Asset,
-        segment: CandidateSegment,
-        evidence: SegmentEvidence,
-        story_prompt: str,
-        detail: str,
-        risk_flag: str,
-    ) -> SegmentUnderstanding:
-        fallback = self.fallback.analyze(
-            asset=asset,
-            segment=segment,
-            evidence=evidence,
-            story_prompt=story_prompt,
-        )
-        fallback.provider = "deterministic"
-        fallback.provider_model = "fallback-v1"
-        fallback.risk_flags = sorted(set([*fallback.risk_flags, risk_flag]))
-        fallback.rationale = (
-            f"{fallback.rationale} MLX-VLM local analysis failed, so deterministic fallback was used: {detail}"
-        )
-        return fallback
 
 
 def default_vision_language_analyzer(
@@ -917,1051 +1055,6 @@ def default_vision_language_analyzer(
         )
     return DeterministicVisionLanguageAnalyzer()
 
-
-def load_ai_provider_config() -> AIProviderConfig:
-    timeout_raw = os.environ.get("TIMELINE_AI_TIMEOUT_SEC", "30")
-    try:
-        timeout_sec = max(5.0, float(timeout_raw))
-    except ValueError:
-        timeout_sec = 30.0
-
-    provider = os.environ.get("TIMELINE_AI_PROVIDER", "mlx-vlm-local").strip().lower()
-    requested_model = os.environ.get("TIMELINE_AI_MODEL", "").strip()
-    model_id = os.environ.get("TIMELINE_AI_MODEL_ID", "").strip()
-    revision = os.environ.get("TIMELINE_AI_MODEL_REVISION", "").strip()
-    cache_dir = os.environ.get("TIMELINE_AI_MODEL_CACHE_DIR", "").strip()
-    device = os.environ.get("TIMELINE_AI_DEVICE", "auto").strip() or "auto"
-
-    if provider == "mlx-vlm-local":
-        model_id, revision = resolve_mlx_vlm_model(model=requested_model, model_id=model_id, revision=revision)
-        requested_model = model_id
-        if not cache_dir:
-            cache_dir = str((Path.cwd() / "models" / "mlx-vlm").resolve())
-
-    return AIProviderConfig(
-        provider=provider,
-        model=requested_model,
-        base_url=os.environ.get("TIMELINE_AI_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
-        timeout_sec=timeout_sec,
-        revision=revision,
-        cache_dir=cache_dir,
-        device=device,
-    )
-
-
-def load_ai_analysis_config() -> AIAnalysisConfig:
-    mode = os.environ.get("TIMELINE_AI_MODE", "full").strip().lower() or "full"
-    if mode not in {"fast", "full"}:
-        mode = "full"
-    transcript_provider = os.environ.get("TIMELINE_TRANSCRIPT_PROVIDER", "auto").strip().lower() or "auto"
-    if transcript_provider not in {"auto", "disabled", "faster-whisper"}:
-        transcript_provider = "auto"
-    transcript_model_size = os.environ.get("TIMELINE_TRANSCRIPT_MODEL_SIZE", "small").strip().lower() or "small"
-
-    max_segments_default = 1 if mode == "fast" else 99
-    max_keyframes_default = 1 if mode == "fast" else 4
-    max_width_default = 448 if mode == "fast" else 960
-    boundary_refinement_enabled = parse_bool_env("TIMELINE_SEGMENT_BOUNDARY_REFINEMENT", True)
-    boundary_refinement_legacy_fallback = parse_bool_env("TIMELINE_SEGMENT_LEGACY_FALLBACK", True)
-    semantic_boundary_validation_enabled = parse_bool_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION", True)
-    semantic_boundary_ambiguity_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_AMBIGUITY_THRESHOLD", 0.6)
-    semantic_boundary_ambiguity_threshold = max(0.0, min(1.0, semantic_boundary_ambiguity_threshold))
-    semantic_boundary_floor_threshold = parse_float_env("TIMELINE_SEGMENT_SEMANTIC_FLOOR_THRESHOLD", 0.45)
-    semantic_boundary_floor_threshold = max(0.0, min(1.0, semantic_boundary_floor_threshold))
-    if semantic_boundary_floor_threshold > semantic_boundary_ambiguity_threshold:
-        semantic_boundary_floor_threshold = semantic_boundary_ambiguity_threshold
-    semantic_boundary_min_targets = max(
-        0,
-        parse_int_env("TIMELINE_SEGMENT_SEMANTIC_MIN_TARGETS", 1),
-    )
-    semantic_boundary_validation_budget_pct = parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT", 100)
-    semantic_boundary_validation_budget_pct = max(0, min(100, semantic_boundary_validation_budget_pct))
-    semantic_boundary_validation_max_segments = max(
-        0,
-        parse_int_env("TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS", 2),
-    )
-    semantic_boundary_max_adjustment_sec = max(
-        0.25,
-        parse_float_env("TIMELINE_SEGMENT_SEMANTIC_MAX_ADJUSTMENT_SEC", 1.5),
-    )
-
-    # CLIP configuration
-    clip_min_score_raw = os.environ.get("TIMELINE_AI_CLIP_MIN_SCORE", "0.1").strip()
-    try:
-        clip_min_score = float(clip_min_score_raw)
-        clip_min_score = max(0.0, min(1.0, clip_min_score))  # Clamp to [0, 1]
-    except ValueError:
-        clip_min_score = 0.1
-
-    vlm_budget_pct = parse_int_env("TIMELINE_AI_VLM_BUDGET_PCT", 100)
-    vlm_budget_pct = max(0, min(100, vlm_budget_pct))  # Clamp to [0, 100]
-
-    return AIAnalysisConfig(
-        mode=mode,
-        max_segments_per_asset=max(1, parse_int_env("TIMELINE_AI_MAX_SEGMENTS_PER_ASSET", max_segments_default)),
-        max_keyframes_per_segment=max(1, parse_int_env("TIMELINE_AI_MAX_KEYFRAMES", max_keyframes_default)),
-        keyframe_max_width=max(160, parse_int_env("TIMELINE_AI_KEYFRAME_MAX_WIDTH", max_width_default)),
-        concurrency=max(1, parse_int_env("TIMELINE_AI_CONCURRENCY", 2)),
-        cache_enabled=parse_bool_env("TIMELINE_AI_CACHE", True),
-        transcript_provider=transcript_provider,
-        transcript_model_size=transcript_model_size,
-        clip_enabled=parse_bool_env("TIMELINE_AI_CLIP_ENABLED", True),
-        clip_min_score=clip_min_score,
-        vlm_budget_pct=vlm_budget_pct,
-        clip_model=os.environ.get("TIMELINE_AI_CLIP_MODEL", "ViT-B-32").strip() or "ViT-B-32",
-        clip_model_pretrained=os.environ.get("TIMELINE_AI_CLIP_MODEL_PRETRAINED", "laion2b_s34b_b79k").strip() or "laion2b_s34b_b79k",
-        boundary_refinement_enabled=boundary_refinement_enabled,
-        boundary_refinement_legacy_fallback=boundary_refinement_legacy_fallback,
-        semantic_boundary_validation_enabled=semantic_boundary_validation_enabled,
-        semantic_boundary_ambiguity_threshold=semantic_boundary_ambiguity_threshold,
-        semantic_boundary_floor_threshold=semantic_boundary_floor_threshold,
-        semantic_boundary_min_targets=semantic_boundary_min_targets,
-        semantic_boundary_validation_budget_pct=semantic_boundary_validation_budget_pct,
-        semantic_boundary_validation_max_segments=semantic_boundary_validation_max_segments,
-        semantic_boundary_max_adjustment_sec=semantic_boundary_max_adjustment_sec,
-    )
-
-
-def inspect_ai_provider_status(
-    config: AIProviderConfig | None = None,
-    *,
-    runtime_probe: bool = False,
-) -> AIProviderStatus:
-    effective_config = config or load_ai_provider_config()
-
-    if effective_config.provider == "mlx-vlm-local":
-        return inspect_mlx_vlm_provider_status(effective_config, runtime_probe=runtime_probe)
-
-    if effective_config.provider != "lmstudio":
-        return AIProviderStatus(
-            configured_provider=effective_config.provider,
-            effective_provider="deterministic",
-            model=effective_config.model,
-            base_url=effective_config.base_url,
-            revision=effective_config.revision,
-            cache_dir=effective_config.cache_dir,
-            device=effective_config.device,
-            available=True,
-            detail="Deterministic structured analysis is active.",
-        )
-
-    if not effective_config.model:
-        return AIProviderStatus(
-            configured_provider="lmstudio",
-            effective_provider="deterministic",
-            model="",
-            base_url=effective_config.base_url,
-            revision=effective_config.revision,
-            cache_dir=effective_config.cache_dir,
-            device=effective_config.device,
-            available=False,
-            detail="LM Studio was requested but TIMELINE_AI_MODEL is empty. Falling back to deterministic analysis.",
-        )
-
-    models_url = f"{effective_config.base_url.rstrip('/')}/models"
-    try:
-        req = request.Request(models_url, method="GET")
-        with request.urlopen(req, timeout=min(effective_config.timeout_sec, 3.0)) as response:
-            raw = response.read().decode("utf-8")
-        payload = json.loads(raw)
-        advertised = []
-        for item in payload.get("data", []):
-            if isinstance(item, dict):
-                identifier = str(item.get("id", "")).strip()
-                if identifier:
-                    advertised.append(identifier)
-
-        if advertised and not any(model_matches(effective_config.model, identifier) for identifier in advertised):
-            return AIProviderStatus(
-                configured_provider="lmstudio",
-                effective_provider="deterministic",
-                model=effective_config.model,
-                base_url=effective_config.base_url,
-                revision=effective_config.revision,
-                cache_dir=effective_config.cache_dir,
-                device=effective_config.device,
-                available=False,
-                detail=(
-                    f"LM Studio is reachable at {effective_config.base_url}, but model "
-                    f"'{effective_config.model}' was not listed. Falling back to deterministic analysis."
-                ),
-            )
-
-        return AIProviderStatus(
-            configured_provider="lmstudio",
-            effective_provider="lmstudio",
-            model=effective_config.model,
-            base_url=effective_config.base_url,
-            revision=effective_config.revision,
-            cache_dir=effective_config.cache_dir,
-            device=effective_config.device,
-            available=True,
-            detail=f"LM Studio is reachable at {effective_config.base_url}; model '{effective_config.model}' will be used.",
-        )
-    except (OSError, error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
-        return AIProviderStatus(
-            configured_provider="lmstudio",
-            effective_provider="deterministic",
-            model=effective_config.model,
-            base_url=effective_config.base_url,
-            revision=effective_config.revision,
-            cache_dir=effective_config.cache_dir,
-            device=effective_config.device,
-            available=False,
-            detail=(
-                f"LM Studio is not reachable at {effective_config.base_url}. "
-                "Falling back to deterministic analysis."
-            ),
-        )
-
-
-def inspect_mlx_vlm_provider_status(
-    config: AIProviderConfig,
-    *,
-    runtime_probe: bool = False,
-) -> AIProviderStatus:
-    missing = missing_mlx_vlm_dependencies()
-    ffmpeg_available = shutil.which("ffmpeg") is not None
-    cache_path = Path(config.cache_dir).expanduser() if config.cache_dir else None
-    cache_exists = bool(cache_path and cache_path.exists())
-    prepared_model_path = resolve_prepared_mlx_vlm_model_path(
-        model_id=config.model,
-        revision=config.revision,
-        cache_dir=config.cache_dir,
-    )
-    apple_silicon = platform.system() == "Darwin" and platform.machine() == "arm64"
-
-    if missing:
-        return AIProviderStatus(
-            configured_provider="mlx-vlm-local",
-            effective_provider="deterministic",
-            model=config.model,
-            base_url=config.base_url,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            device=config.device,
-            available=False,
-            detail=(
-                "MLX-VLM local backend is not ready because required Python modules are missing: "
-                + ", ".join(missing)
-                + ". Falling back to deterministic analysis."
-            ),
-        )
-
-    if not apple_silicon:
-        return AIProviderStatus(
-            configured_provider="mlx-vlm-local",
-            effective_provider="deterministic",
-            model=config.model,
-            base_url=config.base_url,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            device=config.device,
-            available=False,
-            detail=(
-                "MLX-VLM local backend requires Apple Silicon on macOS. "
-                "Falling back to deterministic analysis."
-            ),
-        )
-
-    if not ffmpeg_available:
-        return AIProviderStatus(
-            configured_provider="mlx-vlm-local",
-            effective_provider="deterministic",
-            model=config.model,
-            base_url=config.base_url,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            device=config.device,
-            available=False,
-            detail=(
-                "MLX-VLM local backend requires ffmpeg to extract keyframes and build contact sheets, "
-                "but ffmpeg is not installed or not on PATH. Falling back to deterministic analysis."
-            ),
-        )
-
-    if prepared_model_path is None:
-        return AIProviderStatus(
-            configured_provider="mlx-vlm-local",
-            effective_provider="deterministic",
-            model=config.model,
-            base_url=config.base_url,
-            revision=config.revision,
-            cache_dir=config.cache_dir,
-            device=config.device,
-            available=False,
-            detail=(
-                "MLX-VLM local backend has no prepared local model files yet. "
-                "Run `npm run setup` to download the configured model before processing."
-            ),
-        )
-
-    if runtime_probe:
-        try:
-            runtime = MLXVLMRuntime(
-                model_id=config.model,
-                revision=config.revision,
-                cache_dir=config.cache_dir,
-                device=config.device,
-            )
-            runtime.ensure_loaded()
-            return AIProviderStatus(
-                configured_provider="mlx-vlm-local",
-                effective_provider="mlx-vlm-local",
-                model=config.model,
-                base_url=config.base_url,
-                revision=config.revision,
-                cache_dir=config.cache_dir,
-                device=runtime.device,
-                available=True,
-                detail=(
-                    f"MLX-VLM local backend is ready; model '{config.model}'"
-                    + (f" revision '{config.revision}'" if config.revision else "")
-                    + f" loaded on device '{runtime.device}'."
-                ),
-            )
-        except Exception as exc:
-            return AIProviderStatus(
-                configured_provider="mlx-vlm-local",
-                effective_provider="deterministic",
-                model=config.model,
-                base_url=config.base_url,
-                revision=config.revision,
-                cache_dir=config.cache_dir,
-                device=config.device,
-                available=False,
-                detail=(
-                    "MLX-VLM local backend could not load the configured model. "
-                    f"Falling back to deterministic analysis. Error: {exc}"
-                ),
-            )
-
-    detail = (
-        f"MLX-VLM local backend is configured for model '{config.model}'"
-        + (f" revision '{config.revision}'" if config.revision else "")
-        + (f"; cache {'found' if cache_exists else 'not found yet'} at {config.cache_dir}" if config.cache_dir else "")
-        + (f"; prepared model path {prepared_model_path}" if prepared_model_path else "")
-        + f"; requested runtime '{resolve_mlx_device(requested=config.device)}'."
-    )
-    return AIProviderStatus(
-        configured_provider="mlx-vlm-local",
-        effective_provider="mlx-vlm-local",
-        model=config.model,
-        base_url=config.base_url,
-        revision=config.revision,
-        cache_dir=config.cache_dir,
-        device=resolve_mlx_device(requested=config.device),
-        available=True,
-        detail=detail,
-    )
-
-
-def build_segment_evidence(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    asset_segments: list[CandidateSegment],
-    segment_index: int,
-    story_prompt: str,
-    artifacts_root: str | Path | None,
-    extract_keyframes: bool,
-    transcript_status: str = "",
-    speech_mode_source: str = "",
-    max_keyframes_per_segment: int = 3,
-    keyframe_max_width: int = 640,
-) -> SegmentEvidence:
-    keyframe_timestamps = keyframe_timestamps_for_segment(
-        segment.start_sec,
-        segment.end_sec,
-        target_count=max_keyframes_per_segment,
-    )
-    keyframe_paths: list[str] = []
-    contact_sheet_path = ""
-
-    if extract_keyframes and artifacts_root is not None:
-        keyframe_paths = extract_segment_keyframes(
-            asset=asset,
-            segment=segment,
-            timestamps=keyframe_timestamps,
-            artifacts_root=artifacts_root,
-            max_width=keyframe_max_width,
-        )
-        contact_sheet_path = create_segment_contact_sheet(
-            asset=asset,
-            segment=segment,
-            keyframe_paths=keyframe_paths,
-            artifacts_root=artifacts_root,
-        )
-
-    context_window_start_sec = segment.start_sec
-    context_window_end_sec = segment.end_sec
-    if segment_index > 0:
-        context_window_start_sec = asset_segments[segment_index - 1].start_sec
-    if segment_index < len(asset_segments) - 1:
-        context_window_end_sec = asset_segments[segment_index + 1].end_sec
-
-    return SegmentEvidence(
-        media_path=asset.proxy_path,
-        transcript_excerpt=segment.transcript_excerpt,
-        story_prompt=story_prompt,
-        analysis_mode=segment.analysis_mode,
-        transcript_status=transcript_status,
-        speech_mode_source=speech_mode_source,
-        keyframe_timestamps_sec=[round(timestamp, 3) for timestamp in keyframe_timestamps],
-        keyframe_paths=keyframe_paths,
-        contact_sheet_path=contact_sheet_path,
-        context_window_start_sec=round(context_window_start_sec, 3),
-        context_window_end_sec=round(context_window_end_sec, 3),
-        metrics_snapshot=dict(segment.quality_metrics),
-        keyframe_max_width=keyframe_max_width if extract_keyframes else 0,
-        transcript_turn_count=(
-            len(segment.prefilter.transcript_turn_ids)
-            if segment.prefilter is not None
-            else 0
-        ),
-        transcript_turn_ranges_sec=(
-            [list(item) for item in segment.prefilter.transcript_turn_ranges_sec]
-            if segment.prefilter is not None
-            else []
-        ),
-        turn_completeness=round(segment.quality_metrics.get("turn_completeness", 0.0), 4),
-        speech_structure_label=(
-            segment.prefilter.speech_structure_label
-            if segment.prefilter is not None
-            else ""
-        ),
-        speech_structure_cues=(
-            list(segment.prefilter.speech_structure_cues)
-            if segment.prefilter is not None
-            else []
-        ),
-        speech_structure_confidence=round(
-            segment.prefilter.speech_structure_confidence,
-            4,
-        ) if segment.prefilter is not None else 0.0,
-    )
-
-
-def segment_evidence_matches(
-    *,
-    evidence: SegmentEvidence | None,
-    asset: Asset,
-    segment: CandidateSegment,
-    asset_segments: list[CandidateSegment],
-    segment_index: int,
-    story_prompt: str,
-    extract_keyframes: bool,
-    transcript_status: str = "",
-    speech_mode_source: str = "",
-    max_keyframes_per_segment: int = 3,
-    keyframe_max_width: int = 640,
-) -> bool:
-    if evidence is None:
-        return False
-
-    expected_timestamps = [
-        round(timestamp, 3)
-        for timestamp in keyframe_timestamps_for_segment(
-            segment.start_sec,
-            segment.end_sec,
-            target_count=max_keyframes_per_segment,
-        )
-    ]
-    expected_context_window_start_sec = segment.start_sec
-    expected_context_window_end_sec = segment.end_sec
-    if segment_index > 0:
-        expected_context_window_start_sec = asset_segments[segment_index - 1].start_sec
-    if segment_index < len(asset_segments) - 1:
-        expected_context_window_end_sec = asset_segments[segment_index + 1].end_sec
-
-    return (
-        evidence.media_path == asset.proxy_path
-        and evidence.transcript_excerpt == segment.transcript_excerpt
-        and evidence.story_prompt == story_prompt
-        and evidence.analysis_mode == segment.analysis_mode
-        and evidence.transcript_status == transcript_status
-        and evidence.speech_mode_source == speech_mode_source
-        and evidence.keyframe_timestamps_sec == expected_timestamps
-        and evidence.context_window_start_sec == round(expected_context_window_start_sec, 3)
-        and evidence.context_window_end_sec == round(expected_context_window_end_sec, 3)
-        and evidence.metrics_snapshot == dict(segment.quality_metrics)
-        and evidence.keyframe_max_width == (keyframe_max_width if extract_keyframes else 0)
-    )
-
-
-def keyframe_timestamps_for_segment(
-    start_sec: float,
-    end_sec: float,
-    target_count: int | None = None,
-) -> list[float]:
-    duration = max(0.01, end_sec - start_sec)
-    count = target_count or (3 if duration <= 8.0 else 4)
-    count = max(1, count)
-    step = duration / (count + 1)
-    return [start_sec + (step * index) for index in range(1, count + 1)]
-
-
-def extract_segment_keyframes(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    timestamps: list[float],
-    artifacts_root: str | Path,
-    max_width: int,
-) -> list[str]:
-    if shutil.which("ffmpeg") is None:
-        return []
-
-    segment_dir = Path(artifacts_root) / "keyframes" / asset.id
-    segment_dir.mkdir(parents=True, exist_ok=True)
-
-    targets = [
-        segment_dir / f"{segment.id}-k{index:02d}.jpg"
-        for index, _timestamp in enumerate(timestamps, start=1)
-    ]
-    extracted_by_target: dict[Path, str] = {}
-
-    if len(targets) > 1:
-        for path in _extract_segment_keyframes_batched(
-            media_path=asset.proxy_path,
-            timestamps=timestamps,
-            targets=targets,
-            max_width=max_width,
-        ):
-            extracted_by_target[Path(path)] = path
-
-    for timestamp, target in zip(timestamps, targets):
-        if target in extracted_by_target:
-            continue
-        extracted = _extract_single_segment_keyframe(
-            media_path=asset.proxy_path,
-            timestamp=timestamp,
-            target=target,
-            max_width=max_width,
-        )
-        if extracted:
-            extracted_by_target[target] = extracted
-
-    return [
-        extracted_by_target[target]
-        for target in targets
-        if target in extracted_by_target
-    ]
-
-
-def _extract_single_segment_keyframe(
-    *,
-    media_path: str,
-    timestamp: float,
-    target: Path,
-    max_width: int,
-) -> str:
-    process = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-ss",
-            f"{timestamp:.3f}",
-            "-i",
-            media_path,
-            "-vf",
-            f"scale=min({max_width}\\,iw):-2",
-            "-frames:v",
-            "1",
-            "-q:v",
-            "4",
-            str(target),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if process.returncode == 0 and target.exists():
-        return str(target)
-    return ""
-
-
-def _extract_segment_keyframes_batched(
-    *,
-    media_path: str,
-    timestamps: list[float],
-    targets: list[Path],
-    max_width: int,
-) -> list[str]:
-    command = ["ffmpeg", "-y", "-v", "error"]
-    for timestamp in timestamps:
-        command.extend(["-ss", f"{timestamp:.3f}", "-i", media_path])
-    for index, target in enumerate(targets):
-        command.extend(
-            [
-                "-map",
-                f"{index}:v:0",
-                "-vf",
-                f"scale=min({max_width}\\,iw):-2",
-                "-frames:v",
-                "1",
-                "-q:v",
-                "4",
-                str(target),
-            ]
-        )
-
-    process = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if process.returncode != 0:
-        return []
-    return [str(target) for target in targets if target.exists()]
-
-
-def create_segment_contact_sheet(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    keyframe_paths: list[str],
-    artifacts_root: str | Path,
-) -> str:
-    if not keyframe_paths:
-        return ""
-    if len(keyframe_paths) == 1:
-        return keyframe_paths[0]
-    if shutil.which("ffmpeg") is None:
-        return keyframe_paths[0]
-
-    contact_dir = Path(artifacts_root) / "contact-sheets" / asset.id
-    contact_dir.mkdir(parents=True, exist_ok=True)
-    target = contact_dir / f"{segment.id}.jpg"
-    command = ["ffmpeg", "-y", "-v", "error"]
-    for path in keyframe_paths:
-        command.extend(["-i", path])
-    command.extend(
-        [
-            "-filter_complex",
-            f"hstack=inputs={len(keyframe_paths)}",
-            "-q:v",
-            "4",
-            str(target),
-        ]
-    )
-    process = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if process.returncode == 0 and target.exists():
-        return str(target)
-    return keyframe_paths[0]
-
-
-def segment_understanding_system_prompt() -> str:
-    return (
-        "You analyze short video segments for an editor. "
-        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
-        "Use concise editorial language and keep the response short. "
-        "subjects, actions, story_roles, quality_findings, and risk_flags must each contain at most 3 short items. "
-        "keep_label must be one of: keep, maybe, reject. "
-        "confidence, visual_distinctiveness, clarity, and story_relevance must be numbers from 0 to 1. "
-        "Keys required: summary, subjects, actions, shot_type, camera_motion, mood, "
-        "story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
-        "visual_distinctiveness, clarity, story_relevance."
-    )
-
-
-def segment_batch_understanding_system_prompt() -> str:
-    return (
-        "You analyze shortlisted video segments from the same source clip for an editor. "
-        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
-        "Keep each segment result short. subjects, actions, story_roles, quality_findings, and risk_flags "
-        "must each contain at most 3 short items. "
-        "keep_label must be one of: keep, maybe, reject. "
-        "confidence, visual_distinctiveness, clarity, and story_relevance must be numbers from 0 to 1. "
-        "Respond with an object containing a `segments` array. "
-        "Each array item must include: segment_id, summary, subjects, actions, shot_type, camera_motion, "
-        "mood, story_roles, quality_findings, keep_label, confidence, rationale, risk_flags, "
-        "visual_distinctiveness, clarity, story_relevance."
-    )
-
-
-def segment_understanding_user_prompt(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> str:
-    metrics = ", ".join(
-        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
-    )
-    transcript = transcript_prompt_text(evidence)
-    keyframes = ", ".join(f"{timestamp:.2f}s" for timestamp in evidence.keyframe_timestamps_sec)
-
-    return (
-        "Project story prompt:\n"
-        f"{story_prompt}\n\n"
-        "Segment metadata:\n"
-        f"- Asset: {asset.name}\n"
-        f"- Reel: {asset.interchange_reel_name}\n"
-        f"- Analysis mode: {segment.analysis_mode}\n"
-        f"- Segment: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
-        f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"- Keyframe timestamps: {keyframes}\n"
-        f"- Metrics: {metrics}\n"
-        f"- Transcript evidence: {transcript}\n\n"
-        "Decide what is happening in the segment, whether it is editorially useful, "
-        "what role it could play in a rough cut, and whether it should be kept."
-    )
-
-
-def segment_batch_understanding_user_prompt(
-    *,
-    asset: Asset,
-    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
-) -> str:
-    story_prompt = tasks[0][2] if tasks else ""
-    lines = [
-        "Project story prompt:",
-        story_prompt,
-        "",
-        "Asset metadata:",
-        f"- Asset: {asset.name}",
-        f"- Reel: {asset.interchange_reel_name}",
-        "",
-        "Images are provided in the same order as the segments below. Each image is a stitched contact sheet for one segment.",
-        "Evaluate each segment independently and return output for every listed segment.",
-        "",
-        "Segments:",
-    ]
-    for index, (segment, evidence, _story_prompt) in enumerate(tasks, start=1):
-        metrics = ", ".join(
-            f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
-        )
-        transcript = transcript_prompt_text(evidence)
-        lines.extend(
-            [
-                f"{index}. segment_id={segment.id}",
-                f"   - analysis_mode: {segment.analysis_mode}",
-                f"   - range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s",
-                f"   - context: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s",
-                f"   - keyframes: {', '.join(f'{timestamp:.2f}s' for timestamp in evidence.keyframe_timestamps_sec)}",
-                f"   - transcript evidence: {transcript}",
-                f"   - metrics: {metrics}",
-            ]
-        )
-    return "\n".join(lines)
-
-
-def local_vlm_segment_understanding_prompt(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> str:
-    metrics = ", ".join(
-        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
-    )
-    transcript = transcript_prompt_text(evidence)
-    return (
-        "Analyze this stitched contact sheet from a shortlisted video segment and respond with exactly one compact JSON object. "
-        "No markdown fences. No commentary outside JSON. No duplicated list items. "
-        "Return JSON with these keys only: "
-        "summary, subjects, actions, shot_type, camera_motion, mood, keep_label, confidence, rationale.\n"
-        "Rules: summary and rationale must each be one short sentence with real content. "
-        "subjects and actions may contain 0 to 2 short items only. "
-        "shot_type must be a real label like wide, medium, close, detail, overhead, or low angle. "
-        "camera_motion must be a real label like static, handheld, pan, tilt, tracking, or walking. "
-        "mood must be a real label like calm, active, tense, work, or casual. "
-        "keep_label must be exactly one of keep, maybe, reject. "
-        "confidence must be a number between 0 and 1. "
-        "If unsure, use fewer items, not more. Do not use placeholder words like short label, short sentence, item1, or item2.\n\n"
-        f"Project story prompt: {story_prompt}\n"
-        f"Asset: {asset.name}\n"
-        f"Reel: {asset.interchange_reel_name}\n"
-        f"Analysis mode: {segment.analysis_mode}\n"
-        f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
-        f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"Transcript evidence: {transcript}\n"
-        f"Metrics: {metrics}\n"
-        "Focus on whether the segment has a clear subject, usable motion, readable composition, and editorial usefulness."
-    )
-
-
-def boundary_validation_system_prompt() -> str:
-    return (
-        "You validate whether a short video segment starts and ends at a complete editorial beat. "
-        "Return exactly one JSON object only. Do not add markdown fences or commentary. "
-        "Keys required: decision, reason, confidence, suggested_start_sec, suggested_end_sec, split_point_sec. "
-        "decision must be one of: keep, extend, trim, split. "
-        "reason must be one short sentence. confidence must be a number from 0 to 1. "
-        "Use null for split_point_sec unless decision is split. "
-        "When decision is keep, suggested_start_sec and suggested_end_sec should match the current segment bounds."
-    )
-
-
-def boundary_validation_user_prompt(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> str:
-    metrics = ", ".join(
-        f"{key}={value:.2f}" for key, value in sorted(evidence.metrics_snapshot.items())
-    )
-    transcript = transcript_prompt_text(evidence)
-    boundary_strategy = segment.prefilter.boundary_strategy if segment.prefilter is not None else "unknown"
-    assembly = (
-        f"{segment.prefilter.assembly_operation}:{segment.prefilter.assembly_rule_family}"
-        if segment.prefilter is not None and segment.prefilter.assembly_operation != "none"
-        else "none"
-    )
-    return (
-        "Project story prompt:\n"
-        f"{story_prompt}\n\n"
-        "Segment metadata:\n"
-        f"- Asset: {asset.name}\n"
-        f"- Reel: {asset.interchange_reel_name}\n"
-        f"- Analysis mode: {segment.analysis_mode}\n"
-        f"- Segment: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
-        f"- Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"- Boundary strategy: {boundary_strategy}\n"
-        f"- Assembly lineage: {assembly}\n"
-        f"- Transcript evidence: {transcript}\n"
-        f"- Metrics: {metrics}\n\n"
-        "Decide whether the current segment is complete as-is, needs a small extend or trim, "
-        "or contains two ideas that should be split once. Keep adjustments local to the current bounds."
-    )
-
-
-def local_vlm_boundary_validation_prompt(
-    *,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> str:
-    return (
-        "Analyze this stitched contact sheet and decide whether the segment boundaries feel complete. "
-        "Return exactly one compact JSON object only with keys: "
-        "decision, reason, confidence. "
-        "decision must be keep, extend, trim, or split. "
-        "confidence must be a number between 0 and 1. reason must be one short sentence. "
-        "Do not include timestamps or extra keys. "
-        "Use keep when the current beat is already complete. "
-        "Use trim when the beat contains extra lead-in or tail. "
-        "Use extend when the beat feels cut too tight. "
-        "Use split only when the contact sheet unmistakably shows two self-contained moments; "
-        "if you are unsure, prefer keep. "
-        "Do not use split for one continuous action that simply changes framing or composition.\n\n"
-        f"Project story prompt: {story_prompt}\n"
-        f"Asset: {asset.name}\n"
-        f"Reel: {asset.interchange_reel_name}\n"
-        f"Analysis mode: {segment.analysis_mode}\n"
-        f"Segment range: {segment.start_sec:.2f}s to {segment.end_sec:.2f}s\n"
-        f"Context window: {evidence.context_window_start_sec:.2f}s to {evidence.context_window_end_sec:.2f}s\n"
-        f"Transcript evidence: {transcript_prompt_text(evidence)}\n"
-        "Focus on whether the moment starts too late, ends too early, or bundles two separate beats."
-    )
-
-
-def transcript_prompt_text(evidence: SegmentEvidence) -> str:
-    if evidence.transcript_excerpt.strip():
-        return evidence.transcript_excerpt
-    if evidence.transcript_status:
-        source = f" via {evidence.speech_mode_source}" if evidence.speech_mode_source else ""
-        return f"No transcript excerpt available ({evidence.transcript_status}{source})."
-    return "No transcript excerpt available."
-
-
-def normalize_boundary_validation_output(
-    payload: dict[str, object],
-    *,
-    provider: str,
-    model: str,
-    segment: CandidateSegment,
-    asset: Asset | None = None,
-) -> BoundaryValidationResult:
-    decision_raw = str(payload.get("decision", "keep")).strip().lower()
-    decision = decision_raw if decision_raw in {"keep", "extend", "trim", "split"} else "keep"
-    reason = string_or_default(payload.get("reason"), "Semantic validation kept the deterministic boundary.")
-    confidence = rounded_metric(number_or_default(payload.get("confidence"), 0.0))
-    if provider == "mlx-vlm-local" and decision == "split" and confidence < 0.85:
-        decision = "keep"
-        reason = (
-            "Semantic validation kept the deterministic boundary because the local split recommendation "
-            "was not confident enough."
-        )
-    segment_duration = max(0.0, segment.end_sec - segment.start_sec)
-    local_delta = round(min(0.75, max(0.25, segment_duration * 0.12)), 3)
-    asset_duration = asset.duration_sec if asset is not None else segment.end_sec
-
-    default_start_sec = segment.start_sec
-    default_end_sec = segment.end_sec
-    if decision == "trim":
-        default_start_sec = min(segment.end_sec - 1.5, segment.start_sec + local_delta)
-        default_end_sec = max(default_start_sec + 1.5, segment.end_sec - local_delta)
-    elif decision == "extend":
-        default_start_sec = max(0.0, segment.start_sec - local_delta)
-        default_end_sec = min(asset_duration, segment.end_sec + local_delta)
-
-    suggested_start_sec = round(float(number_or_default(payload.get("suggested_start_sec"), default_start_sec)), 3)
-    suggested_end_sec = round(float(number_or_default(payload.get("suggested_end_sec"), default_end_sec)), 3)
-    split_point_sec = payload.get("split_point_sec")
-    split_ranges_sec: list[list[float]] = []
-    if decision == "split":
-        split_point = number_or_default(split_point_sec, (segment.start_sec + segment.end_sec) / 2.0)
-        split_ranges_sec = [
-            [round(segment.start_sec, 3), round(split_point, 3)],
-            [round(split_point, 3), round(segment.end_sec, 3)],
-        ]
-
-    return BoundaryValidationResult(
-        status="validated",
-        decision=decision,
-        reason=reason,
-        confidence=confidence,
-        provider=provider,
-        provider_model=model,
-        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
-        suggested_range_sec=[round(suggested_start_sec, 3), round(suggested_end_sec, 3)],
-        split_ranges_sec=split_ranges_sec,
-    )
-
-
-def boundary_validation_fallback_result(
-    *,
-    segment: CandidateSegment,
-    detail: str,
-    provider: str = "deterministic",
-    model: str = "fallback-v1",
-    skip_reason: str = "request_failed",
-) -> BoundaryValidationResult:
-    return BoundaryValidationResult(
-        status="fallback",
-        decision="keep",
-        reason=f"Semantic boundary validation fell back to deterministic output: {detail}",
-        confidence=0.0,
-        provider=provider,
-        provider_model=model,
-        skip_reason=skip_reason,
-        applied=False,
-        original_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
-        suggested_range_sec=[round(segment.start_sec, 3), round(segment.end_sec, 3)],
-    )
-
-
-def extract_generation_text(result: Any) -> str:
-    text = getattr(result, "text", None)
-    if isinstance(text, str):
-        return text.strip()
-    return str(result).strip()
-
-
-def normalize_model_output(
-    payload: dict[str, object],
-    *,
-    provider: str,
-    model: str,
-    fallback: VisionLanguageAnalyzer,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> SegmentUnderstanding:
-    fallback_understanding = fallback.analyze(
-        asset=asset,
-        segment=segment,
-        evidence=evidence,
-        story_prompt=story_prompt,
-    )
-
-    return SegmentUnderstanding(
-        provider=provider,
-        provider_model=model,
-        schema_version=str(payload.get("schema_version", SCHEMA_VERSION)),
-        summary=string_or_default(payload.get("summary"), fallback_understanding.summary),
-        subjects=list_or_default(payload.get("subjects"), fallback_understanding.subjects),
-        actions=list_or_default(payload.get("actions"), fallback_understanding.actions),
-        shot_type=string_or_default(payload.get("shot_type"), fallback_understanding.shot_type),
-        camera_motion=string_or_default(payload.get("camera_motion"), fallback_understanding.camera_motion),
-        mood=string_or_default(payload.get("mood"), fallback_understanding.mood),
-        story_roles=list_or_default(payload.get("story_roles"), fallback_understanding.story_roles),
-        quality_findings=list_or_default(
-            payload.get("quality_findings"),
-            fallback_understanding.quality_findings,
-        ),
-        keep_label=keep_label_or_default(payload.get("keep_label"), fallback_understanding.keep_label),
-        confidence=rounded_metric(number_or_default(payload.get("confidence"), fallback_understanding.confidence)),
-        rationale=string_or_default(payload.get("rationale"), fallback_understanding.rationale),
-        risk_flags=list_or_default(payload.get("risk_flags"), fallback_understanding.risk_flags),
-        visual_distinctiveness=rounded_metric(
-            number_or_default(payload.get("visual_distinctiveness"), fallback_understanding.visual_distinctiveness)
-        ),
-        clarity=rounded_metric(number_or_default(payload.get("clarity"), fallback_understanding.clarity)),
-        story_relevance=rounded_metric(
-            number_or_default(payload.get("story_relevance"), fallback_understanding.story_relevance)
-        ),
-    )
-
-
-def normalize_batch_model_output(
-    *,
-    payload: dict[str, object],
-    provider: str,
-    model: str,
-    fallback: VisionLanguageAnalyzer,
-    asset: Asset,
-    tasks: list[tuple[CandidateSegment, SegmentEvidence, str]],
-) -> dict[str, SegmentUnderstanding]:
-    items = payload.get("segments", [])
-    by_segment_id = {
-        str(item.get("segment_id", "")).strip(): item
-        for item in items
-        if isinstance(item, dict)
-    } if isinstance(items, list) else {}
-
-    normalized: dict[str, SegmentUnderstanding] = {}
-    for segment, evidence, story_prompt in tasks:
-        item = by_segment_id.get(segment.id)
-        if item is None:
-            understanding = fallback.analyze(
-                asset=asset,
-                segment=segment,
-                evidence=evidence,
-                story_prompt=story_prompt,
-            )
-            understanding.risk_flags = sorted(set([*understanding.risk_flags, "lmstudio_incomplete_batch_result"]))
-            understanding.rationale = (
-                f"{understanding.rationale} LM Studio batch response did not include this segment, "
-                "so deterministic fallback was used."
-            )
-        else:
-            understanding = normalize_model_output(
-                item,
-                provider=provider,
-                model=model,
-                fallback=fallback,
-                asset=asset,
-                segment=segment,
-                evidence=evidence,
-                story_prompt=story_prompt,
-            )
-        normalized[segment.id] = understanding
-    return normalized
-
-
-def batch_image_path_for_evidence(evidence: SegmentEvidence) -> str:
-    if evidence.contact_sheet_path:
-        return evidence.contact_sheet_path
-    if evidence.keyframe_paths:
-        return evidence.keyframe_paths[0]
-    return ""
 
 
 def infer_story_roles(segment: CandidateSegment, metrics: dict[str, float]) -> list[str]:
@@ -2057,361 +1150,6 @@ def encode_image_as_data_url(image_path: str) -> str | None:
     payload = b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{payload}"
 
-
-@contextmanager
-def model_cache_environment(cache_dir: str):
-    if not cache_dir:
-        yield
-        return
-
-    cache_path = str(Path(cache_dir).expanduser())
-    Path(cache_path).mkdir(parents=True, exist_ok=True)
-    previous_hf_home = os.environ.get("HF_HOME")
-    previous_hf_hub = os.environ.get("HF_HUB_CACHE")
-    os.environ["HF_HOME"] = cache_path
-    os.environ["HF_HUB_CACHE"] = str(Path(cache_path) / "hub")
-    try:
-        yield
-    finally:
-        if previous_hf_home is None:
-            os.environ.pop("HF_HOME", None)
-        else:
-            os.environ["HF_HOME"] = previous_hf_home
-        if previous_hf_hub is None:
-            os.environ.pop("HF_HUB_CACHE", None)
-        else:
-            os.environ["HF_HUB_CACHE"] = previous_hf_hub
-
-
-def mlx_vlm_manifest_path(cache_dir: str) -> Path:
-    return Path(cache_dir).expanduser() / MLX_MODEL_MANIFEST
-
-
-def load_mlx_vlm_manifest(cache_dir: str) -> dict[str, dict[str, str]]:
-    if not cache_dir:
-        return {}
-    path = mlx_vlm_manifest_path(cache_dir)
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    manifest: dict[str, dict[str, str]] = {}
-    for key, value in payload.items():
-        if isinstance(key, str) and isinstance(value, dict):
-            manifest[key] = {str(sub_key): str(sub_value) for sub_key, sub_value in value.items()}
-    return manifest
-
-
-def store_mlx_vlm_manifest_entry(
-    *,
-    cache_dir: str,
-    model_id: str,
-    revision: str,
-    local_path: str,
-) -> None:
-    if not cache_dir:
-        return
-    manifest = load_mlx_vlm_manifest(cache_dir)
-    manifest[manifest_model_key(model_id=model_id, revision=revision)] = {
-        "model_id": model_id,
-        "revision": revision,
-        "local_path": local_path,
-    }
-    path = mlx_vlm_manifest_path(cache_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
-
-
-def manifest_model_key(*, model_id: str, revision: str) -> str:
-    return f"{model_id}@{revision or 'latest'}"
-
-
-def slugify_model_id(model_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", model_id).strip("-") or "model"
-
-
-def derived_mlx_vlm_local_path(*, model_id: str, revision: str, cache_dir: str) -> Path:
-    return Path(cache_dir).expanduser() / f"{slugify_model_id(model_id)}-{revision or 'latest'}"
-
-
-def resolve_prepared_mlx_vlm_model_path(
-    *,
-    model_id: str,
-    revision: str,
-    cache_dir: str,
-) -> str | None:
-    if not model_id:
-        return None
-    direct_path = Path(model_id).expanduser()
-    if direct_path.exists():
-        return str(direct_path)
-    if not cache_dir:
-        return None
-    manifest = load_mlx_vlm_manifest(cache_dir)
-    entry = manifest.get(manifest_model_key(model_id=model_id, revision=revision), {})
-    local_path = str(entry.get("local_path", "")).strip()
-    if local_path and Path(local_path).exists():
-        return local_path
-    derived = derived_mlx_vlm_local_path(model_id=model_id, revision=revision, cache_dir=cache_dir)
-    if derived.exists():
-        return str(derived)
-    return None
-
-
-def parse_json_object(raw: str) -> dict[str, object] | None:
-    try:
-        loaded = json.loads(raw)
-        return loaded if isinstance(loaded, dict) else None
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            return salvage_partial_json_object(raw)
-        try:
-            loaded = json.loads(match.group(0))
-            return loaded if isinstance(loaded, dict) else None
-        except json.JSONDecodeError:
-            return salvage_partial_json_object(match.group(0))
-
-
-def parse_key_value_object(
-    raw: str,
-    *,
-    allowed_keys: set[str] | None = None,
-) -> dict[str, object] | None:
-    payload: dict[str, object] = {}
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        normalized_key = key.strip().lower().replace(" ", "_")
-        if not normalized_key:
-            continue
-        if allowed_keys is not None and normalized_key not in allowed_keys:
-            continue
-        parsed_value: object = value.strip()
-        if isinstance(parsed_value, str):
-            if parsed_value.startswith('"') and parsed_value.endswith('"') and len(parsed_value) >= 2:
-                parsed_value = parsed_value[1:-1]
-            else:
-                lowered = parsed_value.lower()
-                if lowered == "null":
-                    parsed_value = None
-                else:
-                    try:
-                        parsed_value = int(parsed_value)
-                    except ValueError:
-                        try:
-                            parsed_value = float(parsed_value)
-                        except ValueError:
-                            parsed_value = parsed_value
-        payload[normalized_key] = parsed_value
-    return payload or None
-
-
-def salvage_partial_json_object(raw: str) -> dict[str, object] | None:
-    start = raw.find("{")
-    if start < 0:
-        return None
-
-    candidate = raw[start:].rstrip()
-    while candidate:
-        try:
-            loaded = json.loads(candidate)
-            return loaded if isinstance(loaded, dict) else None
-        except json.JSONDecodeError:
-            last_comma = candidate.rfind(",")
-            if last_comma < 0:
-                break
-            candidate = close_partial_json(candidate[:last_comma].rstrip())
-
-    return None
-
-
-def close_partial_json(raw: str) -> str:
-    output: list[str] = []
-    closers: list[str] = []
-    in_string = False
-    escaped = False
-
-    for char in raw:
-        output.append(char)
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            closers.append("}")
-        elif char == "[":
-            closers.append("]")
-        elif char in {"]", "}"} and closers and closers[-1] == char:
-            closers.pop()
-
-    if in_string:
-        output.append('"')
-
-    while closers:
-        output.append(closers.pop())
-
-    return "".join(output)
-
-
-def missing_mlx_vlm_dependencies() -> list[str]:
-    required = {
-        "mlx": "mlx",
-        "mlx_vlm": "mlx-vlm",
-        "torch": "torch",
-        "torchvision": "torchvision",
-        "PIL": "pillow",
-    }
-    missing: list[str] = []
-    for module_name, label in required.items():
-        if importlib.util.find_spec(module_name) is None:
-            missing.append(label)
-    return missing
-
-
-def resolve_mlx_vlm_model(
-    *,
-    model: str,
-    model_id: str,
-    revision: str,
-) -> tuple[str, str]:
-    requested = (model_id or model).strip()
-    if requested and "/" in requested:
-        return requested, revision.strip()
-    return "mlx-community/Qwen3.5-0.8B-4bit", revision.strip()
-
-
-def resolve_mlx_device(*, requested: str) -> str:
-    requested_value = (requested or "auto").strip().lower()
-    if requested_value in {"auto", "", "mps", "metal", "gpu"}:
-        return "metal"
-    if requested_value == "cpu":
-        return "cpu"
-    return "metal"
-
-
-def prepare_mlx_vlm_model(config: AIProviderConfig) -> AIProviderStatus:
-    if config.provider != "mlx-vlm-local":
-        return inspect_ai_provider_status(config, runtime_probe=False)
-
-    missing = missing_mlx_vlm_dependencies()
-    if missing:
-        return inspect_ai_provider_status(config, runtime_probe=False)
-
-    local_target = derived_mlx_vlm_local_path(
-        model_id=config.model,
-        revision=config.revision,
-        cache_dir=config.cache_dir,
-    )
-    local_target.mkdir(parents=True, exist_ok=True)
-
-    huggingface_hub = importlib.import_module("huggingface_hub")
-    snapshot_download = getattr(huggingface_hub, "snapshot_download")
-
-    download_kwargs: dict[str, Any] = {
-        "repo_id": config.model,
-        "local_dir": str(local_target),
-        "local_dir_use_symlinks": False,
-    }
-    if config.revision:
-        download_kwargs["revision"] = config.revision
-
-    with model_cache_environment(config.cache_dir):
-        downloaded_path = snapshot_download(**download_kwargs)
-
-    store_mlx_vlm_manifest_entry(
-        cache_dir=config.cache_dir,
-        model_id=config.model,
-        revision=config.revision,
-        local_path=str(Path(downloaded_path).resolve()),
-    )
-    return inspect_ai_provider_status(config, runtime_probe=True)
-
-
-def bootstrap_mlx_vlm_model(config: AIProviderConfig | None = None) -> AIProviderStatus:
-    effective_config = config or load_ai_provider_config()
-    if effective_config.provider != "mlx-vlm-local":
-        return inspect_ai_provider_status(effective_config, runtime_probe=False)
-    return prepare_mlx_vlm_model(effective_config)
-
-
-def string_or_default(value: object, default: str) -> str:
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if cleaned and not looks_like_placeholder_text(cleaned):
-            return cleaned
-    return default
-
-
-def list_or_default(value: object, default: list[str]) -> list[str]:
-    if isinstance(value, list):
-        items: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            cleaned = str(item).strip()
-            if not cleaned or looks_like_placeholder_text(cleaned):
-                continue
-            key = cleaned.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append(cleaned)
-        if items:
-            return items
-    return default
-
-
-def keep_label_or_default(value: object, default: str) -> str:
-    if isinstance(value, str):
-        cleaned = value.strip().lower()
-        if cleaned in {"keep", "maybe", "reject"}:
-            return cleaned
-    return default
-
-
-def looks_like_placeholder_text(value: str) -> bool:
-    normalized = re.sub(r"\s+", " ", value.strip().lower())
-    if not normalized:
-        return True
-    if normalized in PLACEHOLDER_TEXT_VALUES:
-        return True
-    if normalized.startswith("short "):
-        return True
-    return bool(re.fullmatch(r"item\s*\d+", normalized))
-
-
-def number_or_default(value: object, default: float) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return default
-    return default
-
-
-def rounded_metric(value: float) -> float:
-    return round(max(0.0, min(1.0, float(value))), 4)
-
-
-def model_matches(requested_model: str, advertised_model: str) -> bool:
-    requested = requested_model.strip().lower()
-    advertised = advertised_model.strip().lower()
-    return requested == advertised or requested in advertised or advertised in requested
 
 
 def analyze_segments_bounded(
@@ -2659,78 +1397,3 @@ def get_ai_runtime_stats(analyzer: VisionLanguageAnalyzer) -> AIRuntimeStats:
         if isinstance(stats, AIRuntimeStats):
             return stats
     return AIRuntimeStats()
-
-
-def load_cached_understanding(cache_root: Path | None, cache_key: str) -> SegmentUnderstanding | None:
-    if cache_root is None:
-        return None
-    target = cache_root / f"{cache_key}.json"
-    if not target.exists():
-        return None
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-        return SegmentUnderstanding(**payload)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return None
-
-
-def store_cached_understanding(cache_root: Path | None, cache_key: str, understanding: SegmentUnderstanding) -> None:
-    if cache_root is None:
-        return
-    cache_root.mkdir(parents=True, exist_ok=True)
-    target = cache_root / f"{cache_key}.json"
-    try:
-        payload = asdict(understanding) if hasattr(understanding, "__dataclass_fields__") else dict(understanding)
-        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except OSError:
-        return
-
-
-def build_segment_cache_key(
-    *,
-    model: str,
-    asset: Asset,
-    segment: CandidateSegment,
-    evidence: SegmentEvidence,
-    story_prompt: str,
-) -> str:
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "model": model,
-        "asset_id": asset.id,
-        "asset_path": asset.proxy_path,
-        "segment_id": segment.id,
-        "segment_range": [segment.start_sec, segment.end_sec],
-        "analysis_mode": segment.analysis_mode,
-        "transcript_excerpt": evidence.transcript_excerpt,
-        "story_prompt": story_prompt,
-        "keyframe_timestamps_sec": evidence.keyframe_timestamps_sec,
-    }
-    return sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def parse_bool_env(key: str, default: bool) -> bool:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
-
-
-def parse_int_env(key: str, default: int) -> int:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def parse_float_env(key: str, default: float) -> float:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default

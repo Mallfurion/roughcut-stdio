@@ -51,11 +51,18 @@ Complete analysis and export engine that runs the four-phase pipeline.
 **Key Modules:**
 - `media.py` — File discovery, asset creation
 - `prefilter.py` — Signal extraction and low-cost candidate generation
-- `analysis.py` — Boundary refinement, narrative-unit assembly, story assembly, review-state construction, timeline assembly
+- `analysis.py` — Pipeline orchestration and composition of phase-owned modules
+- `transcripts.py` — Transcript providers, selective targeting, probe policy, spans, turns, and spoken-structure helpers
+- `segmentation.py` — Candidate creation, deterministic refinement, and narrative-unit assembly
+- `semantic_validation.py` — Semantic boundary target selection and application
+- `selection/` — Take recommendation, story sequencing, timeline assembly, and review-state formatting
 - `clip.py` — CLIP semantic scoring with embedding cache
 - `clip_dedup.py` — CLIP-based deduplication
 - `deduplication.py` — Histogram-based fallback dedup
-- `ai.py` — VLM provider orchestration
+- `ai_runtime/` — Shared AI config, evidence, prompt, normalization, cache, and provider lifecycle helpers
+- `ai.py` — Deterministic fallback, provider transport/runtime objects, and boundary-validation coordination
+- `serialization/` — `ProjectData` payload round-tripping
+- `shared/` — Canonical numeric, string, and environment helpers
 - `scoring.py` — Final segment scoring
 - `fcpxml.py` — FCPXML generation
 

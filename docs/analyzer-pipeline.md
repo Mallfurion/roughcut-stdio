@@ -43,9 +43,17 @@ Each matched pair becomes an **Asset**. Assets record:
 
 ## Phase 2: Per-Asset Analysis
 
-**Code:** `services/analyzer/app/analysis.py`, `prefilter.py`, `ai.py`
+**Code:** `services/analyzer/app/analysis.py`, `prefilter.py`, `transcripts.py`, `segmentation.py`, `semantic_validation.py`, `selection/`, `ai_runtime/`, `ai.py`
 
 This is where most of the work happens.
+
+`analysis.py` now acts as the coordinator for the per-asset pipeline. The phase-owned logic lives in dedicated modules:
+
+- `transcripts.py` for transcript targeting, probe policy, spans, turns, and spoken-structure helpers
+- `segmentation.py` for candidate creation, deterministic refinement, and narrative-unit assembly
+- `semantic_validation.py` for semantic boundary targeting and application
+- `selection/` for take recommendation building, story sequencing, timeline assembly, and review-state summaries
+- `ai_runtime/` plus `ai.py` for shared AI runtime components and provider-specific request execution
 
 ### Step 2.1 - Scene Detection And Seed Inputs
 

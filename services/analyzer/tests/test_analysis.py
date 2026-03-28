@@ -3143,6 +3143,63 @@ class AnalysisPipelineTests(unittest.TestCase):
         self.assertAlmostEqual(project.candidate_segments[0].start_sec, 1.4, places=3)
         self.assertAlmostEqual(project.candidate_segments[0].end_sec, 4.1, places=3)
 
+    def test_clip_enabled_shortlist_builds_image_evidence_for_deterministic_runs(self) -> None:
+        asset = Asset(
+            id="asset-clip-evidence",
+            name="CLIP Evidence",
+            source_path="/tmp/clip-evidence.mov",
+            proxy_path="/tmp/clip-evidence.mov",
+            duration_sec=10.0,
+            fps=24.0,
+            width=1920,
+            height=1080,
+            has_speech=False,
+            interchange_reel_name="A001_C128",
+        )
+        extract_keyframes_values: list[bool] = []
+
+        class FakeClipScorer:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def score(self, image_path: str) -> float:
+                return 0.6
+
+        def counting_build_segment_evidence(**kwargs):
+            extract_keyframes_values.append(bool(kwargs.get("extract_keyframes")))
+            return ai_build_segment_evidence(**kwargs)
+
+        with unittest.mock.patch.dict(
+            os.environ,
+            {
+                "TIMELINE_AI_CLIP_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            with (
+                unittest.mock.patch("services.analyzer.app.analysis.is_clip_available", return_value=True),
+                unittest.mock.patch("services.analyzer.app.analysis.CLIPScorer", FakeClipScorer),
+                unittest.mock.patch(
+                    "services.analyzer.app.analysis.build_segment_evidence",
+                    side_effect=counting_build_segment_evidence,
+                ),
+            ):
+                analyze_assets(
+                    project=ProjectMeta(
+                        id="test-project",
+                        name="Test Project",
+                        story_prompt="Build a rough cut",
+                        status="draft",
+                        media_roots=["/tmp"],
+                    ),
+                    assets=[asset],
+                    scene_detector=StaticSceneDetector([(0.0, 5.0), (5.0, 10.0)]),
+                    segment_analyzer=DeterministicVisionLanguageAnalyzer(),
+                )
+
+        self.assertTrue(extract_keyframes_values)
+        self.assertTrue(all(extract_keyframes_values))
+
     def test_semantic_boundary_validation_trims_ambiguous_speech_segment(self) -> None:
         asset = Asset(
             id="asset-semantic-trim",

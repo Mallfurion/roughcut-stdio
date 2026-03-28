@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-import json
 from typing import Any
 
 
@@ -229,98 +228,17 @@ class ProjectData:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ProjectData":
-        project_payload = payload["project"]
-        return cls(
-            project=ProjectMeta(
-                id=project_payload["id"],
-                name=project_payload["name"],
-                story_prompt=project_payload.get("story_prompt", ""),
-                status=project_payload.get("status", "draft"),
-                media_roots=project_payload.get("media_roots", []),
-                analysis_summary=project_payload.get("analysis_summary", {}),
-            ),
-            assets=[Asset(**asset) for asset in payload["assets"]],
-            candidate_segments=[
-                CandidateSegment(
-                    id=segment["id"],
-                    asset_id=segment["asset_id"],
-                    start_sec=segment["start_sec"],
-                    end_sec=segment["end_sec"],
-                    analysis_mode=segment["analysis_mode"],
-                    transcript_excerpt=segment.get("transcript_excerpt", ""),
-                    description=segment.get("description", ""),
-                    quality_metrics=segment.get("quality_metrics", {}),
-                    prefilter=(
-                        PrefilterDecision(
-                            score=segment["prefilter"].get("score", 0.0),
-                            shortlisted=segment["prefilter"].get("shortlisted", False),
-                            filtered_before_vlm=segment["prefilter"].get("filtered_before_vlm", False),
-                            selection_reason=segment["prefilter"].get("selection_reason", ""),
-                            sampled_frame_count=segment["prefilter"].get("sampled_frame_count", 0),
-                            sampled_frame_timestamps_sec=segment["prefilter"].get("sampled_frame_timestamps_sec", []),
-                            top_frame_timestamps_sec=segment["prefilter"].get("top_frame_timestamps_sec", []),
-                            metrics_snapshot=segment["prefilter"].get("metrics_snapshot", {}),
-                            deduplicated=segment["prefilter"].get("deduplicated", False),
-                            dedup_group_id=segment["prefilter"].get("dedup_group_id", None),
-                            clip_gated=segment["prefilter"].get("clip_gated", False),
-                            vlm_budget_capped=segment["prefilter"].get("vlm_budget_capped", False),
-                            boundary_strategy=segment["prefilter"].get("boundary_strategy", "legacy"),
-                            boundary_confidence=segment["prefilter"].get("boundary_confidence", 0.0),
-                            seed_region_ids=segment["prefilter"].get("seed_region_ids", []),
-                            seed_region_sources=segment["prefilter"].get("seed_region_sources", []),
-                            seed_region_ranges_sec=segment["prefilter"].get("seed_region_ranges_sec", []),
-                            assembly_operation=segment["prefilter"].get("assembly_operation", "none"),
-                            assembly_rule_family=segment["prefilter"].get("assembly_rule_family", ""),
-                            assembly_source_segment_ids=segment["prefilter"].get("assembly_source_segment_ids", []),
-                            assembly_source_ranges_sec=segment["prefilter"].get("assembly_source_ranges_sec", []),
-                            transcript_turn_ids=segment["prefilter"].get("transcript_turn_ids", []),
-                            transcript_turn_ranges_sec=segment["prefilter"].get("transcript_turn_ranges_sec", []),
-                            transcript_turn_alignment=segment["prefilter"].get("transcript_turn_alignment", ""),
-                            speech_structure_label=segment["prefilter"].get("speech_structure_label", ""),
-                            speech_structure_cues=segment["prefilter"].get("speech_structure_cues", []),
-                            speech_structure_confidence=segment["prefilter"].get("speech_structure_confidence", 0.0),
-                        )
-                        if segment.get("prefilter") is not None
-                        else None
-                    ),
-                    evidence_bundle=(
-                        SegmentEvidence(**segment["evidence_bundle"])
-                        if segment.get("evidence_bundle") is not None
-                        else None
-                    ),
-                    ai_understanding=(
-                        SegmentUnderstanding(**segment["ai_understanding"])
-                        if segment.get("ai_understanding") is not None
-                        else None
-                    ),
-                    review_state=(
-                        SegmentReviewState(**segment["review_state"])
-                        if segment.get("review_state") is not None
-                        else None
-                    ),
-                    boundary_validation=(
-                        BoundaryValidationResult(**segment["boundary_validation"])
-                        if segment.get("boundary_validation") is not None
-                        else None
-                    ),
-                )
-                for segment in payload["candidate_segments"]
-            ],
-            take_recommendations=[
-                TakeRecommendation(**take) for take in payload["take_recommendations"]
-            ],
-            timeline=Timeline(
-                id=payload["timeline"]["id"],
-                version=payload["timeline"]["version"],
-                story_summary=payload["timeline"]["story_summary"],
-                items=[TimelineItem(**item) for item in payload["timeline"]["items"]],
-            ),
-        )
+        from .serialization.project_data import project_data_from_dict
+
+        return project_data_from_dict(payload)
 
     @classmethod
     def from_json_file(cls, path: str | Path) -> "ProjectData":
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls.from_dict(payload)
+        from .serialization.project_data import project_data_from_json_file
+
+        return project_data_from_json_file(path)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        from .serialization.project_data import project_data_to_dict
+
+        return project_data_to_dict(self)
