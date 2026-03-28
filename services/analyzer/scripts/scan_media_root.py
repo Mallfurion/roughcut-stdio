@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from services.analyzer.app.ai import inspect_ai_provider_status, load_ai_analysis_config  # noqa: E402
 from services.analyzer.app.domain import Asset  # noqa: E402
-from services.analyzer.app.process_reporting import ProcessReporter  # noqa: E402
+from services.analyzer.app.process_reporting import ProcessConsoleProxy, ProcessReporter  # noqa: E402
 from services.analyzer.app.service import scan_and_analyze_media_root  # noqa: E402
 
 ANALYZE_RE = re.compile(r"^\[(?P<index>\d+)/(?P<total>\d+)\]\s+Analyzing:\s+(?P<asset>.+)$")
@@ -38,7 +38,9 @@ def main() -> int:
     story_prompt = args.story_prompt
     artifacts_root = Path(args.artifacts_root).resolve()
     start_time = time.monotonic()
-    reporter = ProcessReporter(artifact_path=args.process_output_file or None)
+    console_stream = sys.stderr
+    reporter = ProcessReporter(artifact_path=args.process_output_file or None, console_stream=console_stream)
+    stderr_proxy = ProcessConsoleProxy(stream=console_stream, reporter=reporter)
 
     provider_status = inspect_ai_provider_status()
     analysis_config = load_ai_analysis_config()
@@ -61,19 +63,24 @@ def main() -> int:
             activity="Analyzing",
         )
 
+    previous_stderr = sys.stderr
+    sys.stderr = stderr_proxy
     try:
-        project = scan_and_analyze_media_root(
-            project_name=project_name,
-            media_roots=[media_root],
-            story_prompt=story_prompt,
-            artifacts_root=artifacts_root,
-            status_callback=status_callback,
-            progress_callback=progress_callback,
-        )
-    except KeyboardInterrupt:
-        reporter.finish()
-        reporter.error("Process", "Interrupted from keyboard.")
-        return 130
+        try:
+            project = scan_and_analyze_media_root(
+                project_name=project_name,
+                media_roots=[media_root],
+                story_prompt=story_prompt,
+                artifacts_root=artifacts_root,
+                status_callback=status_callback,
+                progress_callback=progress_callback,
+            )
+        except KeyboardInterrupt:
+            reporter.finish()
+            reporter.error("Process", "Interrupted from keyboard.")
+            return 130
+    finally:
+        sys.stderr = previous_stderr
     reporter.finish()
     if not project.assets:
         reporter.warn("Process", "No source assets were available to process.")

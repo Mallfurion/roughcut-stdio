@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import TextIO
@@ -16,6 +17,8 @@ STYLES = {
     "warn": "\033[33m",
     "error": "\033[31m",
 }
+SPINNER_FRAMES = ("|", "/", "-", "\\")
+PREFILL_RE = re.compile(r"^Prefill:\s+\d+%\|.*?\|\s*(?P<current>\d+)(?:/(?P<total>\d+))?")
 
 
 @dataclass(slots=True)
@@ -42,6 +45,9 @@ class ProcessReporter:
         self.color_enabled = self.interactive and os.environ.get("NO_COLOR", "").strip() == ""
         self.progress_active = False
         self.last_progress_message = ""
+        self.last_progress_state: dict[str, object] = {}
+        self.progress_status = ""
+        self._spinner_index = 0
 
     def header(self, title: str, *, persist: bool = True) -> None:
         self.emit(ProcessReportEvent(kind="header", section="", message=title, severity="header", persist=persist))
@@ -84,11 +90,15 @@ class ProcessReporter:
             start_time=start_time,
             activity=activity,
         )
+        self.last_progress_state = {
+            "processed": processed,
+            "total": total,
+            "asset_name": asset_name,
+            "start_time": start_time,
+            "activity": activity,
+        }
         if self.interactive:
-            self.progress_active = True
-            self.last_progress_message = message
-            self.console_stream.write("\r" + message.ljust(132))
-            self.console_stream.flush()
+            self._render_progress_line(message)
         else:
             self._finish_progress_line()
             self.console_stream.write(message + "\n")
@@ -98,6 +108,36 @@ class ProcessReporter:
 
     def finish(self) -> None:
         self._finish_progress_line()
+
+    def break_progress_line(self) -> None:
+        if not self.progress_active:
+            return
+        self.console_stream.write("\n")
+        self.console_stream.flush()
+
+    def set_progress_status(self, status: str | None) -> None:
+        self.progress_status = (status or "").strip()
+        self.refresh_progress()
+
+    def clear_progress_status(self) -> None:
+        self.set_progress_status("")
+
+    def advance_spinner(self) -> str:
+        frame = SPINNER_FRAMES[self._spinner_index % len(SPINNER_FRAMES)]
+        self._spinner_index += 1
+        return frame
+
+    def refresh_progress(self) -> None:
+        if self.interactive and self.progress_active and self.last_progress_state:
+            self._render_progress_line(
+                self._format_progress_message(
+                    processed=int(self.last_progress_state["processed"]),
+                    total=int(self.last_progress_state["total"]),
+                    asset_name=str(self.last_progress_state["asset_name"]),
+                    start_time=float(self.last_progress_state["start_time"]),
+                    activity=str(self.last_progress_state["activity"]),
+                )
+            )
 
     def _format_progress_message(
         self,
@@ -117,12 +157,15 @@ class ProcessReporter:
         eta = (elapsed / processed) * (total - processed) if processed > 0 else 0.0
         label = f"{activity.lower()} {asset_name}".strip()
         label = label[:44]
-        return (
+        message = (
             f"[{bar}] {processed}/{total} assets"
             f" | elapsed {format_clock(elapsed)}"
             f" | eta {format_clock(eta)}"
             f" | {label}"
         )
+        if self.progress_status:
+            message += f" | {self.progress_status}"
+        return message
 
     def _format_console_event(self, event: ProcessReportEvent) -> str:
         if event.kind == "header":
@@ -162,6 +205,12 @@ class ProcessReporter:
         with self.artifact_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
+    def _render_progress_line(self, message: str) -> None:
+        self.progress_active = True
+        self.last_progress_message = message
+        self.console_stream.write("\r" + message.ljust(160))
+        self.console_stream.flush()
+
     def _finish_progress_line(self) -> None:
         if not self.progress_active:
             return
@@ -169,6 +218,49 @@ class ProcessReporter:
         self.console_stream.flush()
         self.progress_active = False
         self.last_progress_message = ""
+        self.last_progress_state = {}
+        self.progress_status = ""
+
+
+class ProcessConsoleProxy:
+    def __init__(self, *, stream: TextIO, reporter: ProcessReporter) -> None:
+        self.stream = stream
+        self.reporter = reporter
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        for char in text:
+            if char in "\r\n":
+                self._flush_buffer()
+            else:
+                self._buffer += char
+        return len(text)
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self.stream, "isatty", lambda: False)())
+
+    def _flush_buffer(self) -> None:
+        line = self._buffer.strip()
+        self._buffer = ""
+        if not line:
+            return
+
+        match = PREFILL_RE.match(line)
+        if match:
+            current = match.group("current")
+            total = match.group("total")
+            spinner = self.reporter.advance_spinner()
+            detail = f"{spinner} prefilling {current}/{total}" if total else f"{spinner} prefilling"
+            self.reporter.set_progress_status(detail)
+            return
+
+        self.reporter.break_progress_line()
+        self.stream.write(line + "\n")
+        self.stream.flush()
+        self.reporter.refresh_progress()
 
 
 def format_clock(value: float) -> str:

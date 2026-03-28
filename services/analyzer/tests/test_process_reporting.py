@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from services.analyzer.app.process_reporting import ProcessReporter
+from services.analyzer.app.process_reporting import ProcessConsoleProxy, ProcessReporter
 
 
 class DummyConsole:
@@ -68,6 +68,29 @@ class ProcessReporterTests(unittest.TestCase):
         self.assertIn("[", console.buffer)
         self.assertIn("2/5 assets", console.buffer)
         self.assertNotIn("\033", console.buffer)
+
+    def test_prefill_updates_are_folded_into_live_progress_line(self) -> None:
+        console = DummyConsole(is_tty=True)
+        with patch.dict("os.environ", {}, clear=True):
+            reporter = ProcessReporter(console_stream=console)
+            proxy = ProcessConsoleProxy(stream=console, reporter=reporter)
+            start_time = time.monotonic() - 2.0
+
+            reporter.progress(
+                processed=3,
+                total=5,
+                asset_name="Clip C003",
+                start_time=start_time,
+                activity="Analyzing",
+            )
+            proxy.write("Prefill: 100%|██████████| 2336/2337 [00:00<00:00, 2564.73tok/s]\r")
+            proxy.write("Warning: example external warning\n")
+
+        self.assertIn("3/5 assets", console.buffer)
+        self.assertIn("prefilling 2336/2337", console.buffer)
+        self.assertNotIn("Prefill: 100%", console.buffer)
+        self.assertIn("Warning: example external warning\n", console.buffer)
+        self.assertTrue(console.buffer.rstrip().endswith("prefilling 2336/2337"))
 
 
 if __name__ == "__main__":
