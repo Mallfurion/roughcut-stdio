@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-03-28
+
+### 🛠 Fixes & Improvements
+
+- Improve process logging output and align setup defaults with runtime behavior.
+- Keep MLX prefill activity on the live progress line and preserve progress visibility.
+- Highlight key workload and timing lines in the completion summary.
+- Suppress low-signal HF Hub and `use_fast` warnings from the live console.
+
 ## [2.2.0] - 2026-03-28
 
 ### 🛠 Fixes & Improvements
