@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-03-28
+
+### 🛠 Fixes & Improvements
+
+- Modularize the analyzer pipeline and AI runtime facades for better separation of concerns.
+- Update project docs to reflect the analyzer modularization.
+
 ## [2.1.0] - 2026-03-28
 
 ### 🚀 Features
