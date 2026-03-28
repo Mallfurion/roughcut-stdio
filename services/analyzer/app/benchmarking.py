@@ -735,7 +735,7 @@ def format_phase_summary_lines(phase_timings_sec: dict[str, float]) -> list[str]
     parts: list[str] = []
     for phase_name, label in PHASE_LABELS.items():
         if phase_name in phase_timings_sec:
-            parts.append(f"\t{label}: {format_runtime(phase_timings_sec[phase_name])}")
+            parts.append(f"{label}: {format_runtime(phase_timings_sec[phase_name])}")
     return parts
 
 

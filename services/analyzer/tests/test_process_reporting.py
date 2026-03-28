@@ -92,6 +92,34 @@ class ProcessReporterTests(unittest.TestCase):
         self.assertIn("Warning: example external warning\n", console.buffer)
         self.assertTrue(console.buffer.rstrip().endswith("prefilling 2336/2337"))
 
+    def test_known_external_hf_and_use_fast_warnings_are_suppressed(self) -> None:
+        console = DummyConsole(is_tty=True)
+        with patch.dict("os.environ", {}, clear=True):
+            reporter = ProcessReporter(console_stream=console)
+            proxy = ProcessConsoleProxy(stream=console, reporter=reporter)
+            start_time = time.monotonic() - 2.0
+
+            reporter.progress(
+                processed=4,
+                total=5,
+                asset_name="Clip D004",
+                start_time=start_time,
+                activity="Analyzing",
+            )
+            proxy.write(
+                "The `use_fast` parameter is deprecated and will be removed in a future version.\n"
+            )
+            proxy.write(
+                "Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.\n"
+            )
+            proxy.write(
+                "WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.\n"
+            )
+
+        self.assertIn("4/5 assets", console.buffer)
+        self.assertNotIn("use_fast", console.buffer)
+        self.assertNotIn("HF Hub", console.buffer)
+
 
 if __name__ == "__main__":
     unittest.main()

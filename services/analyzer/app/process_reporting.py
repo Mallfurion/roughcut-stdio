@@ -19,6 +19,11 @@ STYLES = {
 }
 SPINNER_FRAMES = ("|", "/", "-", "\\")
 PREFILL_RE = re.compile(r"^Prefill:\s+\d+%\|.*?\|\s*(?P<current>\d+)(?:/(?P<total>\d+))?")
+SUPPRESSED_EXTERNAL_LINE_PATTERNS = (
+    "The `use_fast` parameter is deprecated",
+    "You are sending unauthenticated requests to the HF Hub",
+    "huggingface_hub.utils._http:Warning:",
+)
 
 
 @dataclass(slots=True)
@@ -255,6 +260,10 @@ class ProcessConsoleProxy:
             spinner = self.reporter.advance_spinner()
             detail = f"{spinner} prefilling {current}/{total}" if total else f"{spinner} prefilling"
             self.reporter.set_progress_status(detail)
+            return
+
+        if any(pattern in line for pattern in SUPPRESSED_EXTERNAL_LINE_PATTERNS):
+            self.reporter.refresh_progress()
             return
 
         self.reporter.break_progress_line()

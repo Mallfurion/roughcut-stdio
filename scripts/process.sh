@@ -60,7 +60,7 @@ emit_summary_line() {
       Total\ runtime:*)
         printf '\033[32m%s\033[0m\n' "$line"
         ;;
-      $'\t'*)
+      Media\ discovery:*|Per-asset\ analysis:*|Take\ selection:*|Timeline\ assembly:*)
         printf '\033[32m%s\033[0m\n' "$line"
         ;;
       *)
