@@ -79,7 +79,7 @@ The project is split into three layers:
 
 **Backend** — `services/analyzer/` (Python)
 
-- Media discovery, signal extraction, deterministic boundary refinement, narrative-unit assembly, optional semantic boundary validation, scoring, CLIP deduplication, VLM analysis, FCPXML export
+- Phase-owned analyzer pipeline with orchestration in `analysis.py`, transcript handling in `transcripts.py`, segmentation in `segmentation.py`, semantic validation in `semantic_validation.py`, take and timeline logic in `selection/`, shared AI runtime components in `ai_runtime/`, and FCPXML export
 
 **Scripts** — `scripts/`
 

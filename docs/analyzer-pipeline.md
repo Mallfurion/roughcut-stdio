@@ -278,7 +278,7 @@ When transcript excerpts are missing, prompts receive explicit transcript-status
 
 ## Phase 3: Take Selection
 
-**Code:** `services/analyzer/app/scoring.py`, `analysis.py`
+**Code:** `services/analyzer/app/scoring.py`, `selection/takes.py`, `analysis.py`
 
 After all segments are analyzed, scoring produces:
 
@@ -290,7 +290,7 @@ These roll into a total score used to pick the strongest one or two takes per as
 
 ## Phase 4: Timeline Assembly
 
-**Code:** `services/analyzer/app/analysis.py`
+**Code:** `services/analyzer/app/selection/timeline.py`, `analysis.py`
 
 Best takes are assembled into a rough timeline with bounded cross-asset story assembly heuristics rather than pure asset-order sorting. The current sequence pass works on already-selected per-asset winners and prefers a cleaner multi-asset flow by considering:
 

@@ -1,10 +1,10 @@
 {
-  "last_reviewed_commit": "b0e28e1895be680766214e01a3adddf7433a87b3",
+  "last_reviewed_commit": "f96d0ceac808801cd16725a08ab2bcf797c276aa",
   "notes": "Docs under docs/ plus the repo README are aligned through this implementation commit.",
   "schema_version": 1,
   "tracked_paths": [
     "README.md",
     "docs/**"
   ],
-  "updated_at_utc": "2026-03-27T22:26:07+00:00"
+  "updated_at_utc": "2026-03-28T00:17:39+00:00"
 }

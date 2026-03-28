@@ -74,7 +74,7 @@ Semantic boundary validation no longer depends only on the primary threshold. If
 
 When semantic validation is enabled, both `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_BUDGET_PCT` and `TIMELINE_SEGMENT_SEMANTIC_VALIDATION_MAX_SEGMENTS` are consumed across the entire process run, not separately for each asset. Segments that stay eligible after the run budget is exhausted keep explicit persisted `over_budget` skip metadata instead of silently receiving a refreshed per-asset allowance.
 
-See [.env.example](../.env.example) for the baseline project settings. The analyzer source in [ai.py](../services/analyzer/app/ai.py) is the source of truth for advanced runtime defaults.
+See [.env.example](../.env.example) for the baseline project settings. The runtime-default source of truth now lives primarily in [ai_runtime/config.py](../services/analyzer/app/ai_runtime/config.py), with provider adapters and compatibility exports in [ai.py](../services/analyzer/app/ai.py).
 
 ---
 
