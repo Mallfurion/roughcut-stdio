@@ -9,6 +9,21 @@ cd "$ROOT_DIR"
 # `.env.local` overrides `.env`.
 . "${ROOT_DIR}/scripts/lib/load_env.sh"
 
+is_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+to_lower() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
 select_python() {
   if [ -n "${TIMELINE_PYTHON:-}" ] && [ -x "${TIMELINE_PYTHON}" ]; then
     echo "${TIMELINE_PYTHON}"
@@ -117,15 +132,20 @@ ensure_rust
 echo "Installing analyzer package into the virtual environment..."
 install_extras=""
 transcript_provider="${TIMELINE_TRANSCRIPT_PROVIDER:-auto}"
+ai_provider="${TIMELINE_AI_PROVIDER:-mlx-vlm-local}"
+clip_enabled_raw="${TIMELINE_AI_CLIP_ENABLED:-true}"
 
-# CLIP is enabled by default
-install_extras="${install_extras}clip,"
+if is_truthy "$clip_enabled_raw"; then
+  install_extras="${install_extras}clip,"
+else
+  echo "CLIP semantic scoring is disabled for setup; skipping CLIP dependency installation."
+fi
 
 if [ "$transcript_provider" != "disabled" ]; then
   install_extras="${install_extras}transcript,"
 fi
 
-if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
+if [ "$(to_lower "$ai_provider")" = "mlx-vlm-local" ]; then
   install_extras="${install_extras}mlx_vlm,"
 fi
 
@@ -142,14 +162,17 @@ if [ "${TIMELINE_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
   echo ""
   echo "Bootstrapping AI models..."
 
-  if [ "${TIMELINE_AI_PROVIDER:-deterministic}" = "mlx-vlm-local" ]; then
+  if [ "$(to_lower "$ai_provider")" = "mlx-vlm-local" ]; then
     echo "Bootstrapping MLX-VLM local model..."
     "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_mlx_vlm.py
   fi
 
-  # CLIP is enabled by default, download its model
-  echo "Bootstrapping CLIP semantic scoring model..."
-  "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_clip.py
+  if is_truthy "$clip_enabled_raw"; then
+    echo "Bootstrapping CLIP semantic scoring model..."
+    "$ROOT_DIR/.venv/bin/python3" services/analyzer/scripts/bootstrap_clip.py
+  else
+    echo "Skipping CLIP bootstrap because TIMELINE_AI_CLIP_ENABLED is disabled."
+  fi
 else
   echo "Skipping model download because TIMELINE_SKIP_MODEL_DOWNLOAD=1"
 fi

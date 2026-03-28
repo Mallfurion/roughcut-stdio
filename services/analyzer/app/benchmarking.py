@@ -583,212 +583,159 @@ def build_process_summary_lines(
     source_only = [asset for asset in assets if asset.get("has_proxy") is False]
     proxy_backed = [asset for asset in assets if asset.get("has_proxy") is not False]
     analysis_summary = project_payload.get("project", {}).get("analysis_summary", {})
+    timeline_items = list((project_payload.get("timeline") or {}).get("items", []) or [])
 
     lines = [
-        f"Assets: {len(assets)}",
-        f"Proxy-backed assets: {len(proxy_backed)}",
-        f"Source-only assets: {len(source_only)}",
-        "",
-        "Benchmark:",
+        "Run Overview:",
         f"Run ID: {benchmark.run_id}",
-        f"Total runtime: {format_runtime(benchmark.total_runtime_sec)}",
+        (
+            "Workload: "
+            f"{len(assets)} assets | "
+            f"{len(proxy_backed)} proxy-backed | "
+            f"{len(source_only)} source-only"
+        ),
     ]
+    if analysis_summary:
+        lines.append(
+            "Segments: "
+            f"{analysis_summary.get('candidate_segment_count', 0)} candidates | "
+            f"{analysis_summary.get('prefilter_shortlisted_count', 0)} shortlisted | "
+            f"{analysis_summary.get('vlm_target_count', 0)} VLM targets | "
+            f"{analysis_summary.get('filtered_before_vlm_count', 0)} deterministic-only"
+        )
+        lines.append(
+            "Audio: "
+            f"{analysis_summary.get('audio_signal_asset_count', 0)} with audio | "
+            f"{analysis_summary.get('audio_silent_asset_count', 0)} silent/no-audio"
+        )
+        if timeline_items:
+            lines.append(f"Timeline: {len(timeline_items)} items assembled")
+
     configured_ai_concurrency = benchmark.runtime_configuration.get("ai_concurrency")
     effective_ai_concurrency = benchmark.runtime_configuration.get("ai_effective_concurrency")
     ai_execution_context = str(benchmark.runtime_configuration.get("ai_execution_context", "")).strip()
     ai_provider = str(benchmark.runtime_configuration.get("ai_provider_effective", "")).strip()
+    configured_ai_provider = str(benchmark.runtime_configuration.get("ai_provider_configured", "")).strip()
     ai_cache_activity = classify_ai_cache_activity(workload_counts=benchmark.workload_counts)
     preprocessing_cache_activity = classify_preprocessing_cache_activity(workload_counts=benchmark.workload_counts)
+
+    runtime_stability = dict(benchmark.runtime_stability or {})
+    lines.extend(["", "Runtime Path:"])
     if ai_provider:
-        lines.append(f"AI provider: {ai_provider}")
-    if configured_ai_concurrency is not None and effective_ai_concurrency is not None:
         lines.append(
-            "AI execution: "
-            f"configured concurrency {configured_ai_concurrency}, "
-            f"effective concurrency {effective_ai_concurrency}"
-            + (f", {ai_execution_context}" if ai_execution_context else "")
+            "AI: "
+            f"configured {configured_ai_provider or ai_provider} -> effective {ai_provider}"
+            + (
+                f" | concurrency {configured_ai_concurrency}->{effective_ai_concurrency}"
+                if configured_ai_concurrency is not None and effective_ai_concurrency is not None
+                else ""
+            )
+            + (f" | {ai_execution_context}" if ai_execution_context else "")
         )
     lines.append(
-        "AI cache activity: "
-        f"{ai_cache_activity} "
-        f"({benchmark.workload_counts.get('ai_live_segment_count', 0)} live, "
-        f"{benchmark.workload_counts.get('ai_cached_segment_count', 0)} cached, "
-        f"{benchmark.workload_counts.get('ai_live_request_count', 0)} live requests)"
+        "AI workload: "
+        f"{benchmark.workload_counts.get('ai_live_segment_count', 0)} live | "
+        f"{benchmark.workload_counts.get('ai_cached_segment_count', 0)} cached | "
+        f"{benchmark.workload_counts.get('ai_fallback_segment_count', 0)} fallback | "
+        f"cache {ai_cache_activity}"
     )
     lines.append(
-        "Deterministic preprocessing cache: "
+        "Preprocessing cache: "
         f"{preprocessing_cache_activity} "
         f"({benchmark.workload_counts.get('deterministic_preprocessing_cache_hit_asset_count', 0)} reused, "
         f"{benchmark.workload_counts.get('deterministic_preprocessing_cache_rebuilt_asset_count', 0)} rebuilt)"
     )
-    if benchmark.phase_timings_sec:
-        for phase_name, label in PHASE_LABELS.items():
-            if phase_name in benchmark.phase_timings_sec:
-                lines.append(f"{label}: {format_runtime(benchmark.phase_timings_sec[phase_name])}")
+
+    if analysis_summary:
+        lines.append(
+            "Transcript: "
+            f"{analysis_summary.get('transcript_status', 'unknown')} "
+            f"via {analysis_summary.get('transcript_provider_effective', 'none')} | "
+            f"{analysis_summary.get('transcript_target_asset_count', 0)} targeted | "
+            f"{analysis_summary.get('transcript_cached_asset_count', 0)} cached | "
+            f"{analysis_summary.get('transcript_skipped_asset_count', 0)} skipped | "
+            f"{analysis_summary.get('transcript_probe_rejected_asset_count', 0)} probe rejections"
+        )
+        lines.append(
+            "Semantic: "
+            f"{analysis_summary.get('semantic_boundary_runtime_mode', 'inactive')} | "
+            f"{analysis_summary.get('semantic_boundary_request_count', 0)} requests | "
+            f"{analysis_summary.get('semantic_boundary_skipped_count', 0)} skipped"
+        )
+        clip_scored = int(analysis_summary.get("clip_scored_count", 0) or 0)
+        clip_gated = int(analysis_summary.get("clip_gated_count", 0) or 0)
+        if clip_scored > 0:
+            lines.append(f"CLIP: {clip_scored} scored | {clip_gated} gated")
+        if analysis_summary.get("story_assembly_active", False):
+            lines.append(
+                "Story assembly: "
+                f"{analysis_summary.get('story_assembly_strategy', 'unknown')} | "
+                f"{analysis_summary.get('story_assembly_mode_alternation_count', 0)} alternations | "
+                f"{analysis_summary.get('story_assembly_tradeoff_count', 0)} tradeoffs"
+            )
 
     if comparison is None:
-        lines.append("Benchmark comparison: no prior benchmark available")
+        comparison_line = "Comparison: no prior benchmark available"
     else:
-        lines.append(
-            "Benchmark comparison: "
+        comparison_line = (
+            "Comparison: "
             f"vs {comparison.baseline_run_id} "
             f"({format_runtime(comparison.baseline_total_runtime_sec)}) "
             f"{format_runtime_delta(comparison.total_runtime_delta_sec, comparison.total_runtime_delta_pct)}"
         )
-        for difference in comparison.context_differences:
-            lines.append(f"Comparison context: {difference}")
+    lines.extend(["", "Timing:", f"Total runtime: {format_runtime(benchmark.total_runtime_sec)}"])
+    if benchmark.phase_timings_sec:
+        lines.append("Phases: " + format_phase_summary(benchmark.phase_timings_sec))
+    lines.append(comparison_line)
+    if comparison is not None and comparison.context_differences:
+        lines.append("Context: " + "; ".join(comparison.context_differences[:3]))
 
-    runtime_stability = dict(benchmark.runtime_stability or {})
     if runtime_stability:
+        lines.extend(["", "Runtime Reliability:"])
         component_modes = dict(runtime_stability.get("component_modes") or {})
-        lines.extend(
-            [
-                "",
-                "Runtime reliability:",
-                f"Overall mode: {runtime_stability.get('overall_mode', 'unknown')}",
-                (
-                    "Component modes: "
-                    f"AI={component_modes.get('ai', 'unknown')}, "
-                    f"transcript={component_modes.get('transcript', 'unknown')}, "
-                    f"semantic={component_modes.get('semantic_boundary', 'unknown')}, "
-                    f"cache={component_modes.get('cache', 'unknown')}"
-                ),
-            ]
+        lines.append(
+            "Modes: "
+            f"overall {runtime_stability.get('overall_mode', 'unknown')} | "
+            f"AI {component_modes.get('ai', 'unknown')} | "
+            f"transcript {component_modes.get('transcript', 'unknown')} | "
+            f"semantic {component_modes.get('semantic_boundary', 'unknown')} | "
+            f"cache {component_modes.get('cache', 'unknown')}"
         )
         summary = str(runtime_stability.get("summary", "")).strip()
         if summary:
-            lines.append(f"Runtime summary: {summary}")
+            lines.append(f"Summary: {summary}")
         degraded_reasons = [str(item) for item in runtime_stability.get("degraded_reasons", []) or [] if str(item)]
         if degraded_reasons:
-            lines.append("Runtime degraded modes: " + "; ".join(degraded_reasons))
+            lines.append("Degraded: " + "; ".join(degraded_reasons))
         intentional_skip_reasons = [
             str(item) for item in runtime_stability.get("intentional_skip_reasons", []) or [] if str(item)
         ]
         if intentional_skip_reasons:
-            lines.append("Runtime intentional skips: " + "; ".join(intentional_skip_reasons))
+            lines.append("Intentional skips: " + "; ".join(intentional_skip_reasons))
 
-    if analysis_summary:
-        lines.extend(
-            [
-                "",
-                f"Prefilter sampled frames: {analysis_summary.get('prefilter_sample_count', 0)}",
-                (
-                    "Deterministic preprocessing reuse: "
-                    f"{analysis_summary.get('deterministic_preprocessing_cache_hit_asset_count', 0)} reused, "
-                    f"{analysis_summary.get('deterministic_preprocessing_cache_rebuilt_asset_count', 0)} rebuilt"
-                ),
-                f"Candidate segments: {analysis_summary.get('candidate_segment_count', 0)}",
-                f"Prefilter shortlisted: {analysis_summary.get('prefilter_shortlisted_count', 0)}",
-            ]
-        )
-
-        clip_scored = analysis_summary.get("clip_scored_count", 0)
-        clip_gated = analysis_summary.get("clip_gated_count", 0)
-        if clip_scored > 0:
-            lines.append(f"CLIP scored segments: {clip_scored}")
-            lines.append(f"CLIP gated segments: {clip_gated}")
-
-        clip_dedup_groups = analysis_summary.get("clip_dedup_group_count", 0)
-        clip_dedup_elim = analysis_summary.get("clip_dedup_eliminated_count", 0)
-        hist_dedup_groups = analysis_summary.get("histogram_dedup_group_count", 0)
-        hist_dedup_elim = analysis_summary.get("histogram_dedup_eliminated_count", 0)
-        generic_dedup_groups = analysis_summary.get("dedup_group_count", 0)
-        generic_dedup_elim = analysis_summary.get("dedup_eliminated_count", 0)
-
-        if clip_dedup_groups > 0:
-            lines.append(f"CLIP deduplication: {clip_dedup_elim} eliminated from {clip_dedup_groups} groups")
-        if hist_dedup_groups > 0:
-            lines.append(f"Histogram deduplication: {hist_dedup_elim} eliminated from {hist_dedup_groups} groups")
-        if clip_dedup_groups == 0 and hist_dedup_groups == 0:
-            lines.append(f"Deduplication: {generic_dedup_elim} eliminated from {generic_dedup_groups} groups")
-
-        lines.append(f"VLM target segments: {analysis_summary.get('vlm_target_count', 0)}")
-        vlm_budget_cap_pct = analysis_summary.get("vlm_budget_cap_pct", 100)
-        if vlm_budget_cap_pct < 100:
-            vlm_was_binding = analysis_summary.get("vlm_budget_was_binding", False)
-            vlm_target_pct = analysis_summary.get("vlm_target_pct_of_candidates", 0.0)
-            lines.append(f"VLM budget cap: {vlm_budget_cap_pct}% of candidates")
-            if vlm_was_binding:
-                lines.append(f"VLM budget was binding ({vlm_target_pct:.1f}% of all candidates selected)")
-
-        lines.append(f"Filtered before VLM: {analysis_summary.get('filtered_before_vlm_count', 0)}")
-        lines.append(f"Audio signal assets: {analysis_summary.get('audio_signal_asset_count', 0)}")
-        lines.append(f"Silent/no-audio assets: {analysis_summary.get('audio_silent_asset_count', 0)}")
-        lines.append(
-            "Transcript runtime: "
-            f"{analysis_summary.get('transcript_status', 'unknown')} "
-            f"({analysis_summary.get('transcript_provider_effective', 'none')})"
-        )
-        lines.append(f"Transcript-target assets: {analysis_summary.get('transcript_target_asset_count', 0)}")
-        lines.append(f"Transcript-skipped assets: {analysis_summary.get('transcript_skipped_asset_count', 0)}")
-        lines.append(f"Transcript-probed assets: {analysis_summary.get('transcript_probed_asset_count', 0)}")
-        lines.append(f"Transcript probe rejections: {analysis_summary.get('transcript_probe_rejected_asset_count', 0)}")
-        lines.append(f"Transcribed assets: {analysis_summary.get('transcribed_asset_count', 0)}")
-        lines.append(f"Transcript failures: {analysis_summary.get('transcript_failed_asset_count', 0)}")
-        lines.append(f"Transcript cache hits: {analysis_summary.get('transcript_cached_asset_count', 0)}")
-        lines.append(f"Transcript excerpt segments: {analysis_summary.get('transcript_excerpt_segment_count', 0)}")
-        lines.append(f"Speech fallback segments: {analysis_summary.get('speech_fallback_segment_count', 0)}")
-        if analysis_summary.get("speech_structure_segment_count", 0) > 0:
-            lines.append(
-                "Speech structure: "
-                f"{analysis_summary.get('speech_structure_segment_count', 0)} structured beats, "
-                f"{analysis_summary.get('speech_structure_question_answer_count', 0)} question/answer, "
-                f"{analysis_summary.get('speech_structure_monologue_count', 0)} monologue"
-            )
-        lines.append(
-            "Semantic boundary validation: "
-            f"{analysis_summary.get('semantic_boundary_validated_count', 0)} validated, "
-            f"{analysis_summary.get('semantic_boundary_applied_count', 0)} applied, "
-            f"{analysis_summary.get('semantic_boundary_noop_count', 0)} no-op"
-        )
-        lines.append(
-            f"Semantic boundary requests: {analysis_summary.get('semantic_boundary_request_count', 0)}"
-        )
-        lines.append(
-            "Semantic targeting: "
-            f"{analysis_summary.get('semantic_boundary_threshold_targeted_count', 0)} threshold, "
-            f"{analysis_summary.get('semantic_boundary_floor_targeted_count', 0)} floor, "
-            f"{analysis_summary.get('semantic_boundary_skipped_count', 0)} skipped"
-        )
-        if analysis_summary.get("story_assembly_active", False):
-            lines.append(
-                "Story assembly: "
-                f"{analysis_summary.get('story_assembly_strategy', 'unknown')}, "
-                f"{analysis_summary.get('story_assembly_mode_alternation_count', 0)} mode alternations, "
-                f"{analysis_summary.get('story_assembly_role_count', 0)} roles, "
-                f"{analysis_summary.get('story_assembly_prompt_fit_count', 0)} prompt-fit beats, "
-                f"{analysis_summary.get('story_assembly_tradeoff_count', 0)} tradeoffs"
-            )
-            lines.append(
-                "Story assembly repetition control: "
-                f"{analysis_summary.get('story_assembly_repetition_control_count', 0)} beats"
-            )
-            timeline_items = list((project_payload.get("timeline") or {}).get("items", []) or [])
-            if timeline_items:
-                opener = timeline_items[0]
-                release = timeline_items[-1]
-                lines.append(
-                    "Story assembly anchors: "
-                    f"open on {opener.get('source_reel', 'unknown')} ({opener.get('sequence_role', 'unknown')}), "
-                    f"release on {release.get('source_reel', 'unknown')} ({release.get('sequence_role', 'unknown')})"
-                )
-        lines.append(f"AI live segments: {analysis_summary.get('ai_live_segment_count', 0)}")
-        lines.append(f"AI cached segments: {analysis_summary.get('ai_cached_segment_count', 0)}")
-        lines.append(f"AI fallback segments: {analysis_summary.get('ai_fallback_segment_count', 0)}")
-        lines.append(f"AI live requests: {analysis_summary.get('ai_live_request_count', 0)}")
-
-    if source_only:
-        lines.extend(["", "Source-only clips:"])
-        for asset in source_only[:50]:
-            lines.append(f"- {asset['interchange_reel_name']} -> {asset['source_path']}")
-            reason = asset.get("proxy_match_reason")
-            if reason:
-                lines.append(f"  reason: {reason}")
+    lines.extend(
+        [
+            "",
+            "Artifacts:",
+            f"Project JSON: {benchmark.artifact_paths.get('project_json', '')}",
+            f"Process output: {benchmark.artifact_paths.get('process_output', '')}",
+            f"Process summary: {benchmark.artifact_paths.get('process_summary', '')}",
+            f"Benchmark JSON: {benchmark.artifact_paths.get('benchmark_json', '')}",
+        ]
+    )
 
     if vlm_debug_file and Path(vlm_debug_file).is_file():
-        lines.extend(["", f"VLM debug log: {vlm_debug_file}"])
+        lines.append(f"VLM debug log: {vlm_debug_file}")
 
     return lines
+
+
+def format_phase_summary(phase_timings_sec: dict[str, float]) -> str:
+    parts: list[str] = []
+    for phase_name, label in PHASE_LABELS.items():
+        if phase_name in phase_timings_sec:
+            parts.append(f"{label} {format_runtime(phase_timings_sec[phase_name])}")
+    return " | ".join(parts)
 
 
 def format_runtime(seconds: float) -> str:

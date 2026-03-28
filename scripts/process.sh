@@ -31,13 +31,18 @@ PROJECT_NAME="${TIMELINE_PROJECT_NAME:-Roughcut Stdio Project}"
 STORY_PROMPT="${TIMELINE_STORY_PROMPT:-Build a coherent rough cut from the strongest visual and spoken beats.}"
 
 if [ ! -e "$MEDIA_DIR" ]; then
-  echo "Missing media path at $MEDIA_DIR"
-  echo "Set TIMELINE_MEDIA_DIR to your footage path, or create the default repo media folder."
+  if [ -t 2 ]; then
+    printf '\033[31mERROR: Missing media path at %s\033[0m\n' "$MEDIA_DIR" >&2
+  else
+    printf 'ERROR: Missing media path at %s\n' "$MEDIA_DIR" >&2
+  fi
+  echo "Set TIMELINE_MEDIA_DIR to your footage path, or create the default repo media folder." >&2
   exit 1
 fi
 
 mkdir -p "${ROOT_DIR}/generated"
 : > "$PROCESS_OUTPUT_FILE"
+rm -f "$VLM_DEBUG_FILE"
 
 emit_output() {
   printf '%s\n' "$1" | tee -a "$PROCESS_OUTPUT_FILE"
@@ -70,13 +75,12 @@ RUN_BENCHMARK_FILE="${RUN_BENCHMARK_DIR}/benchmark.json"
 RUN_PROCESS_OUTPUT_FILE="${RUN_BENCHMARK_DIR}/process-output.txt"
 BENCHMARK_HISTORY_FILE="${BENCHMARK_ROOT}/history.jsonl"
 
-emit_output "Processing media from ${MEDIA_DIR}"
 "$PYTHON_BIN" services/analyzer/scripts/scan_media_root.py \
   "$PROJECT_NAME" \
   "$MEDIA_DIR" \
   "$STORY_PROMPT" \
-  > "$TMP_OUTPUT_JSON" \
-  2> >(tee -a "$PROCESS_OUTPUT_FILE" >&2)
+  --process-output-file "$PROCESS_OUTPUT_FILE" \
+  > "$TMP_OUTPUT_JSON"
 
 mv "$TMP_OUTPUT_JSON" "$OUTPUT_JSON"
 RUN_COMPLETED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -109,13 +113,6 @@ PY
   --vlm-debug-file "$VLM_DEBUG_FILE"
 
 emit_file "$SUMMARY_FILE"
-emit_output "Generated timeline project at $OUTPUT_JSON"
-emit_output "Process summary written to $SUMMARY_FILE"
-emit_output "Process benchmark written to $RUN_BENCHMARK_FILE"
-emit_output "Process benchmark history updated at $BENCHMARK_HISTORY_FILE"
-if [ -f "$VLM_DEBUG_FILE" ]; then
-  emit_output "VLM debug log written to $VLM_DEBUG_FILE"
-fi
 emit_output "Next:"
 emit_output "  npm run view"
 emit_output "  npm run export"

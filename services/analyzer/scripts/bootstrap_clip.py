@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""
-Bootstrap CLIP model by downloading and caching it locally.
+from __future__ import annotations
 
-This script is run during setup to ensure the CLIP model is available
-before the first process run. It downloads the default model and caches it
-so that process runs don't have to wait for model download.
-"""
-
-import sys
 import logging
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from services.analyzer.app.ai_runtime.config import load_ai_analysis_config  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -17,8 +19,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def bootstrap_clip():
-    """Download and cache the CLIP model."""
+def bootstrap_clip(*, model_name: str, pretrained: str) -> bool:
+    """Download and cache the configured CLIP model."""
     try:
         import open_clip
     except ImportError:
@@ -26,24 +28,36 @@ def bootstrap_clip():
         return False
 
     try:
-        logger.info("Downloading CLIP model: ViT-B-32 / laion2b_s34b_b79k")
+        logger.info("Downloading CLIP model: %s / %s", model_name, pretrained)
         logger.info("This may take a minute on first run...")
 
         # This will download and cache the model
-        model, _, transform = open_clip.create_model_and_transforms(
-            "ViT-B-32",
-            pretrained="laion2b_s34b_b79k",
+        open_clip.create_model_and_transforms(
+            model_name,
+            pretrained=pretrained,
         )
 
         logger.info("✓ CLIP model downloaded and cached successfully")
         logger.info("  Model is ready for semantic scoring during analysis")
         return True
-    except Exception as e:
-        logger.error(f"Failed to bootstrap CLIP model: {e}")
+    except Exception as exc:
+        logger.error("Failed to bootstrap CLIP model: %s", exc)
         logger.error("CLIP will attempt to download on first run, or you can retry setup")
         return False
 
 
+def main() -> int:
+    analysis_config = load_ai_analysis_config()
+    if not analysis_config.clip_enabled:
+        logger.info("CLIP bootstrap skipped because TIMELINE_AI_CLIP_ENABLED is disabled.")
+        return 0
+
+    success = bootstrap_clip(
+        model_name=analysis_config.clip_model,
+        pretrained=analysis_config.clip_model_pretrained,
+    )
+    return 0 if success else 1
+
+
 if __name__ == "__main__":
-    success = bootstrap_clip()
-    sys.exit(0 if success else 1)
+    raise SystemExit(main())

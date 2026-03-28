@@ -4,6 +4,12 @@ This document describes what the analyzer does when `npm run process` is run.
 
 The entry point is [process.sh](/Users/florin/Projects/personal/roughcut-stdio/scripts/process.sh). It loads `.env` and `.env.local`, invokes `services/analyzer/scripts/scan_media_root.py`, writes the result to `generated/project.json`, and persists latest-run logs and benchmark artifacts under `generated/`.
 
+Repository terminal runs now render in three operator-facing phases:
+
+- a segmented preflight block for runtime and asset readiness
+- a compact live progress line for interactive terminals
+- a concise completion recap plus persisted milestone output under `generated/process-output.txt`
+
 ## Overview
 
 The pipeline runs in four phases:

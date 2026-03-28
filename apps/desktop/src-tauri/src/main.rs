@@ -2053,6 +2053,7 @@ fn spawn_process_run(
 
     let _ = fs::remove_file(&generated_project_path);
     let _ = fs::remove_file(&tmp_generated_project_path);
+    let _ = fs::remove_file(&vlm_debug_path);
     fs::write(&process_output_path, "").map_err(|error| {
         format!(
             "Failed to initialize {}: {error}",
@@ -2075,6 +2076,8 @@ fn spawn_process_run(
         .arg(story_prompt)
         .arg("--artifacts-root")
         .arg(runtime.analysis_dir())
+        .arg("--process-output-file")
+        .arg(&process_output_path)
         .current_dir(runtime.command_working_dir())
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::piped());
@@ -2092,9 +2095,8 @@ fn spawn_process_run(
 
     let stderr_state = state.clone();
     let stderr_app = app.clone();
-    let capture_path = process_output_path.clone();
     let stderr_thread = thread::spawn(move || {
-        read_process_stream(stderr, Some(capture_path), &stderr_state, &stderr_app);
+        read_process_stream(stderr, None, &stderr_state, &stderr_app);
     });
 
     let status = child
@@ -2215,28 +2217,10 @@ fn summary_lines_after_process(
             lines.push(line.to_string());
         }
     }
-    lines.push(format!(
-        "Generated timeline project at {}",
-        generated_project_path.display()
-    ));
-    lines.push(format!(
-        "Process summary written to {}",
-        process_summary_path.display()
-    ));
-    lines.push(format!(
-        "Process benchmark written to {}",
-        benchmark_path.display()
-    ));
-    lines.push(format!(
-        "Process benchmark history updated at {}",
-        benchmark_history_path.display()
-    ));
-    if vlm_debug_path.exists() {
-        lines.push(format!(
-            "VLM debug log written to {}",
-            vlm_debug_path.display()
-        ));
-    }
+    let _ = generated_project_path;
+    let _ = benchmark_path;
+    let _ = benchmark_history_path;
+    let _ = vlm_debug_path;
     lines.push("Next:".into());
     lines.push("  npm run view".into());
     lines.push("  npm run export".into());

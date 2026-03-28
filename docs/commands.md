@@ -77,11 +77,18 @@ Generates:
 - `generated/project.json` with all results
 - `generated/process.log` with runtime/config diagnostics for the latest run
 - `generated/process-summary.txt` with the latest operational and benchmark summary
-- `generated/process-output.txt` with the exact terminal-facing output from the latest run
+- `generated/process-output.txt` with the latest persisted preflight, milestone, and completion output from the run
 - `generated/analysis/prefilter-cache/` with reusable deterministic preprocessing artifacts when analysis artifacts are enabled
 - `generated/benchmarks/history.jsonl` plus `generated/benchmarks/<run-id>/benchmark.json` for per-run benchmark history
 
 The generated process summary and benchmark JSON now preserve a normalized runtime reliability block so you can distinguish degraded execution, intentional skips, cache reuse, and capability changes when comparing repeated runs on the same dataset. They also record semantic boundary request volume, deterministic preprocessing reuse, AI cache activity, and configured-versus-effective AI execution context, so front-half warm runs and MLX-local serialization are visible in the same benchmark history.
+
+Interactive terminal runs now show:
+
+- a segmented preflight block for media, AI runtime, and transcript readiness
+- severity-highlighted warnings when model assets or runtime configuration are degraded
+- a single in-place progress line instead of per-asset scroll spam
+- a compact completion recap with workload, runtime path, timing, and artifact locations
 
 **Evaluate segmentation quality**:
 
@@ -199,15 +206,9 @@ TIMELINE_MEDIA_DIR=./media/test-clips TIMELINE_AI_CLIP_ENABLED=true npm run proc
 
 The dedup stats will be logged during the process step. Check `generated/project.json` to inspect `deduplicated` and `dedup_group_id` fields.
 
-### Debug a specific asset
+### Debug the analyzer directly
 
-Modify the analyzer to add logging or breakpoints, then run:
-
-```bash
-npm run process 2>&1 | grep -A5 "asset-name"
-```
-
-Or run the Python analyzer directly with pdb:
+Run the Python analyzer directly with pdb:
 
 ```bash
 python3 -m pdb services/analyzer/scripts/scan_media_root.py
