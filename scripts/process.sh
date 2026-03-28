@@ -48,10 +48,41 @@ emit_output() {
   printf '%s\n' "$1" | tee -a "$PROCESS_OUTPUT_FILE"
 }
 
+emit_summary_line() {
+  local line="$1"
+  printf '%s\n' "$line" >> "$PROCESS_OUTPUT_FILE"
+
+  if [ -t 1 ]; then
+    case "$line" in
+      Workload:*)
+        printf '\033[32m%s\033[0m\n' "$line"
+        ;;
+      Total\ runtime:*)
+        printf '\033[32m%s\033[0m\n' "$line"
+        ;;
+      $'\t'*)
+        printf '\033[32m%s\033[0m\n' "$line"
+        ;;
+      *)
+        printf '%s\n' "$line"
+        ;;
+    esac
+  else
+    printf '%s\n' "$line"
+  fi
+}
+
 emit_file() {
   local path="$1"
   while IFS= read -r line || [ -n "$line" ]; do
     emit_output "$line"
+  done < "$path"
+}
+
+emit_summary_file() {
+  local path="$1"
+  while IFS= read -r line || [ -n "$line" ]; do
+    emit_summary_line "$line"
   done < "$path"
 }
 
@@ -112,7 +143,7 @@ PY
   --media-dir-input "$MEDIA_DIR_INPUT" \
   --vlm-debug-file "$VLM_DEBUG_FILE"
 
-emit_file "$SUMMARY_FILE"
+emit_summary_file "$SUMMARY_FILE"
 emit_output "Next:"
 emit_output "  npm run view"
 emit_output "  npm run export"

@@ -685,7 +685,8 @@ def build_process_summary_lines(
         )
     lines.extend(["", "Timing:", f"Total runtime: {format_runtime(benchmark.total_runtime_sec)}"])
     if benchmark.phase_timings_sec:
-        lines.append("Phases: " + format_phase_summary(benchmark.phase_timings_sec))
+        lines.append("Phases:")
+        lines.extend(format_phase_summary_lines(benchmark.phase_timings_sec))
     lines.append(comparison_line)
     if comparison is not None and comparison.context_differences:
         lines.append("Context: " + "; ".join(comparison.context_differences[:3]))
@@ -730,12 +731,12 @@ def build_process_summary_lines(
     return lines
 
 
-def format_phase_summary(phase_timings_sec: dict[str, float]) -> str:
+def format_phase_summary_lines(phase_timings_sec: dict[str, float]) -> list[str]:
     parts: list[str] = []
     for phase_name, label in PHASE_LABELS.items():
         if phase_name in phase_timings_sec:
-            parts.append(f"{label} {format_runtime(phase_timings_sec[phase_name])}")
-    return " | ".join(parts)
+            parts.append(f"\t{label}: {format_runtime(phase_timings_sec[phase_name])}")
+    return parts
 
 
 def format_runtime(seconds: float) -> str:
