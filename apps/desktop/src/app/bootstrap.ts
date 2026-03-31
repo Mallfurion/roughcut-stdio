@@ -33,6 +33,7 @@ import {
 export function startDesktopApp(appRoot: HTMLDivElement) {
   const appState = createInitialAppState();
   let processPollTimer: number | null = null;
+  let renderScheduled = false;
 
   appRoot.addEventListener("click", (event) => {
     const target = event.target;
@@ -54,13 +55,13 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
 
     if (target instanceof HTMLSelectElement && target.dataset.action === "set-ai-mode") {
       setAIMode(target.value);
-      render();
+      scheduleRender();
       return;
     }
 
     if (target instanceof HTMLSelectElement && target.dataset.action === "set-results-order") {
       setResultsOrdering(target.value);
-      render();
+      scheduleRender();
       return;
     }
 
@@ -224,8 +225,38 @@ export function startDesktopApp(appRoot: HTMLDivElement) {
   }
 
   function render() {
-    appRoot.innerHTML = renderAppShell(appState);
-    syncProcessLogScroll();
+    try {
+      appRoot.innerHTML = renderAppShell(appState);
+      syncProcessLogScroll();
+    } catch (error) {
+      const message = stringifyError(error);
+      console.error("[roughcut-stdio] render failed", error);
+      appRoot.innerHTML = `
+        <main class="shell">
+          <section class="card view-card">
+            <div class="view-head">
+              <div>
+                <p class="eyebrow">Desktop error</p>
+                <h2>Render failed</h2>
+                <p class="muted">The app hit a frontend render error.</p>
+              </div>
+            </div>
+            <pre class="empty-state">${message}</pre>
+          </section>
+        </main>
+      `;
+    }
+  }
+
+  function scheduleRender() {
+    if (renderScheduled) {
+      return;
+    }
+    renderScheduled = true;
+    window.requestAnimationFrame(() => {
+      renderScheduled = false;
+      render();
+    });
   }
 
   function pushProcessLog(message: string) {

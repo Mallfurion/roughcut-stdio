@@ -8,12 +8,15 @@ export function renderSegmentCard(
   view: SegmentView,
   asset: Asset,
   expandedDetailPanelIds: string[],
-  options: { allowOverrides: boolean; reviewBusy: boolean; sourceLabel?: string } = {
+  options: { allowOverrides: boolean; reviewBusy: boolean; sourceLabel?: string; showImage?: boolean; compact?: boolean } = {
     allowOverrides: false,
-    reviewBusy: false
+    reviewBusy: false,
+    showImage: true,
+    compact: false,
   }
 ) {
   const { segment, recommendation, timelineItem } = view;
+  const compact = options.compact === true;
   const ai = segment.ai_understanding;
   const score = segment.prefilter?.score ?? 0;
   const clipScore = segment.prefilter?.metrics_snapshot?.["clip_score"];
@@ -59,7 +62,7 @@ export function renderSegmentCard(
   ].filter(Boolean);
   const tonalMeta = [ai?.shot_type, ai?.camera_motion, ai?.mood].filter(Boolean);
 
-  if (timelineItem?.sequence_rationale?.length) {
+  if (!compact && timelineItem?.sequence_rationale?.length) {
     detailPanels.push(
       renderDetailPanel({
         title: "Sequence",
@@ -74,7 +77,7 @@ export function renderSegmentCard(
     );
   }
 
-  if (provenanceFacts.length > 0) {
+  if (!compact && provenanceFacts.length > 0) {
     detailPanels.push(
       renderDetailPanel({
         title: "Provenance",
@@ -91,7 +94,7 @@ export function renderSegmentCard(
   }
 
   return `
-    <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}">
+    <article class="section-card ${review.outcomeClassName}${isDeduplicated ? " section-card--deduplicated" : ""}${compact ? " section-card--compact" : ""}">
       <div class="section-head section-head--compact">
         <div class="pill-row pill-row--primary">
           <span class="pill section-pill">${escapeHtml(formatSegmentRange(segment.start_sec, segment.end_sec))}</span>
@@ -141,14 +144,24 @@ export function renderSegmentCard(
         }
       </div>
       ${
-        imageSrc
+        !compact && imageSrc && options.showImage !== false
           ? `
       <div class="segment-visual">
-        <img class="segment-visual-image" src="${escapeHtml(imageSrc)}" alt="${escapeHtml(vlmText || "Segment visual summary")}" />
+        <img class="segment-visual-image" src="${escapeHtml(imageSrc)}" alt="${escapeHtml(vlmText || "Segment visual summary")}" loading="lazy" decoding="async" />
       </div>`
           : ""
       }
-      <p class="section-summary section-summary--hero">${escapeHtml(vlmText)}</p>
+      <p class="section-summary${compact ? "" : " section-summary--hero"}">${escapeHtml(vlmText)}</p>
+      ${
+        compact
+          ? `
+      <div class="score-hero score-hero--compact">
+        <span class="score-hero-label">Overall score</span>
+        <strong class="score-hero-value score-hero-value--compact">${escapeHtml(review.scoreValues.total)}</strong>
+        ${review.rankLabel ? `<span class="score-hero-rank">${escapeHtml(review.rankLabel)}</span>` : ""}
+        ${review.scoreGapLabel ? `<span class="score-hero-gap">${escapeHtml(review.scoreGapLabel)}</span>` : ""}
+      </div>`
+          : `
       <div class="score-panel">
         <div class="score-hero">
           <span class="score-hero-label">Overall score</span>
@@ -161,13 +174,22 @@ export function renderSegmentCard(
           ${renderScoreBar("Semantic", review.scoreValues.semantic)}
           ${renderScoreBar("Story", review.scoreValues.story)}
         </div>
-      </div>
-      ${quietFacts.length > 0 ? `<div class="meta-list section-facts">${quietFacts.map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>` : ""}
-      ${detailPanels.length > 0 ? `<div class="section-detail-grid${detailPanels.length === 1 ? " section-detail-grid--single" : ""}">${detailPanels.join("")}</div>` : ""}
-      <div class="meta-list section-meta">
+      </div>`
+      }
+      ${
+        quietFacts.length > 0
+          ? `<div class="meta-list section-facts">${(compact ? quietFacts.slice(0, 4) : quietFacts).map((fact) => `<span>${escapeHtml(fact)}</span>`).join("")}</div>`
+          : ""
+      }
+      ${!compact && detailPanels.length > 0 ? `<div class="section-detail-grid${detailPanels.length === 1 ? " section-detail-grid--single" : ""}">${detailPanels.join("")}</div>` : ""}
+      ${
+        compact
+          ? ""
+          : `<div class="meta-list section-meta">
         ${tonalMeta.map(renderOptionalMeta).join("")}
         ${renderAudioMetrics(segment.prefilter?.metrics_snapshot ?? {})}
-      </div>
+      </div>`
+      }
     </article>
   `;
 }

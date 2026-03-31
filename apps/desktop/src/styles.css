@@ -731,6 +731,47 @@ h2 {
   padding: 20px;
 }
 
+.section-card--compact {
+  display: grid;
+  gap: 14px;
+}
+
+.section-card--ranked-row {
+  padding: 16px 18px;
+}
+
+.ranked-row-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+}
+
+.ranked-row-copy {
+  min-width: 0;
+}
+
+.ranked-row-summary {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.ranked-row-facts {
+  margin-top: 10px;
+}
+
+.ranked-row-score {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 72px;
+}
+
+.ranked-row-actions {
+  margin-top: 12px;
+}
+
 .section-head--compact {
   margin-bottom: 0;
 }
@@ -1017,6 +1058,11 @@ h2 {
   background: radial-gradient(circle at top left, rgba(95, 209, 166, 0.14), transparent 50%), rgba(95, 209, 166, 0.06);
 }
 
+.score-hero--compact {
+  gap: 4px;
+  padding: 14px 16px;
+}
+
 .score-hero-label,
 .score-bar-head span {
   color: var(--muted);
@@ -1029,6 +1075,10 @@ h2 {
   font-size: 3rem;
   line-height: 0.95;
   letter-spacing: -0.05em;
+}
+
+.score-hero-value--compact {
+  font-size: 2rem;
 }
 
 .score-hero-rank,
@@ -1113,6 +1163,14 @@ h2 {
 
   .score-panel {
     grid-template-columns: 1fr;
+  }
+
+  .ranked-row-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ranked-row-score {
+    justify-items: start;
   }
 
   .review-summary,

@@ -299,6 +299,8 @@ test("renderResultsStep switches to a flat score-ranked view when requested", ()
   assert.match(html, /ranked-segment-list/);
   assert.match(html, /Overall 80/);
   assert.match(html, /Clip A · A001/);
+  assert.match(html, /segment-1\.jpg/);
+  assert.match(html, /segment-2\.jpg/);
   assert.match(
     html,
     /class="results-order-row"[\s\S]*data-action="toggle-all-clips"[\s\S]*class="icon-button results-expand-button"[\s\S]*disabled/,
